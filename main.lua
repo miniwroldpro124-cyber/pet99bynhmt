@@ -1,11 +1,63 @@
 --[[
-    PS99 Delta Full Auto v2
+    PS99 Delta Full Auto v3
     target: Pet Simulator 99
     executor: Delta
     author: outcome for He
-
-    defensive build — no WaitForChild hangs, on-screen debug, gethui support
+    
+    v3: loading stages, on-screen progress, prints at every step
 ]]
+
+-- ═══════════════════════════════════════════
+-- LOADING UI (appears first, before anything else)
+-- ═══════════════════════════════════════════
+
+local parent = (gethui and gethui()) or game:GetService("CoreGui")
+
+local LoadGui = Instance.new("ScreenGui")
+LoadGui.Name = "PS99Loading"
+LoadGui.ResetOnSpawn = false
+LoadGui.Parent = parent
+
+local loadFrame = Instance.new("Frame")
+loadFrame.Size = UDim2.new(0, 260, 0, 90)
+loadFrame.Position = UDim2.new(0.5, -130, 0.5, -45)
+loadFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 26)
+loadFrame.BorderSizePixel = 0
+loadFrame.Parent = LoadGui
+
+local loadTitle = Instance.new("TextLabel")
+loadTitle.Size = UDim2.new(1, -20, 0, 28)
+loadTitle.Position = UDim2.new(0, 10, 0, 8)
+loadTitle.BackgroundTransparency = 1
+loadTitle.TextColor3 = Color3.fromRGB(0, 200, 255)
+loadTitle.Text = "PS99 Delta Full — loading"
+loadTitle.Font = Enum.Font.GothamBold
+loadTitle.TextSize = 14
+loadTitle.TextXAlignment = Enum.TextXAlignment.Left
+loadTitle.Parent = loadFrame
+
+local loadStatus = Instance.new("TextLabel")
+loadStatus.Size = UDim2.new(1, -20, 0, 44)
+loadStatus.Position = UDim2.new(0, 10, 0, 38)
+loadStatus.BackgroundTransparency = 1
+loadStatus.TextColor3 = Color3.fromRGB(180, 220, 180)
+loadStatus.Text = "starting..."
+loadStatus.Font = Enum.Font.Code
+loadStatus.TextSize = 12
+loadStatus.TextXAlignment = Enum.TextXAlignment.Left
+loadStatus.TextYAlignment = Enum.TextYAlignment.Top
+loadStatus.TextWrapped = true
+loadStatus.Parent = loadFrame
+
+local function stage(msg)
+    print("[PS99] " .. msg)
+    if loadStatus then
+        loadStatus.Text = msg
+    end
+    task.wait(0.05)
+end
+
+stage("1. script start")
 
 -- ═══════════════════════════════════════════
 -- CONFIG
@@ -32,6 +84,8 @@ local config = {
     debug           = true,
 }
 
+stage("2. config loaded")
+
 -- ═══════════════════════════════════════════
 -- SERVICES
 -- ═══════════════════════════════════════════
@@ -44,20 +98,39 @@ local TeleportService      = game:GetService("TeleportService")
 local HttpService          = game:GetService("HttpService")
 local StarterGui           = game:GetService("StarterGui")
 
-local LocalPlayer = Players.LocalPlayer
-local Character   = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart", 5)
-local Camera      = workspace.CurrentCamera
+stage("3. services loaded")
 
--- defensive refs — no hangs
+local LocalPlayer = Players.LocalPlayer
+stage("4. LocalPlayer: " .. tostring(LocalPlayer))
+
+local Character   = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+stage("5. Character: " .. tostring(Character))
+
+local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart", 5)
+stage("6. HRP: " .. tostring(HumanoidRootPart))
+
+local Camera = workspace.CurrentCamera
+stage("7. Camera: " .. tostring(Camera))
+
+-- ═══════════════════════════════════════════
+-- DEFENSIVE REFS
+-- ═══════════════════════════════════════════
+
 local Things      = workspace:FindFirstChild("__THINGS")
+stage("8. __THINGS: " .. tostring(Things))
+
 local Breakables  = Things and Things:FindFirstChild("Breakables")
+stage("9. Breakables: " .. tostring(Breakables))
+
 local Orbs        = Things and Things:FindFirstChild("Orbs")
 local Lootbags    = Things and Things:FindFirstChild("Lootbags")
 local Pets        = Things and Things:FindFirstChild("Pets")
-local Network     = ReplicatedStorage:FindFirstChild("Network")
+stage("10. Pets: " .. tostring(Pets))
 
--- re-scan every few seconds in case they spawn late
+local Network     = ReplicatedStorage:FindFirstChild("Network")
+stage("11. Network: " .. tostring(Network))
+
+-- re-scan loop
 task.spawn(function()
     while task.wait(3) do
         if not Things then Things = workspace:FindFirstChild("__THINGS") end
@@ -75,6 +148,8 @@ LocalPlayer.CharacterAdded:Connect(function(char)
     Character = char
     HumanoidRootPart = char:WaitForChild("HumanoidRootPart", 5)
 end)
+
+stage("12. refs + rescan ready")
 
 -- ═══════════════════════════════════════════
 -- UTILITY
@@ -144,12 +219,13 @@ local function clickPart(part)
     return false
 end
 
+stage("13. utility ready")
+
 -- ═══════════════════════════════════════════
 -- FEATURES
 -- ═══════════════════════════════════════════
 
 local petSpeedThread = nil
-
 local function startPetSpeed()
     if petSpeedThread then return end
     petSpeedThread = task.spawn(function()
@@ -170,15 +246,12 @@ local function startPetSpeed()
 end
 
 local tapThread = nil
-
 local function startTap()
     if tapThread then return end
     tapThread = task.spawn(function()
         while config.autoTap do
             local target = nearestBreakable()
-            if target then
-                clickPart(target)
-            end
+            if target then clickPart(target) end
             task.wait(config.tapDelay)
         end
         tapThread = nil
@@ -186,7 +259,6 @@ local function startTap()
 end
 
 local farmThread = nil
-
 local function startFarm()
     if farmThread then return end
     farmThread = task.spawn(function()
@@ -198,12 +270,8 @@ local function startFarm()
             local target = nearestBreakable()
             if target and HumanoidRootPart then
                 HumanoidRootPart.CFrame = target.CFrame * CFrame.new(0, 3, 0)
-                if config.useRemote then
-                    fireRemote("HitBreakable", target.Parent)
-                end
-                if config.useClick then
-                    clickPart(target)
-                end
+                if config.useRemote then fireRemote("HitBreakable", target.Parent) end
+                if config.useClick then clickPart(target) end
                 fireRemote("CollectOrb")
                 fireRemote("CollectLootbag")
             end
@@ -214,7 +282,6 @@ local function startFarm()
 end
 
 local hopThread = nil
-
 local function getLowServers(placeId, maxCount)
     local url = "https://games.roblox.com/v1/games/" .. placeId .. "/servers/Public?limit=100"
     local ok, res = pcall(function() return game:HttpGet(url) end)
@@ -229,7 +296,6 @@ local function getLowServers(placeId, maxCount)
     end
     return out
 end
-
 local function startHop()
     if hopThread then return end
     hopThread = task.spawn(function()
@@ -320,23 +386,24 @@ local function startBestWorld()
     end)
 end
 
--- anti-afk
 LocalPlayer.Idled:Connect(function()
     VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
     task.wait(0.1)
     VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
 end)
 
+stage("14. features ready")
+
 -- ═══════════════════════════════════════════
 -- GUI
 -- ═══════════════════════════════════════════
-
-local parent = (gethui and gethui()) or game:GetService("CoreGui")
 
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "PS99DeltaFull"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.Parent = parent
+
+stage("15. main ScreenGui created")
 
 local toggleBtn = Instance.new("TextButton")
 toggleBtn.Size = UDim2.new(0, 56, 0, 56)
@@ -347,6 +414,8 @@ toggleBtn.Text = "P"
 toggleBtn.TextSize = 26
 toggleBtn.Font = Enum.Font.GothamBold
 toggleBtn.Parent = ScreenGui
+
+stage("16. toggle button created")
 
 local mainFrame = Instance.new("Frame")
 mainFrame.Size = UDim2.new(0, 280, 0, 420)
@@ -390,6 +459,8 @@ scroll.ScrollBarImageColor3 = Color3.fromRGB(0, 150, 200)
 scroll.CanvasSize = UDim2.new(0, 0, 0, 520)
 scroll.Parent = mainFrame
 
+stage("17. main frame + scroll built")
+
 local yPos = 0
 local function makeToggle(label, toggler)
     local btn = Instance.new("TextButton")
@@ -414,7 +485,7 @@ local function makeToggle(label, toggler)
     scroll.CanvasSize = UDim2.new(0, 0, 0, yPos + 8)
 end
 
--- drag toggle
+-- drag toggle button
 local dragging, dragStart, startPos
 toggleBtn.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -460,6 +531,8 @@ title.InputEnded:Connect(function(input)
     end
 end)
 
+stage("18. drag handlers attached")
+
 -- toggles
 makeToggle("Infinite Pet Speed", function(on)
     config.petSpeed = on
@@ -501,7 +574,9 @@ makeToggle("Antiban (jitter)", function(on)
     config.antiban = on
 end)
 
--- debug panel toggle
+stage("19. toggles built")
+
+-- debug panel
 makeToggle("Debug Info", function(on)
     config.debug = on
     local existing = parent:FindFirstChild("PS99Debug")
@@ -512,8 +587,8 @@ makeToggle("Debug Info", function(on)
         dbg.Parent = parent
 
         local box = Instance.new("Frame")
-        box.Size = UDim2.new(0, 240, 0, 120)
-        box.Position = UDim2.new(0, 10, 1, -140)
+        box.Size = UDim2.new(0, 240, 0, 140)
+        box.Position = UDim2.new(0, 10, 1, -160)
         box.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
         box.BackgroundTransparency = 0.3
         box.Parent = dbg
@@ -553,7 +628,13 @@ makeToggle("Debug Info", function(on)
     end
 end)
 
--- startup notify
+stage("20. done")
+
+-- remove loading overlay after 2s
+task.delay(2, function()
+    if LoadGui then LoadGui:Destroy() end
+end)
+
 pcall(function()
     StarterGui:SetCore("SendNotification", {
         Title = "PS99 Delta Full",
