@@ -1,15 +1,7 @@
 --[[
-    PS99 Delta Full Auto v3
-    target: Pet Simulator 99
-    executor: Delta
-    author: outcome for He
-    
-    v3: loading stages, on-screen progress, prints at every step
+    PS99 Delta Full Auto v4
+    error capture build — shows any failure on screen
 ]]
-
--- ═══════════════════════════════════════════
--- LOADING UI (appears first, before anything else)
--- ═══════════════════════════════════════════
 
 local parent = (gethui and gethui()) or game:GetService("CoreGui")
 
@@ -19,28 +11,28 @@ LoadGui.ResetOnSpawn = false
 LoadGui.Parent = parent
 
 local loadFrame = Instance.new("Frame")
-loadFrame.Size = UDim2.new(0, 260, 0, 90)
-loadFrame.Position = UDim2.new(0.5, -130, 0.5, -45)
+loadFrame.Size = UDim2.new(0, 280, 0, 110)
+loadFrame.Position = UDim2.new(0.5, -140, 0.5, -55)
 loadFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 26)
 loadFrame.BorderSizePixel = 0
 loadFrame.Parent = LoadGui
 
 local loadTitle = Instance.new("TextLabel")
-loadTitle.Size = UDim2.new(1, -20, 0, 28)
-loadTitle.Position = UDim2.new(0, 10, 0, 8)
+loadTitle.Size = UDim2.new(1, -20, 0, 26)
+loadTitle.Position = UDim2.new(0, 10, 0, 6)
 loadTitle.BackgroundTransparency = 1
 loadTitle.TextColor3 = Color3.fromRGB(0, 200, 255)
-loadTitle.Text = "PS99 Delta Full — loading"
+loadTitle.Text = "PS99 — loading"
 loadTitle.Font = Enum.Font.GothamBold
 loadTitle.TextSize = 14
 loadTitle.TextXAlignment = Enum.TextXAlignment.Left
 loadTitle.Parent = loadFrame
 
 local loadStatus = Instance.new("TextLabel")
-loadStatus.Size = UDim2.new(1, -20, 0, 44)
-loadStatus.Position = UDim2.new(0, 10, 0, 38)
+loadStatus.Size = UDim2.new(1, -20, 0, 70)
+loadStatus.Position = UDim2.new(0, 10, 0, 34)
 loadStatus.BackgroundTransparency = 1
-loadStatus.TextColor3 = Color3.fromRGB(180, 220, 180)
+loadStatus.TextColor3 = Color3.fromRGB(200, 220, 200)
 loadStatus.Text = "starting..."
 loadStatus.Font = Enum.Font.Code
 loadStatus.TextSize = 12
@@ -49,15 +41,15 @@ loadStatus.TextYAlignment = Enum.TextYAlignment.Top
 loadStatus.TextWrapped = true
 loadStatus.Parent = loadFrame
 
-local function stage(msg)
-    print("[PS99] " .. msg)
-    if loadStatus then
-        loadStatus.Text = msg
-    end
-    task.wait(0.05)
+local function setStatus(msg)
+    pcall(function()
+        loadStatus.Text = tostring(msg)
+    end)
 end
 
-stage("1. script start")
+local ok, err = pcall(function()
+
+setStatus("1. start")
 
 -- ═══════════════════════════════════════════
 -- CONFIG
@@ -73,7 +65,6 @@ local config = {
     autoBuyMap      = false,
     autoTeleBest    = false,
     autoBestWorld   = false,
-
     maxPlayers      = 4,
     hopInterval     = 30,
     farmDelay       = 0.05,
@@ -84,7 +75,7 @@ local config = {
     debug           = true,
 }
 
-stage("2. config loaded")
+setStatus("2. config ok")
 
 -- ═══════════════════════════════════════════
 -- SERVICES
@@ -98,39 +89,26 @@ local TeleportService      = game:GetService("TeleportService")
 local HttpService          = game:GetService("HttpService")
 local StarterGui           = game:GetService("StarterGui")
 
-stage("3. services loaded")
-
 local LocalPlayer = Players.LocalPlayer
-stage("4. LocalPlayer: " .. tostring(LocalPlayer))
+setStatus("3. services ok")
 
 local Character   = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-stage("5. Character: " .. tostring(Character))
-
 local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart", 5)
-stage("6. HRP: " .. tostring(HumanoidRootPart))
-
 local Camera = workspace.CurrentCamera
-stage("7. Camera: " .. tostring(Camera))
+setStatus("4. char + camera ok")
 
 -- ═══════════════════════════════════════════
--- DEFENSIVE REFS
+-- REFS
 -- ═══════════════════════════════════════════
 
 local Things      = workspace:FindFirstChild("__THINGS")
-stage("8. __THINGS: " .. tostring(Things))
-
 local Breakables  = Things and Things:FindFirstChild("Breakables")
-stage("9. Breakables: " .. tostring(Breakables))
-
 local Orbs        = Things and Things:FindFirstChild("Orbs")
 local Lootbags    = Things and Things:FindFirstChild("Lootbags")
 local Pets        = Things and Things:FindFirstChild("Pets")
-stage("10. Pets: " .. tostring(Pets))
-
 local Network     = ReplicatedStorage:FindFirstChild("Network")
-stage("11. Network: " .. tostring(Network))
+setStatus("5. refs: Things=" .. tostring(Things ~= nil) .. " Network=" .. tostring(Network ~= nil))
 
--- re-scan loop
 task.spawn(function()
     while task.wait(3) do
         if not Things then Things = workspace:FindFirstChild("__THINGS") end
@@ -149,7 +127,62 @@ LocalPlayer.CharacterAdded:Connect(function(char)
     HumanoidRootPart = char:WaitForChild("HumanoidRootPart", 5)
 end)
 
-stage("12. refs + rescan ready")
+setStatus("6. rescan started")
+
+-- ═══════════════════════════════════════════
+-- ANTIBAN
+-- ═══════════════════════════════════════════
+
+local antiban = {
+    enabled     = true,
+    lastFire    = {},
+    cooldowns   = {},
+    pauseMin    = 1.5,
+    pauseMax    = 4.0,
+    pauseChance = 0.02,
+    jitterMin   = 0.7,
+    jitterMax   = 1.6,
+    clickSpread = 8,
+    interpolate = true,
+}
+
+local function setCooldown(n, s) antiban.cooldowns[n] = s end
+local function canFire(n)
+    if not antiban.enabled then return true end
+    local last = antiban.lastFire[n]
+    if not last then return true end
+    return (tick() - last) >= (antiban.cooldowns[n] or 0.1)
+end
+local function markFired(n) antiban.lastFire[n] = tick() end
+local function jitterDelay(base)
+    if not antiban.enabled then return base end
+    return base * (antiban.jitterMin + math.random() * (antiban.jitterMax - antiban.jitterMin))
+end
+local function humanPauseCheck()
+    if not antiban.enabled then return end
+    if math.random() < antiban.pauseChance then
+        task.wait(antiban.pauseMin + math.random() * (antiban.pauseMax - antiban.pauseMin))
+    end
+end
+local function randomClickOffset()
+    if not antiban.enabled then return 0, 0 end
+    local r = antiban.clickSpread
+    return (math.random() * 2 - 1) * r, (math.random() * 2 - 1) * r
+end
+local function smoothMove(targetCFrame)
+    if not HumanoidRootPart or not HumanoidRootPart.Parent then return end
+    if not antiban.enabled or not antiban.interpolate then
+        HumanoidRootPart.CFrame = targetCFrame
+        return
+    end
+    local start = HumanoidRootPart.CFrame
+    for i = 1, 4 do
+        HumanoidRootPart.CFrame = start:Lerp(targetCFrame, i / 4)
+        task.wait(0.02)
+    end
+end
+
+setStatus("7. antiban ready")
 
 -- ═══════════════════════════════════════════
 -- UTILITY
@@ -157,26 +190,18 @@ stage("12. refs + rescan ready")
 
 local function xzDist(a, b)
     if not a or not b then return math.huge end
-    local ap, bp = a.Position, b.Position
-    local dx, dz = ap.X - bp.X, ap.Z - bp.Z
+    local dx = a.Position.X - b.Position.X
+    local dz = a.Position.Z - b.Position.Z
     return math.sqrt(dx * dx + dz * dz)
-end
-
-local function jitterWait(base)
-    if config.antiban then
-        task.wait(base + math.random() * base * 0.5)
-    else
-        task.wait(base)
-    end
 end
 
 local function fireRemote(name, ...)
     if not Network then return false end
+    if not canFire(name) then return false end
     local remote = Network:FindFirstChild(name)
     if not remote then return false end
-    pcall(function()
-        remote:FireServer(...)
-    end)
+    pcall(function() remote:FireServer(...) end)
+    markFired(name)
     return true
 end
 
@@ -196,9 +221,7 @@ local function nearestBreakable()
         local hb = getHitbox(obj)
         if hb then
             local d = xzDist(hb, HumanoidRootPart)
-            if d < bestDist then
-                best, bestDist = hb, d
-            end
+            if d < bestDist then best, bestDist = hb, d end
         end
     end
     return best
@@ -213,13 +236,24 @@ end
 local function clickPart(part)
     local pos, onScreen = Camera:WorldToScreenPoint(part.Position)
     if onScreen then
-        clickAt(pos.X, pos.Y)
+        local ox, oy = randomClickOffset()
+        clickAt(pos.X + ox, pos.Y + oy)
         return true
     end
     return false
 end
 
-stage("13. utility ready")
+setStatus("8. utility ready")
+
+setCooldown("HitBreakable", 0.15)
+setCooldown("CollectOrb", 0.5)
+setCooldown("CollectLootbag", 0.5)
+setCooldown("BuyPetSlot", 8)
+setCooldown("BuyEggSlot", 8)
+setCooldown("BuyArea", 12)
+setCooldown("UnlockArea", 12)
+setCooldown("TeleportToBestArea", 20)
+setCooldown("TeleportToBestWorld", 25)
 
 -- ═══════════════════════════════════════════
 -- FEATURES
@@ -234,12 +268,10 @@ local function startPetSpeed()
                 local rootCF = HumanoidRootPart.CFrame
                 for _, pet in ipairs(Pets:GetChildren()) do
                     local hrp = pet:FindFirstChild("HumanoidRootPart")
-                    if hrp then
-                        hrp.CFrame = rootCF * CFrame.new(0, 0, -3)
-                    end
+                    if hrp then hrp.CFrame = rootCF * CFrame.new(0, 0, -3) end
                 end
             end
-            task.wait(0.03)
+            task.wait(jitterDelay(0.03))
         end
         petSpeedThread = nil
     end)
@@ -252,7 +284,8 @@ local function startTap()
         while config.autoTap do
             local target = nearestBreakable()
             if target then clickPart(target) end
-            task.wait(config.tapDelay)
+            humanPauseCheck()
+            task.wait(jitterDelay(config.tapDelay))
         end
         tapThread = nil
     end)
@@ -269,13 +302,14 @@ local function startFarm()
             end
             local target = nearestBreakable()
             if target and HumanoidRootPart then
-                HumanoidRootPart.CFrame = target.CFrame * CFrame.new(0, 3, 0)
+                smoothMove(target.CFrame * CFrame.new(0, 3, 0))
                 if config.useRemote then fireRemote("HitBreakable", target.Parent) end
                 if config.useClick then clickPart(target) end
                 fireRemote("CollectOrb")
                 fireRemote("CollectLootbag")
             end
-            task.wait(config.farmDelay)
+            humanPauseCheck()
+            task.wait(jitterDelay(config.farmDelay))
         end
         farmThread = nil
     end)
@@ -290,9 +324,7 @@ local function getLowServers(placeId, maxCount)
     if not ok2 or not data or not data.data then return {} end
     local out = {}
     for _, s in ipairs(data.data) do
-        if s.playing < maxCount and s.id ~= game.JobId then
-            table.insert(out, s)
-        end
+        if s.playing < maxCount and s.id ~= game.JobId then table.insert(out, s) end
     end
     return out
 end
@@ -323,7 +355,7 @@ local function startBuyPetSlot()
             fireRemote("BuyPetSlot")
             fireRemote("PurchasePetSlot")
             fireRemote("BuyPetEquipSlot")
-            jitterWait(5)
+            task.wait(jitterDelay(5))
         end
         petSlotThread = nil
     end)
@@ -337,7 +369,7 @@ local function startBuyEggSlot()
             fireRemote("BuyEggSlot")
             fireRemote("PurchaseEggSlot")
             fireRemote("BuyEggBundleSlot")
-            jitterWait(5)
+            task.wait(jitterDelay(5))
         end
         eggSlotThread = nil
     end)
@@ -352,7 +384,7 @@ local function startBuyMap()
             fireRemote("UnlockArea")
             fireRemote("PurchaseArea")
             fireRemote("BuyNextArea")
-            jitterWait(10)
+            task.wait(jitterDelay(10))
         end
         buyMapThread = nil
     end)
@@ -366,7 +398,7 @@ local function startTeleBest()
             fireRemote("TeleportToBestArea")
             fireRemote("TeleportBestArea")
             fireRemote("BestArea")
-            jitterWait(15)
+            task.wait(jitterDelay(15))
         end
         teleBestThread = nil
     end)
@@ -380,7 +412,7 @@ local function startBestWorld()
             fireRemote("TeleportToBestWorld")
             fireRemote("BestWorld")
             fireRemote("AutoBestWorld")
-            jitterWait(20)
+            task.wait(jitterDelay(20))
         end
         bestWorldThread = nil
     end)
@@ -392,7 +424,7 @@ LocalPlayer.Idled:Connect(function()
     VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
 end)
 
-stage("14. features ready")
+setStatus("9. features ready")
 
 -- ═══════════════════════════════════════════
 -- GUI
@@ -403,7 +435,7 @@ ScreenGui.Name = "PS99DeltaFull"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.Parent = parent
 
-stage("15. main ScreenGui created")
+setStatus("10. ScreenGui")
 
 local toggleBtn = Instance.new("TextButton")
 toggleBtn.Size = UDim2.new(0, 56, 0, 56)
@@ -415,8 +447,6 @@ toggleBtn.TextSize = 26
 toggleBtn.Font = Enum.Font.GothamBold
 toggleBtn.Parent = ScreenGui
 
-stage("16. toggle button created")
-
 local mainFrame = Instance.new("Frame")
 mainFrame.Size = UDim2.new(0, 280, 0, 420)
 mainFrame.Position = UDim2.new(0.5, -140, 0.5, -210)
@@ -424,6 +454,8 @@ mainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 26)
 mainFrame.BorderSizePixel = 0
 mainFrame.Visible = false
 mainFrame.Parent = ScreenGui
+
+setStatus("11. main frame")
 
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -40, 0, 34)
@@ -445,9 +477,7 @@ closeBtn.Text = "X"
 closeBtn.Font = Enum.Font.GothamBold
 closeBtn.TextSize = 14
 closeBtn.Parent = mainFrame
-closeBtn.MouseButton1Click:Connect(function()
-    mainFrame.Visible = false
-end)
+closeBtn.MouseButton1Click:Connect(function() mainFrame.Visible = false end)
 
 local scroll = Instance.new("ScrollingFrame")
 scroll.Size = UDim2.new(1, -12, 1, -42)
@@ -459,7 +489,7 @@ scroll.ScrollBarImageColor3 = Color3.fromRGB(0, 150, 200)
 scroll.CanvasSize = UDim2.new(0, 0, 0, 520)
 scroll.Parent = mainFrame
 
-stage("17. main frame + scroll built")
+setStatus("12. scroll ready")
 
 local yPos = 0
 local function makeToggle(label, toggler)
@@ -472,7 +502,6 @@ local function makeToggle(label, toggler)
     btn.TextSize = 13
     btn.Text = label .. "  ·  OFF"
     btn.Parent = scroll
-
     local active = false
     btn.MouseButton1Click:Connect(function()
         active = not active
@@ -480,49 +509,41 @@ local function makeToggle(label, toggler)
         btn.BackgroundColor3 = active and Color3.fromRGB(0, 80, 100) or Color3.fromRGB(36, 36, 48)
         toggler(active)
     end)
-
     yPos = yPos + 38
     scroll.CanvasSize = UDim2.new(0, 0, 0, yPos + 8)
 end
 
--- drag toggle button
+-- drag
 local dragging, dragStart, startPos
 toggleBtn.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-        dragging = true
-        dragStart = input.Position
-        startPos = toggleBtn.Position
+        dragging = true; dragStart = input.Position; startPos = toggleBtn.Position
     end
 end)
 toggleBtn.InputChanged:Connect(function(input)
     if dragging and (input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) then
-        local delta = input.Position - dragStart
-        toggleBtn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        local d = input.Position - dragStart
+        toggleBtn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
     end
 end)
 toggleBtn.InputEnded:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
         dragging = false
         local moved = math.abs(input.Position.X - dragStart.X) + math.abs(input.Position.Y - dragStart.Y)
-        if moved < 10 then
-            mainFrame.Visible = not mainFrame.Visible
-        end
+        if moved < 10 then mainFrame.Visible = not mainFrame.Visible end
     end
 end)
 
--- drag main frame
 local fDrag, fStart, fPos
 title.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-        fDrag = true
-        fStart = input.Position
-        fPos = mainFrame.Position
+        fDrag = true; fStart = input.Position; fPos = mainFrame.Position
     end
 end)
 title.InputChanged:Connect(function(input)
     if fDrag and (input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) then
-        local delta = input.Position - fStart
-        mainFrame.Position = UDim2.new(fPos.X.Scale, fPos.X.Offset + delta.X, fPos.Y.Scale, fPos.Y.Offset + delta.Y)
+        local d = input.Position - fStart
+        mainFrame.Position = UDim2.new(fPos.X.Scale, fPos.X.Offset + d.X, fPos.Y.Scale, fPos.Y.Offset + d.Y)
     end
 end)
 title.InputEnded:Connect(function(input)
@@ -531,9 +552,8 @@ title.InputEnded:Connect(function(input)
     end
 end)
 
-stage("18. drag handlers attached")
+setStatus("13. drag handlers")
 
--- toggles
 makeToggle("Infinite Pet Speed", function(on)
     config.petSpeed = on
     if on then startPetSpeed() else petSpeedThread = nil end
@@ -572,9 +592,10 @@ makeToggle("Auto Best World", function(on)
 end)
 makeToggle("Antiban (jitter)", function(on)
     config.antiban = on
+    antiban.enabled = on
 end)
 
-stage("19. toggles built")
+setStatus("14. toggles built")
 
 -- debug panel
 makeToggle("Debug Info", function(on)
@@ -585,14 +606,12 @@ makeToggle("Debug Info", function(on)
         dbg.Name = "PS99Debug"
         dbg.ResetOnSpawn = false
         dbg.Parent = parent
-
         local box = Instance.new("Frame")
         box.Size = UDim2.new(0, 240, 0, 140)
         box.Position = UDim2.new(0, 10, 1, -160)
         box.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
         box.BackgroundTransparency = 0.3
         box.Parent = dbg
-
         local lbl = Instance.new("TextLabel")
         lbl.Size = UDim2.new(1, -10, 1, -10)
         lbl.Position = UDim2.new(0, 5, 0, 5)
@@ -602,9 +621,7 @@ makeToggle("Debug Info", function(on)
         lbl.TextSize = 12
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.TextYAlignment = Enum.TextYAlignment.Top
-        lbl.Text = ""
         lbl.Parent = box
-
         task.spawn(function()
             while config.debug do
                 local things = workspace:FindFirstChild("__THINGS")
@@ -612,13 +629,12 @@ makeToggle("Debug Info", function(on)
                 local br = things and things:FindFirstChild("Breakables")
                 local pets = things and things:FindFirstChild("Pets")
                 lbl.Text = string.format(
-                    "Things: %s\nNetwork: %s\nBreakables: %s\nPets: %s\nPlayers: %d\nHRP: %s",
+                    "Things: %s\nNetwork: %s\nBreakables: %s\nPets: %s\nPlayers: %d",
                     things and "OK" or "nil",
                     net and "OK" or "nil",
                     br and "OK" or "nil",
                     pets and "OK" or "nil",
-                    #Players:GetPlayers(),
-                    HumanoidRootPart and "OK" or "nil"
+                    #Players:GetPlayers()
                 )
                 task.wait(1)
             end
@@ -628,17 +644,15 @@ makeToggle("Debug Info", function(on)
     end
 end)
 
-stage("20. done")
+setStatus("15. done — removing overlay")
 
--- remove loading overlay after 2s
-task.delay(2, function()
-    if LoadGui then LoadGui:Destroy() end
 end)
 
-pcall(function()
-    StarterGui:SetCore("SendNotification", {
-        Title = "PS99 Delta Full",
-        Text = "Loaded. Tap P.",
-        Duration = 3,
-    })
-end)
+if not ok then
+    setStatus("ERROR:\n" .. tostring(err))
+    task.wait(30)
+else
+    task.wait(1.5)
+end
+
+if LoadGui then LoadGui:Destroy() end
