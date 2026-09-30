@@ -1,20 +1,10 @@
 --[[
-    PS99 Delta Full Auto — custom build
+    PS99 Delta Full Auto v2
     target: Pet Simulator 99
-    executor: Delta (Android/PC)
+    executor: Delta
     author: outcome for He
-    
-    features:
-      - infinite pet speed
-      - auto tap FAST
-      - fast farm
-      - auto low-player server
-      - auto buy pet slot
-      - auto buy egg slot
-      - auto buy new map
-      - auto tele best map
-      - auto best world
-      - antiban (jitter + cooldown respect)
+
+    defensive build — no WaitForChild hangs, on-screen debug, gethui support
 ]]
 
 -- ═══════════════════════════════════════════
@@ -39,6 +29,7 @@ local config = {
     useRemote       = true,
     useClick        = true,
     antiban         = true,
+    debug           = true,
 }
 
 -- ═══════════════════════════════════════════
@@ -55,19 +46,34 @@ local StarterGui           = game:GetService("StarterGui")
 
 local LocalPlayer = Players.LocalPlayer
 local Character   = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart", 5)
 local Camera      = workspace.CurrentCamera
 
-local Network     = ReplicatedStorage:WaitForChild("Network")
-local Things      = workspace:WaitForChild("__THINGS")
-local Breakables  = Things:WaitForChild("Breakables")
-local Orbs        = Things:WaitForChild("Orbs")
-local Lootbags    = Things:WaitForChild("Lootbags")
-local Pets        = Things:WaitForChild("Pets")
+-- defensive refs — no hangs
+local Things      = workspace:FindFirstChild("__THINGS")
+local Breakables  = Things and Things:FindFirstChild("Breakables")
+local Orbs        = Things and Things:FindFirstChild("Orbs")
+local Lootbags    = Things and Things:FindFirstChild("Lootbags")
+local Pets        = Things and Things:FindFirstChild("Pets")
+local Network     = ReplicatedStorage:FindFirstChild("Network")
+
+-- re-scan every few seconds in case they spawn late
+task.spawn(function()
+    while task.wait(3) do
+        if not Things then Things = workspace:FindFirstChild("__THINGS") end
+        if Things then
+            if not Breakables then Breakables = Things:FindFirstChild("Breakables") end
+            if not Orbs then Orbs = Things:FindFirstChild("Orbs") end
+            if not Lootbags then Lootbags = Things:FindFirstChild("Lootbags") end
+            if not Pets then Pets = Things:FindFirstChild("Pets") end
+        end
+        if not Network then Network = ReplicatedStorage:FindFirstChild("Network") end
+    end
+end)
 
 LocalPlayer.CharacterAdded:Connect(function(char)
     Character = char
-    HumanoidRootPart = char:WaitForChild("HumanoidRootPart")
+    HumanoidRootPart = char:WaitForChild("HumanoidRootPart", 5)
 end)
 
 -- ═══════════════════════════════════════════
@@ -75,6 +81,7 @@ end)
 -- ═══════════════════════════════════════════
 
 local function xzDist(a, b)
+    if not a or not b then return math.huge end
     local ap, bp = a.Position, b.Position
     local dx, dz = ap.X - bp.X, ap.Z - bp.Z
     return math.sqrt(dx * dx + dz * dz)
@@ -89,14 +96,13 @@ local function jitterWait(base)
 end
 
 local function fireRemote(name, ...)
+    if not Network then return false end
     local remote = Network:FindFirstChild(name)
-    if remote then
-        pcall(function()
-            remote:FireServer(...)
-        end)
-        return true
-    end
-    return false
+    if not remote then return false end
+    pcall(function()
+        remote:FireServer(...)
+    end)
+    return true
 end
 
 local function getHitbox(obj)
@@ -109,16 +115,14 @@ local function getHitbox(obj)
 end
 
 local function nearestBreakable()
-    if not HumanoidRootPart or not HumanoidRootPart.Parent then return nil end
+    if not Breakables or not HumanoidRootPart or not HumanoidRootPart.Parent then return nil end
     local best, bestDist = nil, math.huge
     for _, obj in ipairs(Breakables:GetChildren()) do
-        if obj.Name ~= "Highlight" then
-            local hb = getHitbox(obj)
-            if hb then
-                local d = xzDist(hb, HumanoidRootPart)
-                if d < bestDist then
-                    best, bestDist = hb, d
-                end
+        local hb = getHitbox(obj)
+        if hb then
+            local d = xzDist(hb, HumanoidRootPart)
+            if d < bestDist then
+                best, bestDist = hb, d
             end
         end
     end
@@ -141,7 +145,7 @@ local function clickPart(part)
 end
 
 -- ═══════════════════════════════════════════
--- 1. INFINITE PET SPEED
+-- FEATURES
 -- ═══════════════════════════════════════════
 
 local petSpeedThread = nil
@@ -150,7 +154,7 @@ local function startPetSpeed()
     if petSpeedThread then return end
     petSpeedThread = task.spawn(function()
         while config.petSpeed do
-            if HumanoidRootPart and HumanoidRootPart.Parent then
+            if Pets and HumanoidRootPart and HumanoidRootPart.Parent then
                 local rootCF = HumanoidRootPart.CFrame
                 for _, pet in ipairs(Pets:GetChildren()) do
                     local hrp = pet:FindFirstChild("HumanoidRootPart")
@@ -164,10 +168,6 @@ local function startPetSpeed()
         petSpeedThread = nil
     end)
 end
-
--- ═══════════════════════════════════════════
--- 2. AUTO TAP FAST
--- ═══════════════════════════════════════════
 
 local tapThread = nil
 
@@ -185,10 +185,6 @@ local function startTap()
     end)
 end
 
--- ═══════════════════════════════════════════
--- 3. FAST FARM
--- ═══════════════════════════════════════════
-
 local farmThread = nil
 
 local function startFarm()
@@ -197,34 +193,25 @@ local function startFarm()
         while config.fastFarm do
             if not HumanoidRootPart or not HumanoidRootPart.Parent then
                 Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-                HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+                HumanoidRootPart = Character:WaitForChild("HumanoidRootPart", 5)
             end
-
             local target = nearestBreakable()
-            if target then
+            if target and HumanoidRootPart then
                 HumanoidRootPart.CFrame = target.CFrame * CFrame.new(0, 3, 0)
-
                 if config.useRemote then
                     fireRemote("HitBreakable", target.Parent)
                 end
-
                 if config.useClick then
                     clickPart(target)
                 end
-
                 fireRemote("CollectOrb")
                 fireRemote("CollectLootbag")
             end
-
             task.wait(config.farmDelay)
         end
         farmThread = nil
     end)
 end
-
--- ═══════════════════════════════════════════
--- 4. AUTO LOW-PLAYER SERVER
--- ═══════════════════════════════════════════
 
 local hopThread = nil
 
@@ -243,22 +230,18 @@ local function getLowServers(placeId, maxCount)
     return out
 end
 
-local function hopToLowServer()
-    local servers = getLowServers(game.PlaceId, config.maxPlayers)
-    if #servers > 0 then
-        pcall(function()
-            TeleportService:TeleportToPlaceInstance(game.PlaceId, servers[1].id, LocalPlayer)
-        end)
-    end
-end
-
 local function startHop()
     if hopThread then return end
     hopThread = task.spawn(function()
         while config.hopEnabled do
             if #Players:GetPlayers() > config.maxPlayers then
-                hopToLowServer()
-                task.wait(10)
+                local servers = getLowServers(game.PlaceId, config.maxPlayers)
+                if #servers > 0 then
+                    pcall(function()
+                        TeleportService:TeleportToPlaceInstance(game.PlaceId, servers[1].id, LocalPlayer)
+                    end)
+                    task.wait(10)
+                end
             end
             task.wait(config.hopInterval)
         end
@@ -266,116 +249,78 @@ local function startHop()
     end)
 end
 
--- ═══════════════════════════════════════════
--- 5. AUTO BUY PET SLOT
--- ═══════════════════════════════════════════
-
 local petSlotThread = nil
-
 local function startBuyPetSlot()
     if petSlotThread then return end
     petSlotThread = task.spawn(function()
         while config.autoBuyPetSlot do
-            pcall(function()
-                fireRemote("BuyPetSlot")
-                fireRemote("PurchasePetSlot")
-                fireRemote("BuyPetEquipSlot")
-            end)
+            fireRemote("BuyPetSlot")
+            fireRemote("PurchasePetSlot")
+            fireRemote("BuyPetEquipSlot")
             jitterWait(5)
         end
         petSlotThread = nil
     end)
 end
 
--- ═══════════════════════════════════════════
--- 6. AUTO BUY EGG SLOT
--- ═══════════════════════════════════════════
-
 local eggSlotThread = nil
-
 local function startBuyEggSlot()
     if eggSlotThread then return end
     eggSlotThread = task.spawn(function()
         while config.autoBuyEggSlot do
-            pcall(function()
-                fireRemote("BuyEggSlot")
-                fireRemote("PurchaseEggSlot")
-                fireRemote("BuyEggBundleSlot")
-            end)
+            fireRemote("BuyEggSlot")
+            fireRemote("PurchaseEggSlot")
+            fireRemote("BuyEggBundleSlot")
             jitterWait(5)
         end
         eggSlotThread = nil
     end)
 end
 
--- ═══════════════════════════════════════════
--- 7. AUTO BUY NEW MAP
--- ═══════════════════════════════════════════
-
 local buyMapThread = nil
-
 local function startBuyMap()
     if buyMapThread then return end
     buyMapThread = task.spawn(function()
         while config.autoBuyMap do
-            pcall(function()
-                fireRemote("BuyArea")
-                fireRemote("UnlockArea")
-                fireRemote("PurchaseArea")
-                fireRemote("BuyNextArea")
-            end)
+            fireRemote("BuyArea")
+            fireRemote("UnlockArea")
+            fireRemote("PurchaseArea")
+            fireRemote("BuyNextArea")
             jitterWait(10)
         end
         buyMapThread = nil
     end)
 end
 
--- ═══════════════════════════════════════════
--- 8. AUTO TELE BEST MAP
--- ═══════════════════════════════════════════
-
 local teleBestThread = nil
-
 local function startTeleBest()
     if teleBestThread then return end
     teleBestThread = task.spawn(function()
         while config.autoTeleBest do
-            pcall(function()
-                fireRemote("TeleportToBestArea")
-                fireRemote("TeleportBestArea")
-                fireRemote("BestArea")
-            end)
+            fireRemote("TeleportToBestArea")
+            fireRemote("TeleportBestArea")
+            fireRemote("BestArea")
             jitterWait(15)
         end
         teleBestThread = nil
     end)
 end
 
--- ═══════════════════════════════════════════
--- 9. AUTO BEST WORLD
--- ═══════════════════════════════════════════
-
 local bestWorldThread = nil
-
 local function startBestWorld()
     if bestWorldThread then return end
     bestWorldThread = task.spawn(function()
         while config.autoBestWorld do
-            pcall(function()
-                fireRemote("TeleportToBestWorld")
-                fireRemote("BestWorld")
-                fireRemote("AutoBestWorld")
-            end)
+            fireRemote("TeleportToBestWorld")
+            fireRemote("BestWorld")
+            fireRemote("AutoBestWorld")
             jitterWait(20)
         end
         bestWorldThread = nil
     end)
 end
 
--- ═══════════════════════════════════════════
--- ANTI-AFK
--- ═══════════════════════════════════════════
-
+-- anti-afk
 LocalPlayer.Idled:Connect(function()
     VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
     task.wait(0.1)
@@ -386,10 +331,12 @@ end)
 -- GUI
 -- ═══════════════════════════════════════════
 
+local parent = (gethui and gethui()) or game:GetService("CoreGui")
+
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "PS99DeltaFull"
 ScreenGui.ResetOnSpawn = false
-ScreenGui.Parent = game.CoreGui
+ScreenGui.Parent = parent
 
 local toggleBtn = Instance.new("TextButton")
 toggleBtn.Size = UDim2.new(0, 56, 0, 56)
@@ -444,7 +391,6 @@ scroll.CanvasSize = UDim2.new(0, 0, 0, 520)
 scroll.Parent = mainFrame
 
 local yPos = 0
-
 local function makeToggle(label, toggler)
     local btn = Instance.new("TextButton")
     btn.Size = UDim2.new(1, -8, 0, 34)
@@ -468,7 +414,7 @@ local function makeToggle(label, toggler)
     scroll.CanvasSize = UDim2.new(0, 0, 0, yPos + 8)
 end
 
--- drag toggle button
+-- drag toggle
 local dragging, dragStart, startPos
 toggleBtn.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -493,7 +439,7 @@ toggleBtn.InputEnded:Connect(function(input)
     end
 end)
 
--- drag main frame by title
+-- drag main frame
 local fDrag, fStart, fPos
 title.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -514,62 +460,104 @@ title.InputEnded:Connect(function(input)
     end
 end)
 
--- TOGGLES
+-- toggles
 makeToggle("Infinite Pet Speed", function(on)
     config.petSpeed = on
     if on then startPetSpeed() else petSpeedThread = nil end
 end)
-
 makeToggle("Auto Tap FAST", function(on)
     config.autoTap = on
     if on then startTap() else tapThread = nil end
 end)
-
 makeToggle("Fast Farm", function(on)
     config.fastFarm = on
     if on then startFarm() else farmThread = nil end
 end)
-
 makeToggle("Auto Low-Player Server", function(on)
     config.hopEnabled = on
     if on then startHop() else hopThread = nil end
 end)
-
 makeToggle("Auto Buy Pet Slot", function(on)
     config.autoBuyPetSlot = on
     if on then startBuyPetSlot() else petSlotThread = nil end
 end)
-
 makeToggle("Auto Buy Egg Slot", function(on)
     config.autoBuyEggSlot = on
     if on then startBuyEggSlot() else eggSlotThread = nil end
 end)
-
 makeToggle("Auto Buy New Map", function(on)
     config.autoBuyMap = on
     if on then startBuyMap() else buyMapThread = nil end
 end)
-
 makeToggle("Auto Tele Best Map", function(on)
     config.autoTeleBest = on
     if on then startTeleBest() else teleBestThread = nil end
 end)
-
 makeToggle("Auto Best World", function(on)
     config.autoBestWorld = on
     if on then startBestWorld() else bestWorldThread = nil end
 end)
-
 makeToggle("Antiban (jitter)", function(on)
     config.antiban = on
 end)
 
--- ═══════════════════════════════════════════
--- STARTUP
--- ═══════════════════════════════════════════
+-- debug panel toggle
+makeToggle("Debug Info", function(on)
+    config.debug = on
+    local existing = parent:FindFirstChild("PS99Debug")
+    if on and not existing then
+        local dbg = Instance.new("ScreenGui")
+        dbg.Name = "PS99Debug"
+        dbg.ResetOnSpawn = false
+        dbg.Parent = parent
 
-StarterGui:SetCore("SendNotification", {
-    Title = "PS99 Delta Full",
-    Text = "Loaded. Tap P to open.",
-    Duration = 3,
-})
+        local box = Instance.new("Frame")
+        box.Size = UDim2.new(0, 240, 0, 120)
+        box.Position = UDim2.new(0, 10, 1, -140)
+        box.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+        box.BackgroundTransparency = 0.3
+        box.Parent = dbg
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -10, 1, -10)
+        lbl.Position = UDim2.new(0, 5, 0, 5)
+        lbl.BackgroundTransparency = 1
+        lbl.TextColor3 = Color3.fromRGB(0, 255, 100)
+        lbl.Font = Enum.Font.Code
+        lbl.TextSize = 12
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.TextYAlignment = Enum.TextYAlignment.Top
+        lbl.Text = ""
+        lbl.Parent = box
+
+        task.spawn(function()
+            while config.debug do
+                local things = workspace:FindFirstChild("__THINGS")
+                local net = ReplicatedStorage:FindFirstChild("Network")
+                local br = things and things:FindFirstChild("Breakables")
+                local pets = things and things:FindFirstChild("Pets")
+                lbl.Text = string.format(
+                    "Things: %s\nNetwork: %s\nBreakables: %s\nPets: %s\nPlayers: %d\nHRP: %s",
+                    things and "OK" or "nil",
+                    net and "OK" or "nil",
+                    br and "OK" or "nil",
+                    pets and "OK" or "nil",
+                    #Players:GetPlayers(),
+                    HumanoidRootPart and "OK" or "nil"
+                )
+                task.wait(1)
+            end
+        end)
+    elseif existing and not on then
+        existing:Destroy()
+    end
+end)
+
+-- startup notify
+pcall(function()
+    StarterGui:SetCore("SendNotification", {
+        Title = "PS99 Delta Full",
+        Text = "Loaded. Tap P.",
+        Duration = 3,
+    })
+end)
