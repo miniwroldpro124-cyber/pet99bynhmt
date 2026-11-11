@@ -26,8 +26,6 @@ local CFG = {
     BreakableScanCap = 1500,
     VacuumRadius = 180,
     VacuumRate = 0.2,
-    VacuumMaxIds = 80,
-    VacuumRetry = 2,
     TeleInterval = 4,
     TeleBackoff = 15,
     BuyInterval = 4,
@@ -43,7 +41,9 @@ local CFG = {
     EggMaxHatch = 50,
     WorldInterval = 4,
     WorldBackoff = 12,
-    WorldCount = 6,
+    -- Directory.Worlds only defines World 1-4 (and WorldsUtil.GetEggsModelName
+    -- returns nil past 4), so anything higher can never be reached.
+    WorldCount = 4,
     OptimizeInterval = 2,
     OptimizeCap = 400,
     HopMaxPlayers = 4,
@@ -141,16 +141,22 @@ local screenGui, stageLabel, footerLabel
 local infoLabels, toggleButtons = {}, {}
 -- Held in a table: the main chunk is at Luau's 200-local limit.
 local picker = {refresh = nil, zones = -1, page = nil}
-local notes = {pet = "off", tap = "off", vacuum = "off", tele = "off", buy = "off", quest = "off", rank = "off", rebirth = "off", antiAfk = "off", egg = "off", world = "off", optimize = "off", hop = "off", petSlot = "off", keys = "off", bags = "off", fruits = "off", potions = "off", freeGift = "off", ultimate = "off", daycare = "off", flags = "off", secret = "off", relics = "off", treehouse = "off", fuse = "off", cards = "off", dice = "off", mailClaim = "off", heap = "idle; no startup scan"}
+local notes = {pet = "off", tap = "off", vacuum = "off", tele = "off", buy = "off", quest = "off", rank = "off", rebirth = "off", antiAfk = "off", egg = "off", world = "off", optimize = "off", hop = "off", petSlot = "off", keys = "off", bags = "off", fruits = "off", potions = "off", freeGift = "off", ultimate = "off", daycare = "off", flags = "off", secret = "off", relics = "off", treehouse = "off", fuse = "off", cards = "off", dice = "off", mailClaim = "off", heap = "idle; no startup scan", profile = "waiting for discovery"}
 
 local petHook, petOriginal, petModule
 local petPrevious = setmetatable({}, {__mode = "k"})
 local targetModel, targetUid, targetAt
-local orbSentAt = {}
 local orbRecords = setmetatable({}, {__mode = "kv"})
+-- record -> the _superMagnet it had before we forced it on (restore on OFF).
 local orbOffsets = setmetatable({}, {__mode = "k"})
 local orbModule, orbOriginal, orbHook
 local orbCursor = 1
+-- false marks "the record had no magnet flag before we set it" so the weak key
+-- survives; a nil value would drop the entry and lose the restore.
+local function magnetize(record)
+    if orbOffsets[record] == nil then orbOffsets[record] = record._superMagnet or false end
+    record._superMagnet = true
+end
 local questNext, ensureNext, assignedQuests = {}, {}, {}
 local eggNext, worldTeleNext = 0, 0
 local petSlotNext = 0
@@ -390,6 +396,7 @@ local function profileTick()
         -- No profile source yet; discovery may still find one, so retry soon
         -- instead of locking out for the full refresh interval.
         saveNext = now + CFG.ProfileInterval
+        notes.profile = modules.save and "waiting for live save" or ("waiting for Save module; " .. notes.heap)
         return
     end
     saveNext = now + CFG.SaveRefresh
@@ -401,14 +408,18 @@ local function profileTick()
             snapshot = table.clone(value)
             for _, pair in pairs(changes) do snapshot[pair[1]] = pair[2] end
             snapshotAt = os.clock()
+            notes.profile = "remote snapshot"
         elseif not snapshot then
-            stage("profile: " .. tostring(ok and "unexpected profile shape" or value))
+            -- This build's hashed "Get Stats" RemoteFunction answers nil; the
+            -- Save module cache is the real source, so stay quiet and keep
+            -- discovery running instead of printing every poll.
+            notes.profile = "Get Stats returned nothing; waiting for Save module"
         end
     end
     local _, err = invokeWithCompletion("Get Stats", function(result) adopt(result[1], result[2]) end, LocalPlayer)
     if not alive then return end
     if not requests["Get Stats"] and pendingStats == changes then pendingStats = nil end
-    if err and not snapshot then stage("profile: " .. tostring(err)) end
+    if err and not snapshot then notes.profile = "Get Stats: " .. tostring(err) end
 end
 
 local function registerZone(number, id, definition)
@@ -422,9 +433,94 @@ end
 local heapObjects, heapCursor
 local heapStarted = -math.huge
 local orbBackfillNeeded, heapBackfillsOrbs = false, false
+-- getgc's snapshot table is usually writable, but a read-only one would abort
+-- the whole scan, so clearing entries is probed once and dropped if refused.
+local heapState = {clear = true, sources = nil, tried = 0}
 local function releaseHeap()
     if heapObjects then heapNext = math.min(heapNext, heapStarted + CFG.HeapRetryInterval) end
-    heapObjects, heapCursor, heapBackfillsOrbs = nil, nil, false
+    heapObjects, heapCursor, heapBackfillsOrbs, heapState.sources = nil, nil, false, nil
+end
+
+-- Candidate tables come from whichever executor scan APIs exist, in order of
+-- cost. Module return values are only reachable through a GC walk; the module
+-- cache APIs are kept as a fallback for executors without getgc.
+local function nextSource()
+    heapState.sources = heapState.sources or {
+        function() local gc = getgc or env.getgc; return type(gc) == "function" and gc(true) or nil end,
+        function() local gc = getgc or env.getgc; return type(gc) == "function" and gc(false) or nil end,
+        function() local reg = getreg or env.getreg; return type(reg) == "function" and reg() or nil end,
+    }
+    local known = type(getgc or env.getgc) == "function" or type(getreg or env.getreg) == "function"
+    -- The working maker stays first so later scans do not re-probe the others.
+    for index = 1, #heapState.sources do
+        local ok, objects = pcall(heapState.sources[index])
+        if ok and type(objects) == "table" and next(objects) ~= nil then
+            if index > 1 then
+                local maker = table.remove(heapState.sources, index)
+                table.insert(heapState.sources, 1, maker)
+            end
+            return objects
+        end
+    end
+    return nil, known
+end
+
+local function inspectObject(object)
+    if type(rawget(object, "Get")) == "function"
+        and type(rawget(object, "GetSaves")) == "function"
+        and (type(rawget(object, "GetStatChangedSignal")) == "function"
+            or type(rawget(object, "ProcessManualChange")) == "function"
+            or type(rawget(object, "FetchPlayer")) == "function"
+            or rawget(object, "LoadedStats") ~= nil
+            or rawget(object, "StatsChanged") ~= nil) then
+        modules.save = object
+    end
+    -- The real Network module also exposes the unreliable pair and the
+    -- observer setter; requiring them keeps a decoy table out.
+    if type(rawget(object, "Invoke")) == "function" and type(rawget(object, "Fired")) == "function"
+        and type(rawget(object, "Fire")) == "function" and type(rawget(object, "Invoked")) == "function"
+        and type(rawget(object, "UnreliableFire")) == "function"
+        and type(rawget(object, "UnreliableFired")) == "function"
+        and type(rawget(object, "_SetSendObserver")) == "function" then
+        modules.network = object
+    end
+    -- The Save module's live cache is a table keyed by Player -> save. Reading
+    -- it directly needs no function signature and is always current.
+    if looksLikeSave(rawget(object, LocalPlayer)) then saveCache = object end
+    if type(rawget(object, "CalculateSpeedMultiplier")) == "function"
+        and type(rawget(object, "GetByPlayer")) == "function"
+        and type(rawget(object, "GetByItemUID")) == "function" then
+        modules.pet = object
+    end
+    if type(rawget(object, "new")) == "function" and type(rawget(object, "Combine")) == "function"
+        and type(rawget(object, "Collect")) == "function" and type(rawget(object, "ParkSpent")) == "function" then
+        modules.orb = object
+    end
+    local part = rawget(object, "_part")
+    if typeof(part) == "Instance" and type(rawget(object, "_combinedIds")) == "table"
+        and type(rawget(object, "_destroyed")) == "boolean" then
+        orbRecords[part] = object
+        if enabled.vacuum or enabled.farm then magnetize(object) end
+    end
+    local id = rawget(object, "_id")
+    if type(id) == "string" then
+        if type(rawget(object, "ZoneNumber")) == "number"
+            and type(rawget(object, "WorldNumber")) == "number"
+            and type(rawget(object, "ZoneName")) == "string" then
+            registerZone(rawget(object, "ZoneNumber"), id, object)
+        elseif type(rawget(object, "RebirthNumber")) == "number"
+            and type(rawget(object, "ZoneNumberRequired")) == "number" then
+            rebirths[rawget(object, "RebirthNumber")] = object
+        elseif type(rawget(object, "RankNumber")) == "number"
+            and type(rawget(object, "Rewards")) == "table" then
+            ranks[rawget(object, "RankNumber")] = object
+        elseif type(rawget(object, "DisplayName")) == "string"
+            and type(rawget(object, "Sets")) == "table" then
+            questDirs[id] = object
+        elseif type(rawget(object, "eggNumber")) == "number" then
+            eggByNumber[rawget(object, "eggNumber")] = id
+        end
+    end
 end
 
 local function scanHeap()
@@ -432,11 +528,12 @@ local function scanHeap()
         if os.clock() < heapNext then return end
         heapStarted = os.clock()
         heapNext = heapStarted + CFG.HeapInterval
-        local gc = getgc or env.getgc
-        if type(gc) ~= "function" then notes.heap = "getgc unavailable"; orbBackfillNeeded = false; return end
-        -- The boolean requests tables; getgc(false) commonly returns functions only.
-        local ok, objects = pcall(gc, true)
-        if not ok or type(objects) ~= "table" then notes.heap = "table scan unavailable"; orbBackfillNeeded = false; return end
+        local objects, known = nextSource()
+        if not objects then
+            notes.heap = known and "scan returned no tables" or "getgc unavailable"
+            orbBackfillNeeded = false
+            return
+        end
         heapObjects, heapCursor, heapBackfillsOrbs = objects, nil, orbBackfillNeeded
     end
     local scan = heapObjects
@@ -447,62 +544,18 @@ local function scanHeap()
         if key == nil then
             if heapBackfillsOrbs then orbBackfillNeeded = false end
             heapObjects, heapCursor, heapBackfillsOrbs = nil, nil, false
-            notes.heap = "scanned"
+            notes.heap = "scanned " .. tostring(heapState.tried)
             return
         end
-        if type(object) == "table" then
-            if type(rawget(object, "Get")) == "function"
-                and type(rawget(object, "GetSaves")) == "function"
-                and (type(rawget(object, "GetStatChangedSignal")) == "function"
-                    or type(rawget(object, "ProcessManualChange")) == "function"
-                    or type(rawget(object, "FetchPlayer")) == "function"
-                    or rawget(object, "LoadedStats") ~= nil
-                    or rawget(object, "StatsChanged") ~= nil) then
-                modules.save = object
-            end
-            if type(rawget(object, "Invoke")) == "function" and type(rawget(object, "Fired")) == "function"
-                and type(rawget(object, "Fire")) == "function" and type(rawget(object, "Invoked")) == "function" then
-                modules.network = object
-            end
-            -- The Save module's live cache is a table keyed by Player -> save. Reading
-            -- it directly needs no function signature and is always current.
-            if looksLikeSave(rawget(object, LocalPlayer)) then saveCache = object end
-            if type(rawget(object, "CalculateSpeedMultiplier")) == "function"
-                and type(rawget(object, "GetByPlayer")) == "function"
-                and type(rawget(object, "GetByItemUID")) == "function" then
-                modules.pet = object
-            end
-            if type(rawget(object, "new")) == "function" and type(rawget(object, "Combine")) == "function"
-                and type(rawget(object, "Collect")) == "function" and type(rawget(object, "ParkSpent")) == "function" then
-                modules.orb = object
-            end
-            local part = rawget(object, "_part")
-            if typeof(part) == "Instance" and type(rawget(object, "_combinedIds")) == "table"
-                and type(rawget(object, "_destroyed")) == "boolean" then orbRecords[part] = object end
-            local id = rawget(object, "_id")
-            if type(id) == "string" then
-                if type(rawget(object, "ZoneNumber")) == "number"
-                    and type(rawget(object, "WorldNumber")) == "number"
-                    and type(rawget(object, "ZoneName")) == "string" then
-                    registerZone(rawget(object, "ZoneNumber"), id, object)
-                elseif type(rawget(object, "RebirthNumber")) == "number"
-                    and type(rawget(object, "ZoneNumberRequired")) == "number" then
-                    rebirths[rawget(object, "RebirthNumber")] = object
-                elseif type(rawget(object, "RankNumber")) == "number"
-                    and type(rawget(object, "Rewards")) == "table" then
-                    ranks[rawget(object, "RankNumber")] = object
-                elseif type(rawget(object, "DisplayName")) == "string"
-                    and type(rawget(object, "Sets")) == "table" then
-                    questDirs[id] = object
-                elseif type(rawget(object, "eggNumber")) == "number" then
-                    eggByNumber[rawget(object, "eggNumber")] = id
-                end
-            end
+        heapState.tried += 1
+        if type(object) == "table" then inspectObject(object) end
+        if heapState.clear and type(key) == "number" then
+            local ok = pcall(function() scan[key] = nil end)
+            if not ok then heapState.clear = false end
         end
-        scan[key] = nil
         if count % 500 == 0 then task.wait() end
     end
-    if heapObjects == scan then notes.heap = "scan continuing" end
+    if heapObjects == scan then notes.heap = ("scanning; %d tables"):format(heapState.tried) end
 end
 
 local treeScan, treeNext = nil, 0
@@ -799,15 +852,27 @@ local function restoreOrbCapture()
         local ok, err = pcall(function() orbModule.new = orbOriginal end)
         if not ok then warn("[PS99 CLEAN] orb restore: " .. tostring(err)) end
     end
+    for record, previous in pairs(orbOffsets) do
+        pcall(function() record._superMagnet = previous or nil end)
+    end
+    table.clear(orbOffsets)
     orbModule, orbOriginal, orbHook = nil, nil, nil
 end
 
+-- The game collects an orb itself when its record carries _superMagnet: the
+-- RenderStepped branch in OrbCmds/Orb returns false (which queues the real
+-- Network.Fire("Orbs: Collect", id)) as soon as the orb is past 150 studs. Firing
+-- the remote from outside skips the record's own _collected bookkeeping, so the
+-- server rejects it. Setting the flag lets Orbs: Collect come from the game.
 local function vacuumTick()
     if not orbHook and modules.orb then
         local mod, original = modules.orb, modules.orb.new
         local hook = function(...)
             local orb = original(...)
-            if alive and type(orb) == "table" and orb._part then orbRecords[orb._part] = orb end
+            if alive and type(orb) == "table" and orb._part then
+                orbRecords[orb._part] = orb
+                if enabled.vacuum or enabled.farm then magnetize(orb) end
+            end
             return orb
         end
         local ok = pcall(function() mod.new = hook end)
@@ -815,39 +880,25 @@ local function vacuumTick()
     end
     local root, point = thingsFolder("Orbs"), position()
     if not root or not point then notes.vacuum = "waiting for orbs/character"; return end
-    local ids, seen, now = {}, {}, os.clock()
-    for id, sentAt in pairs(orbSentAt) do if now - sentAt >= CFG.VacuumRetry then orbSentAt[id] = nil end end
-    local function append(id)
-        if #ids < CFG.VacuumMaxIds and (type(id) == "number" or type(id) == "string") and not orbSentAt[id] and not seen[id] then
-            ids[#ids + 1], seen[id] = id, true
-        end
-    end
     local children = root:GetChildren()
+    local flagged, total = 0, 0
     for _ = 1, math.min(#children, CFG.BreakableScanCap) do
-        if #ids >= CFG.VacuumMaxIds then break end
         if orbCursor > #children then orbCursor = 1 end
         local child = children[orbCursor]
         orbCursor += 1
-        local at, record = modelPosition(child), orbRecords[child]
-        if at and (at - point).Magnitude <= CFG.VacuumRadius then
-            if record and not record._destroyed then
-                append(record._id)
-                local combined = record._combinedIds
-                local offset = orbOffsets[record] or 1
-                for _ = 1, math.min(#combined, CFG.VacuumMaxIds) do
-                    if #ids >= CFG.VacuumMaxIds then break end
-                    if offset > #combined then offset = 1 end
-                    append(combined[offset])
-                    offset += 1
-                end
-                orbOffsets[record] = offset
-            elseif not record then append(tonumber(child.Name)) end
+        local record = orbRecords[child]
+        if type(record) == "table" and not record._destroyed and record._part == child then
+            total += 1
+            local at = modelPosition(child)
+            if at and (at - point).Magnitude <= CFG.VacuumRadius then
+                if orbOffsets[record] == nil then orbOffsets[record] = record._superMagnet end
+                if record._superMagnet ~= true then record._superMagnet = true end
+                flagged += 1
+            end
         end
     end
-    if #ids == 0 then notes.vacuum = "no nearby unrequested orbs"; return end
-    local ok, message = fire("Orbs: Collect", ids)
-    if ok then for _, id in ipairs(ids) do orbSentAt[id] = now end end
-    notes.vacuum = ok and ("requested %d orb IDs"):format(#ids) or message
+    if total == 0 then notes.vacuum = "waiting for orb records; " .. notes.heap; return end
+    notes.vacuum = ("%d/%d orbs magnetized"):format(flagged, total)
 end
 
 local teleNext, buyNext, rankNext, rebirthNext = 0, 0, 0, 0
@@ -1873,7 +1924,7 @@ local function updateStatus()
             tostring(save and save.Rank or "?"), tostring(save and save.RankStars or "?"),
             tostring(save and save.Rebirths or "?"), notes.rank, notes.rebirth)
     end
-    if footerLabel then footerLabel.Text = ("Profile: %s | Zones: %d | %s"):format(saveSource, count, notes.heap) end
+    if footerLabel then footerLabel.Text = ("Profile: %s | Zones: %d | %s | %s"):format(saveSource, count, notes.profile, notes.heap) end
 end
 
 local function create(className, properties, parent)
@@ -1891,7 +1942,7 @@ local function buildGUI()
     local main = create("Frame", {Name = "Main", Size = UDim2.fromOffset(390, 420), Position = UDim2.fromOffset(40, 90), BackgroundColor3 = Color3.fromRGB(24, 27, 35), BorderSizePixel = 0}, screenGui)
     create("UICorner", {CornerRadius = UDim.new(0, 8)}, main)
     local title = create("Frame", {Name = "Title", Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = Color3.fromRGB(17, 20, 27), BorderSizePixel = 0, Active = true}, main)
-    create("TextLabel", {Size = UDim2.new(1, -130, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "PS99 CLEAN v15", TextColor3 = Color3.fromRGB(125, 212, 236), TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamBold, TextSize = 17}, title)
+    create("TextLabel", {Size = UDim2.new(1, -130, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "PS99 CLEAN v16", TextColor3 = Color3.fromRGB(125, 212, 236), TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamBold, TextSize = 17}, title)
     local function titleButton(text, offset, width, color, callback)
         local button = create("TextButton", {Size = UDim2.fromOffset(width, 26), Position = UDim2.new(1, offset, 0, 6), BackgroundColor3 = color, BorderSizePixel = 0, Text = text, TextColor3 = Color3.fromRGB(245, 245, 245), Font = Enum.Font.GothamBold, TextSize = 13}, title)
         connect(button.Activated, callback)
