@@ -60,10 +60,18 @@ local CFG = {
     FreeGiftMax = 12,
     UltimateInterval = 3,
     DaycareInterval = 8,
-    DaycareReady = 7200,
+    DaycareDuration = 21600,
+    DaycareOnlineSpeedup = 3,
+    DaycareSlotsFree = 10,
     FlagInterval = 60,
     SecretInterval = 10,
     TreehouseInterval = 30,
+    DiceInterval = 20,
+    CardInterval = 20,
+    FruitQueueLimit = 20,
+    PotionMaxConsume = 100,
+    BagMaxOpen = 50,
+    DiceMaxConsume = 25,
     FuseInterval = 60,
     FuseMinStacks = 6,
     FuseMinPets = 3,
@@ -89,8 +97,37 @@ local enabled = {
     autoKeys = false, autoGiftBags = false, autoFruits = false, autoPotions = false,
     autoFreeGifts = false, autoUltimate = false, autoDaycare = false, autoFlags = false,
     autoSecretRooms = false, autoTreehouse = false, autoFuse = false, autoCards = false,
-    autoRelics = false, autoMailClaim = false,
+    autoRelics = false, autoMailClaim = false, autoDice = false,
 }
+
+-- Per-item selections. Every "auto X" worker above only touches the ids the
+-- player ticked, matching how the game's own action menus gate consumption.
+-- Picks are stored as id -> true; the workers rebuild lists from live Save
+-- inventory each tick, so a pick that is not owned simply does nothing.
+local picked = {
+    zones = {},          -- zone id -> true (auto click / aura / teleport targeting)
+    fruits = {},         -- Directory.Fruits id
+    potions = {},        -- Directory.Potions id
+    bags = {},           -- GiftBag_Open name
+    flags = {},          -- FlexibleFlags_Consume name
+    freeGifts = {},      -- numeric free gift Id
+    dice = {},           -- Lucky Dice item id
+    cards = {},          -- CardItem id
+    keys = {},           -- KEY_PAIRS name
+}
+local function pickCount(store)
+    local count = 0
+    for _ in pairs(store) do count += 1 end
+    return count
+end
+local function isPicked(store, id)
+    return store[id] == true
+end
+local function togglePick(store, id)
+    if type(id) ~= "string" and type(id) ~= "number" then return false end
+    if store[id] then store[id] = nil else store[id] = true end
+    return true
+end
 local alive = true
 local workers, requests, connections = {}, {}, {}
 local remotes, modules = {}, {}
@@ -102,7 +139,9 @@ local pendingStats, statsRemote, statsConnection = nil, nil, nil
 local heapNext, saveNext = 0, 0
 local screenGui, stageLabel, footerLabel
 local infoLabels, toggleButtons = {}, {}
-local notes = {pet = "off", tap = "off", vacuum = "off", tele = "off", buy = "off", quest = "off", rank = "off", rebirth = "off", antiAfk = "off", egg = "off", world = "off", optimize = "off", hop = "off", petSlot = "off", keys = "off", bags = "off", fruits = "off", potions = "off", freeGift = "off", ultimate = "off", daycare = "off", flags = "off", secret = "off", relics = "off", treehouse = "off", fuse = "off", cards = "off", mailClaim = "off", heap = "idle; no startup scan"}
+-- Held in a table: the main chunk is at Luau's 200-local limit.
+local picker = {refresh = nil, zones = -1, page = nil}
+local notes = {pet = "off", tap = "off", vacuum = "off", tele = "off", buy = "off", quest = "off", rank = "off", rebirth = "off", antiAfk = "off", egg = "off", world = "off", optimize = "off", hop = "off", petSlot = "off", keys = "off", bags = "off", fruits = "off", potions = "off", freeGift = "off", ultimate = "off", daycare = "off", flags = "off", secret = "off", relics = "off", treehouse = "off", fuse = "off", cards = "off", dice = "off", mailClaim = "off", heap = "idle; no startup scan"}
 
 local petHook, petOriginal, petModule
 local petPrevious = setmetatable({}, {__mode = "k"})
@@ -117,7 +156,7 @@ local eggNext, worldTeleNext = 0, 0
 local petSlotNext = 0
 local keyNext, bagNext, mailNext = 0, 0, 0
 local freeGiftNext, ultimateNext, daycareNext, flagNext = 0, 0, 0, 0
-local secretNext, relicNext, treehouseNext, fuseNext = 0, 0, 0, 0
+local secretNext, relicNext, treehouseNext, fuseNext, cardNext, diceNext = 0, 0, 0, 0, 0, 0
 local freeGiftCursor = 1
 local secretTried = {}
 local pendingMail = nil
@@ -148,10 +187,22 @@ local REMOTE_TYPES = {
     ["MVPKey_Combine"] = "RemoteFunction",
     ["SecretKey_Combine"] = "RemoteFunction",
     ["TreasureHideout_Combine"] = "RemoteFunction",
+    ["TN_Bind"] = "RemoteFunction",
+    ["MW_Reduce"] = "RemoteFunction",
     ["CrystalKey_Unlock"] = "RemoteFunction",
     ["TechKey_Unlock"] = "RemoteFunction",
     ["VoidKey_Unlock"] = "RemoteFunction",
     ["FantasyKey_Unlock"] = "RemoteFunction",
+    ["PrisonKey_Combine"] = "RemoteFunction",
+    ["PrisonKey_Use"] = "RemoteFunction",
+    ["Eggs_RequestUnlock"] = "RemoteFunction",
+    ["LuckyDice_Consume_V2"] = "RemoteFunction",
+    ["LuckyDice_ConsumeMega_V2"] = "RemoteFunction",
+    ["FireDice_Consume_V2"] = "RemoteFunction",
+    ["LuckyDice_Craft_V2"] = "RemoteFunction",
+    ["LuckyDice_Get_V2"] = "RemoteFunction",
+    ["Ultimates: Equip"] = "RemoteFunction",
+    ["Ultimates: Unequip"] = "RemoteEvent",
     ["GiftBag_Open"] = "RemoteFunction",
     ["Fruits: Consume"] = "RemoteEvent",
     ["Potions: Consume"] = "RemoteEvent",
@@ -711,6 +762,12 @@ local function tapTick()
     local point = position()
     if not point then notes.tap = "waiting for character"; return end
     local zone = currentZone()
+    -- Zone picker: once the player ticks zones, click/aura stay inside that set.
+    if pickCount(picked.zones) > 0 and not picked.zones[zone] then
+        notes.tap = "zone not selected: " .. tostring(zone or "unknown")
+        targetModel, targetUid = nil, nil
+        return
+    end
     if not validTarget(targetModel, point, zone) or now - (targetAt or 0) >= CFG.TargetRescan then
         targetModel, targetUid = pickTarget(point, zone)
         targetAt = now
@@ -1135,6 +1192,9 @@ local function stackList(bucket)
     return out
 end
 
+-- Verified against the game's own action menus. Fiesta keys combine through
+-- TN_Bind / MW_Reduce (KeyCombine.Build), not a *_Combine endpoint; the prison
+-- combiner consumes plain "Prison Key" stacks and takes a count only.
 local KEY_PAIRS = {
     {name = "CrystalKey_Combine", lower = "Crystal Key Lower Half", upper = "Crystal Key Upper Half"},
     {name = "TechKey_Combine", lower = "Tech Key Lower Half", upper = "Tech Key Upper Half"},
@@ -1143,9 +1203,80 @@ local KEY_PAIRS = {
     {name = "MVPKey_Combine", lower = "MVP Key Lower Half", upper = "MVP Key Upper Half"},
     {name = "SecretKey_Combine", lower = "Secret Key Lower Half", upper = "Secret Key Upper Half"},
     {name = "TreasureHideout_Combine", lower = "Treasure Hideout Key Lower Half", upper = "Treasure Hideout Key Upper Half"},
+    {name = "TN_Bind", lower = "Fiesta Key Lower Half", upper = "Fiesta Key Upper Half"},
+    {name = "MW_Reduce", lower = "Fiesta Boss Key Lower Half", upper = "Fiesta Boss Key Upper Half"},
+    {name = "PrisonKey_Combine", lower = "Prison Key"},
 }
 
-local BAG_KINDS = {"Gift Bag", "Large Gift Bag", "Seed Bag", "Diamond Gift Bag"}
+-- Names passed as arg 1 to GiftBag_Open by the game's own action menus.
+local BAG_KINDS = {
+    "Gift Bag", "Large Gift Bag", "Seed Bag", "Diamond Gift Bag",
+    "Fruit Bundle", "Potion Bundle", "Large Potion Bundle",
+    "Enchant Bundle", "Large Enchant Bundle", "Flag Bundle",
+    "Toy Bundle", "Mini Chest", "Rainbow Mini Chest", "Charm Stone",
+}
+
+local FLAG_NAMES = {
+    "Coins Flag", "Diamonds Flag", "Fortune Flag", "Hasty Flag",
+    "Magnet Flag", "Rainbow Flag", "Shiny Flag", "Strength Flag",
+    "Exotic Treasure Flag",
+}
+
+-- Directory.Fruits / Directory.Potions ids (module-name suffix after the "| ").
+local FRUIT_IDS = {"Apple", "Banana", "Candycane", "Orange", "Pineapple", "Rainbow", "Watermelon"}
+local POTION_IDS = {
+    "Coins", "Damage", "Diamonds", "Huge", "Lucky",
+    "The Cocktail", "Treasure Hunter", "Walkspeed",
+}
+local DICE_IDS = {
+    "Lucky Dice V2", "Lucky Dice II V2", "Lucky Dice III V2",
+    "Mega Lucky Dice V2", "Mega Lucky Dice II V2", "Fire Dice V2",
+}
+local MEGA_DICE = {["Mega Lucky Dice V2"] = true, ["Mega Lucky Dice II V2"] = true}
+local FREE_GIFT_MAX = 12
+
+-- Category catalogue surfaced by the Picks tab. Each entry maps a picked.* store
+-- to the ids the game itself uses in its action menus.
+local PICK_CATEGORIES = {
+    {"zones", "Zones"}, {"keys", "Keys"}, {"bags", "Bags"}, {"fruits", "Fruits"},
+    {"potions", "Potions"}, {"flags", "Flags"}, {"dice", "Dice"},
+    {"cards", "Cards"}, {"freeGifts", "Gifts"},
+}
+
+local function pickItems(category)
+    local out = {}
+    if category == "zones" then
+        for id in pairs(zones) do out[#out + 1] = id end
+        table.sort(out)
+    elseif category == "keys" then
+        for _, pair in ipairs(KEY_PAIRS) do out[#out + 1] = pair.name end
+    elseif category == "bags" then
+        for _, name in ipairs(BAG_KINDS) do out[#out + 1] = name end
+    elseif category == "fruits" then
+        for _, id in ipairs(FRUIT_IDS) do out[#out + 1] = id end
+    elseif category == "potions" then
+        for _, id in ipairs(POTION_IDS) do out[#out + 1] = id end
+    elseif category == "flags" then
+        for _, name in ipairs(FLAG_NAMES) do out[#out + 1] = name end
+    elseif category == "dice" then
+        for _, id in ipairs(DICE_IDS) do out[#out + 1] = id end
+    elseif category == "freeGifts" then
+        for id = 1, FREE_GIFT_MAX do out[#out + 1] = id end
+    elseif category == "cards" then
+        local seen = {}
+        for _, card in ipairs(stackList(inventory(getSave(), "Card"))) do
+            if not seen[card.id] then seen[card.id] = true; out[#out + 1] = card.id end
+        end
+    end
+    return out
+end
+
+-- Selection defaults: when the player has not ticked anything in a category the
+-- worker behaves like the older "consume everything" mode, so toggling an
+-- "Auto X" row still does something useful on a fresh install.
+local function allowAll(store, id)
+    return pickCount(store) == 0 or store[id] == true
+end
 
 local function keyTick()
     local now = os.clock()
@@ -1157,8 +1288,9 @@ local function keyTick()
     for _, item in ipairs(misc) do halves[item.id] = (halves[item.id] or 0) + item.amount end
     for _, pair in ipairs(KEY_PAIRS) do
         if not alive or not enabled.autoKeys then return end
-        local count = math.min(halves[pair.lower] or 0, halves[pair.upper] or 0)
-        if count > 0 then
+        local count = halves[pair.lower] or 0
+        if pair.upper then count = math.min(count, halves[pair.upper] or 0) end
+        if count > 0 and allowAll(picked.keys, pair.name) then
             keyNext = now + CFG.KeyInterval
             local ok, message = invoke(pair.name, count)
             if not alive or not enabled.autoKeys then return end
@@ -1167,7 +1299,7 @@ local function keyTick()
             return
         end
     end
-    notes.keys = "no matching key halves in inventory"
+    notes.keys = "no selected key halves to combine"
 end
 
 local function bagTick()
@@ -1177,23 +1309,24 @@ local function bagTick()
     if not save then notes.bags = "waiting for profile"; return end
     local buckets = {"Misc", "Lootbox"}
     for _, kind in ipairs(BAG_KINDS) do
-        for _, bucketName in ipairs(buckets) do
-            local items = stackList(inventory(save, bucketName))
-            for _, item in ipairs(items) do
-                if not alive or not enabled.autoGiftBags then return end
-                if item.id == kind then
-                    bagNext = now + CFG.BagInterval
-                    local amount = math.max(1, math.min(item.amount, 10))
-                    local ok, message = invoke("GiftBag_Open", kind, amount)
+        if allowAll(picked.bags, kind) then
+            for _, bucketName in ipairs(buckets) do
+                for _, item in ipairs(stackList(inventory(save, bucketName))) do
                     if not alive or not enabled.autoGiftBags then return end
-                    notes.bags = ok == true and ("opened " .. kind .. " x" .. amount) or tostring(message or "rejected")
-                    if ok == true then saveNext = 0 end
-                    return
+                    if item.id == kind then
+                        bagNext = now + CFG.BagInterval
+                        local amount = math.max(1, math.min(item.amount, CFG.BagMaxOpen))
+                        local ok, message = invoke("GiftBag_Open", kind, amount)
+                        if not alive or not enabled.autoGiftBags then return end
+                        notes.bags = ok == true and ("opened " .. kind .. " x" .. amount) or tostring(message or "rejected")
+                        if ok == true then saveNext = 0 end
+                        return
+                    end
                 end
             end
         end
     end
-    notes.bags = "no unopened bags"
+    notes.bags = "no selected bags in inventory"
 end
 
 local consumeNext = {Fruit = 0, Potion = 0}
@@ -1202,17 +1335,22 @@ local function consumeTick(kind, remote, noteKey)
     if now < consumeNext[kind] then return end
     local save = getSave()
     if not save then notes[noteKey] = "waiting for profile"; return end
-    local items = stackList(inventory(save, kind))
-    for _, item in ipairs(items) do
+    local store = picked[kind == "Fruit" and "fruits" or "potions"]
+    local cap = kind == "Fruit" and CFG.FruitQueueLimit or CFG.PotionMaxConsume
+    local interval = kind == "Fruit" and CFG.FruitInterval or CFG.PotionInterval
+    for _, item in ipairs(stackList(inventory(save, kind))) do
         if not alive then return end
-        consumeNext[kind] = now + CFG.FruitInterval
-        local ok, message = fire(remote, item.uid, math.max(1, math.min(item.amount, 10)))
-        if not alive then return end
-        notes[noteKey] = ok and ("consumed " .. item.id) or tostring(message or "rejected")
-        if ok then saveNext = 0 end
-        return
+        if allowAll(store, item.id) then
+            consumeNext[kind] = now + interval
+            local count = math.max(1, math.min(item.amount, cap))
+            local ok, message = fire(remote, item.uid, count)
+            if not alive then return end
+            notes[noteKey] = ok and ("consumed " .. item.id .. " x" .. count) or tostring(message or "rejected")
+            if ok then saveNext = 0 end
+            return
+        end
     end
-    notes[noteKey] = "nothing to consume"
+    notes[noteKey] = "no selected stacks in inventory"
 end
 
 local function fruitTick() consumeTick("Fruit", "Fruits: Consume", "fruits") end
@@ -1230,7 +1368,7 @@ local function freeGiftTick()
         if not alive or not enabled.autoFreeGifts then return end
         local id = freeGiftCursor
         freeGiftCursor = freeGiftCursor % CFG.FreeGiftMax + 1
-        if not claimed[tostring(id)] then
+        if not claimed[tostring(id)] and allowAll(picked.freeGifts, id) then
             freeGiftNext = now + CFG.FreeGiftInterval
             local ok, message = invoke("Redeem Free Gift", id)
             if not alive or not enabled.autoFreeGifts then return end
@@ -1247,8 +1385,24 @@ local function ultimateTick()
     if now < ultimateNext then return end
     local save = getSave()
     if not save then notes.ultimate = "waiting for profile"; return end
+    -- UltimateCmds.UltimatesUnlocked() gates the whole system on 4 rebirths.
+    if (tonumber(save.Rebirths) or 0) < 4 then notes.ultimate = "unlocks at 4 rebirths"; return end
     local id = save.EquippedUltimate
-    if type(id) ~= "string" then notes.ultimate = "no ultimate equipped"; return end
+    if type(id) ~= "string" then
+        -- Nothing equipped: equip the highest-XP ultimate the player owns.
+        local best, bestXP = nil, -1
+        for candidate, xp in pairs(type(save.Ultimates) == "table" and save.Ultimates or {}) do
+            local value = tonumber(xp) or 0
+            if type(candidate) == "string" and value > bestXP then best, bestXP = candidate, value end
+        end
+        if not best then notes.ultimate = "no ultimate owned"; return end
+        ultimateNext = now + CFG.UltimateInterval
+        local ok, message = invoke("Ultimates: Equip", best)
+        if not alive or not enabled.autoUltimate then return end
+        notes.ultimate = ok == true and ("equipped " .. best) or tostring(message or "rejected")
+        if ok == true then saveNext = 0 end
+        return
+    end
     local cooldowns = type(save.UltimateCooldowns) == "table" and save.UltimateCooldowns or {}
     local charge = tonumber(cooldowns[id]) or 0
     if charge < 1 then notes.ultimate = ("charging %s (%d%%)"):format(id, math.floor(charge * 100)); return end
@@ -1259,6 +1413,17 @@ local function ultimateTick()
     if ok == true then saveNext = 0 end
 end
 
+-- Mirrors DaycareCmds.ComputeRemainingTime: offline time counts 1x, online 3x.
+-- ComputeSaveAge = (save.Age or 0) + max(0, serverNow - save.LoginTime).
+local function daycareRemaining(save, record, serverNow)
+    if type(record) ~= "table" then return 0 end
+    local age = (tonumber(save.Age) or 0) + math.max(0, serverNow - (tonumber(save.LoginTime) or serverNow))
+    local online = math.max(0, age - (tonumber(record.CreationAge) or 0))
+    local offline = math.max(0, serverNow - (tonumber(record.CreationTime) or serverNow) - online)
+    local elapsed = online * CFG.DaycareOnlineSpeedup + offline
+    return math.max(0, CFG.DaycareDuration - elapsed)
+end
+
 local function daycareTick()
     local now = os.clock()
     if now < daycareNext then return end
@@ -1266,43 +1431,31 @@ local function daycareTick()
     if not save then notes.daycare = "waiting for profile"; return end
     local active = type(save.DaycareActive) == "table" and save.DaycareActive or {}
     local serverNow = serverClock()
-    local enroll
+    local used = 0
     for uid, record in pairs(active) do
         if not alive or not enabled.autoDaycare then return end
-        if type(record) == "table" and record.Pet ~= nil then
-            local created = tonumber(record.CreationTime) or serverNow
-            -- Daycare counts offline time at 1x and online time at 3x; assume online.
-            local remaining = 21600 - math.max(0, serverNow - created) * 3
-            if remaining <= 0 then
-                daycareNext = now + CFG.DaycareInterval
-                local ok, message = invoke("Daycare: Claim", tostring(uid))
-                if not alive or not enabled.autoDaycare then return end
-                notes.daycare = ok == true and ("claimed " .. tostring(uid)) or tostring(message or "rejected")
-                if ok == true then saveNext = 0 end
-                return
-            end
-            if not enroll and remaining <= CFG.DaycareReady then
-                enroll = true
-                notes.daycare = ("one pet ready in %d min"):format(math.ceil(remaining / 60))
-            end
+        if type(record) == "table" then used += tonumber(record.Pet and record.Pet._am) or 0 end
+        if type(record) == "table" and record.Pet ~= nil and daycareRemaining(save, record, serverNow) <= 0 then
+            daycareNext = now + CFG.DaycareInterval
+            local ok, message = invoke("Daycare: Claim", tostring(uid))
+            if not alive or not enabled.autoDaycare then return end
+            notes.daycare = ok == true and ("claimed " .. tostring(uid)) or tostring(message or "rejected")
+            if ok == true then saveNext = 0 end
+            return
         end
     end
-    if enroll then return end
-    local used = 0
-    for _, record in pairs(active) do
-        if type(record) == "table" and type(record.Pet) == "table" then used += tonumber(record.Pet._am) or 1 end
-    end
-    local slots = 10 + (tonumber(save.DaycareVouchers) or 0)
+    -- DaycareCmds.GetMaxSlots: 10 free + 25 gamepass + DaycareVouchers.
+    local slots = CFG.DaycareSlotsFree + (tonumber(save.DaycareVouchers) or 0)
     if used >= slots then notes.daycare = ("all %d slots filled"):format(slots); return end
-    local pets = stackList(inventory(save, "Pet"))
     local selected, total = {}, 0
-    for _, pet in ipairs(pets) do
+    for _, pet in ipairs(stackList(inventory(save, "Pet"))) do
         if not alive or not enabled.autoDaycare then return end
-        if used + total < slots and pet.data._lk ~= true then
-            selected[pet.uid] = pet.amount
-            total += pet.amount
-        end
         if used + total >= slots then break end
+        if pet.data._lk ~= true then
+            local take = math.min(pet.amount, slots - used - total)
+            selected[pet.uid] = take
+            total += take
+        end
     end
     if total <= 0 then notes.daycare = "no unlocked pets to enroll"; return end
     daycareNext = now + CFG.DaycareInterval
@@ -1317,10 +1470,9 @@ local function flagTick()
     if now < flagNext then return end
     local save = getSave()
     if not save then notes.flags = "waiting for profile"; return end
-    local items = stackList(inventory(save, "Misc"))
-    for _, item in ipairs(items) do
+    for _, item in ipairs(stackList(inventory(save, "Misc"))) do
         if not alive or not enabled.autoFlags then return end
-        if item.id:match(" Flag$") then
+        if item.id:match(" Flag$") and allowAll(picked.flags, item.id) then
             flagNext = now + CFG.FlagInterval
             local ok, message = invoke("FlexibleFlags_Consume", item.id, item.uid, 1)
             if not alive or not enabled.autoFlags then return end
@@ -1329,7 +1481,7 @@ local function flagTick()
             return
         end
     end
-    notes.flags = "no flags in inventory"
+    notes.flags = "no selected flags in inventory"
 end
 
 local function secretRoomTick()
@@ -1403,20 +1555,57 @@ end
 
 local function cardTick()
     local now = os.clock()
-    if now < fuseNext then return end
+    if now < cardNext then return end
     local save = getSave()
-    if not save then notes.fuse = "waiting for profile"; return end
+    if not save then notes.cards = "waiting for profile"; return end
     local payload, total = {}, 0
     for _, card in ipairs(stackList(inventory(save, "Card"))) do
-        local count = card.amount // 3
-        if count > 0 then payload[card.uid] = count; total += count end
+        if allowAll(picked.cards, card.id) then
+            -- CardItem:GetCombinationRequirement() defaults to Balancing.RequiredPerPetCardConversion (3).
+            local count = card.amount // 3
+            if count > 0 then payload[card.uid] = count; total += count end
+        end
     end
-    if total <= 0 then return end
-    fuseNext = now + CFG.FuseInterval
+    if total <= 0 then notes.cards = "no complete card sets"; return end
+    cardNext = now + CFG.CardInterval
     local ok, message = invoke("CardCombinationMachine_ActivateBulk", payload)
-    if not alive or not enabled.autoFuse then return end
-    notes.fuse = ok == true and ("combined " .. total .. " card sets") or tostring(message or "rejected")
+    if not alive or not enabled.autoCards then return end
+    notes.cards = ok == true and ("combined " .. total .. " card sets") or tostring(message or "rejected")
     if ok == true then saveNext = 0 end
+end
+
+local function diceTick()
+    local now = os.clock()
+    if now < diceNext then return end
+    local save = getSave()
+    if not save then notes.dice = "waiting for profile"; return end
+    local halves = {}
+    for _, item in ipairs(stackList(inventory(save, "Misc"))) do
+        halves[item.id] = (halves[item.id] or 0) + item.amount
+    end
+    for _, id in ipairs(DICE_IDS) do
+        if not alive or not enabled.autoDice then return end
+        local amount = halves[id] or 0
+        if amount > 0 and allowAll(picked.dice, id) then
+            diceNext = now + CFG.DiceInterval
+            local count = math.max(1, math.min(amount, CFG.DiceMaxConsume))
+            -- ActionMenu_Misc_Lucky_Dice_V2 / Mega: Invoke(remote, Id, count).
+            -- Fire Dice V2's menu sends the count alone.
+            local ok, message
+            if id == "Fire Dice V2" then
+                ok, message = invoke("FireDice_Consume_V2", count)
+            elseif MEGA_DICE[id] then
+                ok, message = invoke("LuckyDice_ConsumeMega_V2", id, count)
+            else
+                ok, message = invoke("LuckyDice_Consume_V2", id, count)
+            end
+            if not alive or not enabled.autoDice then return end
+            notes.dice = ok == true and ("rolled " .. id .. " x" .. count) or tostring(message or "rejected")
+            if ok == true then saveNext = 0 end
+            return
+        end
+    end
+    notes.dice = "no selected dice in inventory"
 end
 
 local function relicTick()
@@ -1616,6 +1805,7 @@ syncWorkers = function()
     ensureWorker("treehouse", enabled.autoTreehouse, 1, treehouseTick, function() enabled.autoTreehouse = false end)
     ensureWorker("fuse", enabled.autoFuse, 1, fuseTick, function() enabled.autoFuse = false end)
     ensureWorker("cards", enabled.autoCards, 1, cardTick, function() enabled.autoCards = false end)
+    ensureWorker("dice", enabled.autoDice, 1, diceTick, function() enabled.autoDice = false end)
     ensureWorker("relics", enabled.autoRelics, 1, relicTick, function() enabled.autoRelics = false end)
     ensureWorker("mailClaim", enabled.autoMailClaim, 1, mailClaimTick, function() enabled.autoMailClaim = false end)
     ensureWorker("hop", enabled.serverHop, CFG.HopInterval, hopTick, function() enabled.serverHop = false end)
@@ -1664,6 +1854,10 @@ local function updateStatus()
     local best = maxOwned(save)
     local count = 0
     for _ in pairs(zones) do count += 1 end
+    if picker.refresh and picker.page and picker.page.Visible and count ~= picker.zones then
+        picker.zones = count
+        picker.refresh()
+    end
     if auraPart then
         local point = position()
         if point then pcall(function() auraPart.Position = point end) end
@@ -1672,7 +1866,7 @@ local function updateStatus()
         infoLabels.farm.Text = "Speed: " .. notes.pet .. "\nTap/Aura: " .. notes.tap .. "\nOrbs: " .. notes.vacuum .. "\nEgg: " .. notes.egg .. "\nFast Farm = speed + tap + orbs. Aura cycles nearby targets; shared 16/s cap."
         infoLabels.tools.Text = "Anti-AFK: " .. notes.antiAfk .. "\nOptimize: " .. notes.optimize .. "\nServer hop: " .. notes.hop .. "\nJitter: " .. (enabled.jitter and "on (randomized tap timing)" or "off") .. "\nOptimize restores effects on OFF."
         infoLabels.zone.Text = "Here: " .. tostring(currentZone() or "unknown") .. "\nBest: " .. tostring(best and zones[best].id or "unknown") .. "\nBuy: " .. notes.buy .. "\nPet slots: " .. notes.petSlot .. "\nTeleport: " .. notes.tele .. "\nWorld " .. worldTarget .. ": " .. notes.world
-        infoLabels.items.Text = "Keys: " .. notes.keys .. "\nBags: " .. notes.bags .. "\nFruits: " .. notes.fruits .. "\nPotions: " .. notes.potions .. "\nFree gifts: " .. notes.freeGift .. "\nUltimate: " .. notes.ultimate .. "\nFlags: " .. notes.flags .. "\nMail: " .. notes.mailClaim
+        infoLabels.items.Text = "Keys: " .. notes.keys .. "\nBags: " .. notes.bags .. "\nFruits: " .. notes.fruits .. "\nPotions: " .. notes.potions .. "\nDice: " .. notes.dice .. "\nFree gifts: " .. notes.freeGift .. "\nUltimate: " .. notes.ultimate .. "\nFlags: " .. notes.flags .. "\nMail: " .. notes.mailClaim
         infoLabels.pets.Text = "Fuse: " .. notes.fuse .. "\nCards: " .. notes.cards .. "\nDaycare: " .. notes.daycare .. "\nSecret rooms: " .. notes.secret .. "\nRelics: " .. notes.relics .. "\nTreehouse: " .. notes.treehouse
         infoLabels.quest.Text = notes.quest .. "\nClaims finished NPC goals; does not solve every quest type."
         infoLabels.rank.Text = ("Rank: %s | Stars: %s | Rebirths: %s\nRank: %s\nRebirth: %s"):format(
@@ -1697,7 +1891,7 @@ local function buildGUI()
     local main = create("Frame", {Name = "Main", Size = UDim2.fromOffset(390, 420), Position = UDim2.fromOffset(40, 90), BackgroundColor3 = Color3.fromRGB(24, 27, 35), BorderSizePixel = 0}, screenGui)
     create("UICorner", {CornerRadius = UDim.new(0, 8)}, main)
     local title = create("Frame", {Name = "Title", Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = Color3.fromRGB(17, 20, 27), BorderSizePixel = 0, Active = true}, main)
-    create("TextLabel", {Size = UDim2.new(1, -130, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "PS99 CLEAN v14", TextColor3 = Color3.fromRGB(125, 212, 236), TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamBold, TextSize = 17}, title)
+    create("TextLabel", {Size = UDim2.new(1, -130, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "PS99 CLEAN v15", TextColor3 = Color3.fromRGB(125, 212, 236), TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamBold, TextSize = 17}, title)
     local function titleButton(text, offset, width, color, callback)
         local button = create("TextButton", {Size = UDim2.fromOffset(width, 26), Position = UDim2.new(1, offset, 0, 6), BackgroundColor3 = color, BorderSizePixel = 0, Text = text, TextColor3 = Color3.fromRGB(245, 245, 245), Font = Enum.Font.GothamBold, TextSize = 13}, title)
         connect(button.Activated, callback)
@@ -1710,8 +1904,9 @@ local function buildGUI()
         {name = "Zone", rows = {{"zoneTele", "Auto Tele Best Zone"}, {"zoneBuy", "Auto Buy Next Zone"}, {"autoBuyPetSlots", "Auto Buy Pet Slots"}, {"worldTele", "Auto World Teleport"}}, info = "zone", world = true},
         {name = "Quest", rows = {{"autoQuest", "Auto Quest (claim completed)"}}, info = "quest"},
         {name = "Rank", rows = {{"autoRank", "Auto Rank Rewards"}, {"claimRank", "Claim Rank Rewards", true}, {"autoRebirth", "Auto Rebirth (resets progress)"}}, info = "rank"},
-        {name = "Items", rows = {{"autoKeys", "Combine Key Halves"}, {"autoGiftBags", "Open Gift Bags"}, {"autoFruits", "Consume Fruits"}, {"autoPotions", "Consume Potions"}, {"autoFreeGifts", "Redeem Free Gifts"}, {"autoUltimate", "Auto Ultimate"}, {"autoFlags", "Deploy Flags"}, {"autoMailClaim", "Mailbox Claim All"}}, info = "items"},
+        {name = "Items", rows = {{"autoKeys", "Combine Key Halves"}, {"autoGiftBags", "Open Gift Bags"}, {"autoFruits", "Consume Fruits"}, {"autoPotions", "Consume Potions"}, {"autoDice", "Roll Lucky Dice"}, {"autoFreeGifts", "Redeem Free Gifts"}, {"autoUltimate", "Auto Ultimate"}, {"autoFlags", "Deploy Flags"}, {"autoMailClaim", "Mailbox Claim All"}}, info = "items"},
         {name = "Pets", rows = {{"autoFuse", "Fuse Duplicate Pets"}, {"autoCards", "Combine Pet Cards"}, {"autoDaycare", "Auto Daycare"}, {"autoSecretRooms", "Unlock Secret Rooms"}, {"autoRelics", "Collect Shiny Relics"}, {"autoTreehouse", "Treehouse Merchant"}}, info = "pets"},
+        {name = "Picks", rows = {}, info = "picks", picks = true},
         {name = "Tools", rows = {{"antiAfk", "Anti-AFK"}, {"serverHop", "Auto Low-Player Server"}}, info = "tools"},
     }
     local tabBar = create("Frame", {Size = UDim2.new(1, 0, 0, 32), Position = UDim2.fromOffset(0, 38), BackgroundTransparency = 1}, main)
@@ -1760,6 +1955,53 @@ local function buildGUI()
                 connect(button.Activated, function() setWorldTarget(world); setEnabled("worldTele", true) end)
             end
             y += 38
+        end
+        if tab.picks then
+            local picksPage = pages[index]
+            picksPage.CanvasSize = UDim2.fromOffset(0, 200)
+            local buttons_, refresh
+            local function rebuild()
+                for _, button in ipairs(buttons_ or {}) do pcall(function() button:Destroy() end) end
+                buttons_ = {}
+                local header = create("TextLabel", {Size = UDim2.new(1, -20, 0, 34), Position = UDim2.fromOffset(10, 6), BackgroundTransparency = 1, Text = "Ticked rows only. Nothing ticked = every row.", TextColor3 = Color3.fromRGB(235, 191, 117), TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true, Font = Enum.Font.GothamMedium, TextSize = 13}, picksPage)
+                buttons_[#buttons_ + 1] = header
+                local y = 42
+                for _, category in ipairs(PICK_CATEGORIES) do
+                    local key, title = category[1], category[2]
+                    local store = picked[key]
+                    local label = create("TextLabel", {Size = UDim2.new(1, -20, 0, 20), Position = UDim2.fromOffset(12, y), BackgroundTransparency = 1, Text = ("%s (%d ticked)"):format(title, pickCount(store)), TextColor3 = Color3.fromRGB(160, 200, 220), TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamBold, TextSize = 13}, picksPage)
+                    buttons_[#buttons_ + 1] = label
+                    y += 24
+                    local column = 0
+                    local items = pickItems(key)
+                    if #items == 0 then
+                        local none = create("TextLabel", {Size = UDim2.new(1, -20, 0, 18), Position = UDim2.fromOffset(16, y), BackgroundTransparency = 1, Text = "no entries yet", TextColor3 = Color3.fromRGB(120, 132, 146), TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.Gotham, TextSize = 12}, picksPage)
+                        buttons_[#buttons_ + 1] = none
+                        y += 22
+                    end
+                    for _, id in ipairs(items) do
+                        local item = id
+                        local on = isPicked(store, item)
+                        local button = create("TextButton", {Size = UDim2.new(0, 116, 0, 24), Position = UDim2.fromOffset(12 + (column % 3) * 120, y), BorderSizePixel = 0, Text = tostring(item), TextColor3 = Color3.fromRGB(240, 244, 248), Font = Enum.Font.GothamMedium, TextSize = 12, TextTruncate = Enum.TextTruncate.AtEnd, BackgroundColor3 = on and Color3.fromRGB(34, 153, 98) or Color3.fromRGB(45, 50, 62)}, picksPage)
+                        connect(button.Activated, function()
+                            togglePick(store, item)
+                            rebuild()
+                        end)
+                        buttons_[#buttons_ + 1] = button
+                        column += 1
+                        if column % 3 == 0 then y += 28 end
+                    end
+                    if column % 3 ~= 0 then y += 28 end
+                    y += 6
+                end
+                picksPage.CanvasSize = UDim2.fromOffset(0, y + 12)
+            end
+            refresh = rebuild
+            picker.refresh, picker.page = rebuild, picksPage
+            rebuild()
+            pages[index].CanvasSize = UDim2.fromOffset(0, 200)
+            connect(buttons[index].Activated, function() selectTab(tabIndex); if refresh then refresh() end end)
+            continue
         end
         infoLabels[tab.info] = create("TextLabel", {Size = UDim2.new(1, -24, 0, 112), Position = UDim2.fromOffset(12, y + 4), BackgroundTransparency = 1, Text = "waiting...", TextColor3 = Color3.fromRGB(176, 192, 206), TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, Font = Enum.Font.Gotham, TextSize = 13}, pages[index])
         pages[index].CanvasSize = UDim2.fromOffset(0, y + 124)
@@ -1821,6 +2063,22 @@ local controller = {
     ClaimRankRewards = claimRankRewards,
     AllOff = allOff,
     Stop = cleanup,
+    SetPick = function(category, id, value)
+        local store = picked[category]
+        if not store then return false, "unknown category" end
+        if type(value) == "boolean" then
+            store[id] = value or nil
+        else
+            togglePick(store, id)
+        end
+        if picker.refresh then picker.refresh() end
+        return true, pickCount(store)
+    end,
+    GetPicks = function()
+        local out = {}
+        for category, store in pairs(picked) do out[category] = table.clone(store) end
+        return out
+    end,
     GetStatus = function()
         getSave()
         return {running = alive, enabled = table.clone(enabled), world = worldTarget, profile = saveSource, notes = table.clone(notes)}
