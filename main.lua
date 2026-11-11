@@ -43,7 +43,7 @@ local CFG = {
     EggMaxHatch = 50,
     WorldInterval = 4,
     WorldBackoff = 12,
-    WorldCount = 4,
+    WorldCount = 6,
     OptimizeInterval = 2,
     OptimizeCap = 400,
     HopMaxPlayers = 4,
@@ -76,6 +76,7 @@ local remotes, modules = {}, {}
 local zones, zoneNumbers, rebirths, ranks, questDirs, eggByNumber = {}, {}, {}, {}, {}, {}
 local worldTarget = 1
 local snapshot, snapshotAt, saveSource = nil, -math.huge, "waiting"
+local saveCache = nil
 local pendingStats, statsRemote, statsConnection = nil, nil, nil
 local heapNext, saveNext = 0, 0
 local screenGui, stageLabel, footerLabel
@@ -139,8 +140,20 @@ local function getRemote(name)
     return nil
 end
 
+-- The current game hashes its Network remote names, so a raw "Get Stats"/etc.
+-- lookup by name can hit a decoy that returns nil. The game's own Network module
+-- resolves the real (hashed) remote internally, so prefer it whenever discovered.
 local function fire(name, ...)
     if not alive then return false, "stopped" end
+    local net = modules.network
+    if net then
+        local kind = REMOTE_TYPES[name] == "UnreliableRemoteEvent" and "UnreliableFire" or "Fire"
+        local fn = net[kind]
+        if type(fn) == "function" then
+            local ok, err = pcall(fn, name, ...)
+            return ok, ok and "sent" or tostring(err)
+        end
+    end
     local remote = getRemote(name)
     if not remote then return false, "missing " .. name end
     local ok, err = pcall(remote.FireServer, remote, ...)
@@ -152,7 +165,9 @@ local function invokeWithCompletion(name, completion, ...)
     if not alive then return nil, "stopped" end
     if requests[name] then return nil, "previous request still pending" end
     local remote = getRemote(name)
-    if not remote then return nil, "missing " .. name end
+    local net = modules.network
+    local hasNet = net and type(net.Invoke) == "function"
+    if not remote and not hasNet then return nil, "missing " .. name end
     local args = table.pack(...)
     local request = {started = os.clock(), done = false, sent = false, owner = workerContext[coroutine.running()]}
     requests[name] = request
@@ -163,7 +178,18 @@ local function invokeWithCompletion(name, completion, ...)
             return
         end
         request.sent = true
-        local result = table.pack(pcall(remote.InvokeServer, remote, table.unpack(args, 1, args.n)))
+        local result
+        local liveNet = modules.network
+        if liveNet and type(liveNet.Invoke) == "function" then
+            result = table.pack(pcall(liveNet.Invoke, name, table.unpack(args, 1, args.n)))
+        else
+            local liveRemote = getRemote(name)
+            if not liveRemote then
+                result = {false, "missing " .. name}
+            else
+                result = table.pack(pcall(liveRemote.InvokeServer, liveRemote, table.unpack(args, 1, args.n)))
+            end
+        end
         if not alive then return end
         request.result, request.done = result, true
         if requests[name] == request then requests[name] = nil end
@@ -193,6 +219,14 @@ local function looksLikeSave(value)
 end
 
 local function getSave()
+    if saveCache then
+        local ok, value = pcall(function() return rawget(saveCache, LocalPlayer) end)
+        if ok and looksLikeSave(value) then
+            saveSource = "live"
+            return value
+        end
+        if saveSource == "live" then snapshot = nil end
+    end
     if modules.save then
         local ok, value = pcall(modules.save.Get, LocalPlayer)
         if ok and looksLikeSave(value) then
@@ -210,11 +244,15 @@ local function getSave()
 end
 
 local function bindStats()
-    local remote = getRemote("New Stats")
-    local signal = remote and remote.OnClientEvent or nil
-    if not signal and modules.network then
-        local ok, fired = pcall(modules.network.Fired, "New Stats")
+    local signal
+    local net = modules.network
+    if net and type(net.Fired) == "function" then
+        local ok, fired = pcall(net.Fired, "New Stats")
         if ok and fired then signal = fired end
+    end
+    if not signal then
+        local remote = getRemote("New Stats")
+        signal = remote and remote.OnClientEvent or nil
     end
     if signal == statsRemote then return end
     if statsConnection then statsConnection:Disconnect() end
@@ -256,14 +294,6 @@ local function profileTick()
         elseif not snapshot then
             stage("profile: " .. tostring(ok and "unexpected profile shape" or value))
         end
-    end
-    -- The game hashes remote names, so prefer its own Network module when the raw
-    -- "Get Stats" remote cannot be found by name.
-    if network and not remote then
-        local ok, value = pcall(network.Invoke, "Get Stats", LocalPlayer)
-        if not alive then return end
-        adopt(ok, value)
-        return
     end
     local _, err = invokeWithCompletion("Get Stats", function(result) adopt(result[1], result[2]) end, LocalPlayer)
     if not alive then return end
@@ -324,6 +354,9 @@ local function scanHeap()
                 and type(rawget(object, "Fire")) == "function" and type(rawget(object, "Invoked")) == "function" then
                 modules.network = object
             end
+            -- The Save module's live cache is a table keyed by Player -> save. Reading
+            -- it directly needs no function signature and is always current.
+            if looksLikeSave(rawget(object, LocalPlayer)) then saveCache = object end
             if type(rawget(object, "CalculateSpeedMultiplier")) == "function"
                 and type(rawget(object, "GetByPlayer")) == "function"
                 and type(rawget(object, "GetByItemUID")) == "function" then
@@ -1218,7 +1251,7 @@ local function buildGUI()
     local main = create("Frame", {Name = "Main", Size = UDim2.fromOffset(390, 420), Position = UDim2.fromOffset(40, 90), BackgroundColor3 = Color3.fromRGB(24, 27, 35), BorderSizePixel = 0}, screenGui)
     create("UICorner", {CornerRadius = UDim.new(0, 8)}, main)
     local title = create("Frame", {Name = "Title", Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = Color3.fromRGB(17, 20, 27), BorderSizePixel = 0, Active = true}, main)
-    create("TextLabel", {Size = UDim2.new(1, -130, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "PS99 CLEAN v12", TextColor3 = Color3.fromRGB(125, 212, 236), TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamBold, TextSize = 17}, title)
+    create("TextLabel", {Size = UDim2.new(1, -130, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "PS99 CLEAN v13", TextColor3 = Color3.fromRGB(125, 212, 236), TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamBold, TextSize = 17}, title)
     local function titleButton(text, offset, width, color, callback)
         local button = create("TextButton", {Size = UDim2.fromOffset(width, 26), Position = UDim2.new(1, offset, 0, 6), BackgroundColor3 = color, BorderSizePixel = 0, Text = text, TextColor3 = Color3.fromRGB(245, 245, 245), Font = Enum.Font.GothamBold, TextSize = 13}, title)
         connect(button.Activated, callback)
