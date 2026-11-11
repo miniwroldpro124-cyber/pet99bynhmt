@@ -144,7 +144,10 @@ local picker = {refresh = nil, zones = -1, page = nil}
 local notes = {pet = "off", tap = "off", vacuum = "off", tele = "off", buy = "off", quest = "off", rank = "off", rebirth = "off", antiAfk = "off", egg = "off", world = "off", optimize = "off", hop = "off", petSlot = "off", keys = "off", bags = "off", fruits = "off", potions = "off", freeGift = "off", ultimate = "off", daycare = "off", flags = "off", secret = "off", relics = "off", treehouse = "off", fuse = "off", cards = "off", dice = "off", mailClaim = "off", heap = "idle; no startup scan", profile = "waiting for discovery"}
 
 local petHook, petOriginal, petModule
-local petPrevious = setmetatable({}, {__mode = "k"})
+-- petState.previous: untouched multiplier per pet. petState.records: PlayerPet
+-- instances found on the heap, so pet speed survives churn without rediscovering
+-- the module. One table because the chunk sits at Luau's 200-local limit.
+local petState = {previous = setmetatable({}, {__mode = "k"}), records = setmetatable({}, {__mode = "k"})}
 local targetModel, targetUid, targetAt
 local orbRecords = setmetatable({}, {__mode = "kv"})
 -- record -> the _superMagnet it had before we forced it on (restore on OFF).
@@ -492,6 +495,18 @@ local function inspectObject(object)
         and type(rawget(object, "GetByItemUID")) == "function" then
         modules.pet = object
     end
+    -- PlayerPet instances also carry the module through their metatable index,
+    -- so a pet found on the heap is enough to reach CalculateSpeedMultiplier
+    -- even when the module table itself was never in the returned snapshot.
+    if rawget(object, "euid") ~= nil and rawget(object, "owner") ~= nil
+        and rawget(object, "cpet") ~= nil and rawget(object, "destroyed") ~= nil then
+        petState.records[object] = true
+        local class = getmetatable(object)
+        class = type(class) == "table" and rawget(class, "__index")
+        if type(class) == "table" and type(rawget(class, "CalculateSpeedMultiplier")) == "function" then
+            modules.pet = class
+        end
+    end
     if type(rawget(object, "new")) == "function" and type(rawget(object, "Combine")) == "function"
         and type(rawget(object, "Collect")) == "function" and type(rawget(object, "ParkSpent")) == "function" then
         modules.orb = object
@@ -607,7 +622,7 @@ local function scanTree()
 end
 
 local function needsNative()
-    if (enabled.petSpeed or enabled.farm) and not modules.pet then return true end
+    if (enabled.petSpeed or enabled.farm) and not modules.pet and next(petState.records) == nil then return true end
     if (enabled.vacuum or enabled.farm) and (not modules.orb or orbBackfillNeeded) then return true end
     if enabled.autoEgg and next(eggByNumber) == nil then return true end
     if enabled.worldTele then
@@ -706,56 +721,80 @@ local function restorePetSpeed()
         local ok, err = pcall(function() petModule.CalculateSpeedMultiplier = petOriginal end)
         if not ok then warn("[PS99 CLEAN] pet restore: " .. tostring(err)) end
     end
-    for pet, previous in pairs(petPrevious) do
-        if not pet.destroyed and pet.speedMult == CFG.PetSpeedMult then
+    for record, previous in pairs(petState.previous) do
+        if not record.destroyed and record.speedMult == CFG.PetSpeedMult then
             local ok, err = pcall(function()
-                pet.speedMult = previous
-                if pet.cpet then pet.cpet:Broadcast("petSpeedMult", previous) end
+                record.speedMult = previous
+                local cpet = record.cpet
+                if type(cpet) == "table" then
+                    cpet:Broadcast("petSpeedMult", previous)
+                    cpet.parallelIn.petSpeedMult = previous
+                end
             end)
             if not ok then warn("[PS99 CLEAN] pet reset: " .. tostring(err)) end
         end
     end
-    table.clear(petPrevious)
+    table.clear(petState.previous)
     petModule, petOriginal, petHook = nil, nil, nil
     notes.pet = "off"
 end
 
 local function petTick()
     local mod = modules.pet
-    if not mod then notes.pet = "waiting for PlayerPet; " .. notes.heap; return end
-    if petModule and (mod ~= petModule or petModule.CalculateSpeedMultiplier ~= petHook) then
-        restorePetSpeed()
-        enabled.petSpeed, enabled.farm = false, false
-        syncWorkers()
-        updateToggles()
-        stage("Pet speed disabled: another script changed the pet module")
-        return
-    end
-    if not petHook then
-        local original = mod.CalculateSpeedMultiplier
-        local hook = function(pet, ...)
-            -- Only the game's own caller computes the native multiplier.
-            local result = original(pet, ...)
-            if alive and (enabled.petSpeed or enabled.farm) and pet.owner == LocalPlayer then
-                petPrevious[pet] = result
-                return CFG.PetSpeedMult
-            end
-            return result
+    if not mod and next(petState.records) == nil then notes.pet = "waiting for PlayerPet; " .. notes.heap; return end
+    if mod then
+        if petModule and (mod ~= petModule or petModule.CalculateSpeedMultiplier ~= petHook) then
+            restorePetSpeed()
+            enabled.petSpeed, enabled.farm = false, false
+            syncWorkers()
+            updateToggles()
+            stage("Pet speed disabled: another script changed the pet module")
+            return
         end
-        local ok, err = pcall(function() mod.CalculateSpeedMultiplier = hook end)
-        if not ok then error("pet module is read-only: " .. tostring(err)) end
-        petModule, petOriginal, petHook = mod, original, hook
+        if not petHook then
+            local original = mod.CalculateSpeedMultiplier
+            local hook = function(pet, ...)
+                -- Only the game's own caller computes the native multiplier.
+                local result = original(pet, ...)
+                if alive and (enabled.petSpeed or enabled.farm) and pet.owner == LocalPlayer then
+                    petState.previous[pet] = result
+                    return CFG.PetSpeedMult
+                end
+                return result
+            end
+            -- A frozen module cannot be patched; the per-tick write below still
+            -- drives the pets, so carry on instead of failing the worker.
+            local ok, err = pcall(function() mod.CalculateSpeedMultiplier = hook end)
+            if ok then
+                petModule, petOriginal, petHook = mod, original, hook
+            else
+                notes.pet = "module read-only: " .. tostring(err)
+            end
+        end
     end
     local count = 0
-    for _, pet in pairs(mod.GetByPlayer(LocalPlayer)) do
-        if pet.owner == LocalPlayer and not pet.destroyed and type(pet.speedMult) == "number" then
-            if petPrevious[pet] == nil then petPrevious[pet] = pet.speedMult end
-            pet.speedMult = CFG.PetSpeedMult
-            if pet.cpet then pet.cpet:Broadcast("petSpeedMult", CFG.PetSpeedMult) end
-            count += 1
+    local seen = {}
+    local function apply(record)
+        if seen[record] or record.owner ~= LocalPlayer or record.destroyed then return end
+        seen[record] = true
+        if petState.previous[record] == nil then petState.previous[record] = tonumber(record.speedMult) end
+        record.speedMult = CFG.PetSpeedMult
+        -- PetRendering multiplies input.petSpeedMult, and input IS cpet.parallelIn.
+        -- Broadcast records the value and flushes it to the actor next frame;
+        -- writing parallelIn covers the frames before that flush runs.
+        local cpet = record.cpet
+        if type(cpet) == "table" then
+            pcall(function() cpet:Broadcast("petSpeedMult", CFG.PetSpeedMult) end)
+            pcall(function() cpet.parallelIn.petSpeedMult = CFG.PetSpeedMult end)
         end
+        count += 1
     end
-    notes.pet = ("Inf | %d local pets"):format(count)
+    local group = mod and type(mod.GetByPlayer) == "function" and mod.GetByPlayer(LocalPlayer) or nil
+    if type(group) == "table" then
+        for _, record in pairs(group) do apply(record) end
+    end
+    for record in pairs(petState.records) do apply(record) end
+    notes.pet = count > 0 and ("Inf | %d local pets"):format(count) or "Inf | no pets equipped"
 end
 
 local function validTarget(model, point, zone)
@@ -1942,7 +1981,7 @@ local function buildGUI()
     local main = create("Frame", {Name = "Main", Size = UDim2.fromOffset(390, 420), Position = UDim2.fromOffset(40, 90), BackgroundColor3 = Color3.fromRGB(24, 27, 35), BorderSizePixel = 0}, screenGui)
     create("UICorner", {CornerRadius = UDim.new(0, 8)}, main)
     local title = create("Frame", {Name = "Title", Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = Color3.fromRGB(17, 20, 27), BorderSizePixel = 0, Active = true}, main)
-    create("TextLabel", {Size = UDim2.new(1, -130, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "PS99 CLEAN v16", TextColor3 = Color3.fromRGB(125, 212, 236), TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamBold, TextSize = 17}, title)
+    create("TextLabel", {Size = UDim2.new(1, -130, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "PS99 CLEAN v17", TextColor3 = Color3.fromRGB(125, 212, 236), TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamBold, TextSize = 17}, title)
     local function titleButton(text, offset, width, color, callback)
         local button = create("TextButton", {Size = UDim2.fromOffset(width, 26), Position = UDim2.new(1, offset, 0, 6), BackgroundColor3 = color, BorderSizePixel = 0, Text = text, TextColor3 = Color3.fromRGB(245, 245, 245), Font = Enum.Font.GothamBold, TextSize = 13}, title)
         connect(button.Activated, callback)
