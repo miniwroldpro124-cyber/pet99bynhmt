@@ -511,6 +511,16 @@ local function inspectObject(object)
         and type(rawget(object, "Collect")) == "function" and type(rawget(object, "ParkSpent")) == "function" then
         modules.orb = object
     end
+    -- BreakableCmds is a frozen table of forwarded BreakableFrontend calls. Its
+    -- zone index knows each breakable's dir (NoTapping, ManualDamage), which no
+    -- attribute on the model carries, so it beats walking the workspace tree.
+    if type(rawget(object, "AllByZoneAndClass")) == "function"
+        and type(rawget(object, "AllByInstanceAndClass")) == "function"
+        and type(rawget(object, "GetAutoTapTarget")) == "function"
+        and type(rawget(object, "DamageDealt")) == "function"
+        and type(rawget(object, "Get")) == "function" then
+        modules.breakables = object
+    end
     local part = rawget(object, "_part")
     if typeof(part) == "Instance" and type(rawget(object, "_combinedIds")) == "table"
         and type(rawget(object, "_destroyed")) == "boolean" then
@@ -563,7 +573,38 @@ local function scanHeap()
             return
         end
         heapState.tried += 1
-        if type(object) == "table" then inspectObject(object) end
+        local kind = type(object)
+        if kind == "table" then
+            inspectObject(object)
+            -- An instance's class table carries the module (PlayerPet, Orb, item
+            -- classes), so a metatable is a second route to the same functions.
+            local meta = getmetatable(object)
+            local class = type(meta) == "table" and rawget(meta, "__index")
+            if type(class) == "table" then inspectObject(class) end
+        elseif kind == "function" then
+            -- Executors that return functions only still expose the module
+            -- through its upvalues: Save's cache, the Orb class, zone dirs and
+            -- every other module-local table live there. Roblox's debug table
+            -- has no getupvalue, so the executor extensions are probed too.
+            local readUpvalue = (debug and debug.getupvalue) or getupvalue or env.getupvalue
+            if type(readUpvalue) == "function" then
+                for index = 1, 24 do
+                    local ok, upname, value = pcall(readUpvalue, object, index)
+                    if not ok or upname == nil then break end
+                    if type(value) == "table" then inspectObject(value) end
+                end
+            else
+                local dumpUpvalues = getupvalues or env.getupvalues
+                if type(dumpUpvalues) == "function" then
+                    local ok, values = pcall(dumpUpvalues, object)
+                    if ok and type(values) == "table" then
+                        for _, value in pairs(values) do
+                            if type(value) == "table" then inspectObject(value) end
+                        end
+                    end
+                end
+            end
+        end
         if heapState.clear and type(key) == "number" then
             local ok = pcall(function() scan[key] = nil end)
             if not ok then heapState.clear = false end
@@ -623,6 +664,10 @@ end
 
 local function needsNative()
     if (enabled.petSpeed or enabled.farm) and not modules.pet and next(petState.records) == nil then return true end
+    -- Only Fast Farm insists on the registry: it is the mode that must not
+    -- waste taps on NoTapping breakables. Plain tap and Aura keep using the
+    -- folder walk so they still cost no heap scan.
+    if enabled.farm and not modules.breakables then return true end
     if (enabled.vacuum or enabled.farm) and (not modules.orb or orbBackfillNeeded) then return true end
     if enabled.autoEgg and next(eggByNumber) == nil then return true end
     if enabled.worldTele then
@@ -797,6 +842,49 @@ local function petTick()
     notes.pet = count > 0 and ("Inf | %d local pets"):format(count) or "Inf | no pets equipped"
 end
 
+-- The game's own click routes your pets at the breakable (BreakableFrontend
+-- tryToSendPetToBreakable -> PlayerPet.SetTarget -> CQ_Route -> the pet's own
+-- Breakables_JoinPetBulk on arrival), and the server only credits pet damage
+-- for pets it has been told are on that target. Firing the click remote alone
+-- leaves every pet idle, so farm ended up doing click damage only. Only
+-- BelongsToLocalPlayer pets may be routed, and the game sends the nearest half.
+function petState.route(target, point)
+    if not alive or not target or not target.Parent then return 0 end
+    local mod = modules.pet
+    local local_pets, seen = {}, {}
+    local group = mod and type(mod.GetByPlayer) == "function" and mod.GetByPlayer(LocalPlayer) or nil
+    if type(group) == "table" then
+        for _, record in pairs(group) do if not seen[record] then seen[record] = true; local_pets[#local_pets + 1] = record end end
+    end
+    for record in pairs(petState.records) do
+        if not seen[record] then seen[record] = true; local_pets[#local_pets + 1] = record end
+    end
+    -- Nearest first, matching the game's table.sort by distance to the target.
+    local ranked = {}
+    for _, record in ipairs(local_pets) do
+        if not record.destroyed and record.owner == LocalPlayer and type(record.GetPosition) == "function" then
+            local distance = math.huge
+            local ok, at = pcall(record.GetPosition, record)
+            if ok and at then
+                local measured, value = pcall(function() return (at - point).Magnitude end)
+                if measured then distance = value end
+            end
+            ranked[#ranked + 1] = {record = record, distance = distance}
+        end
+    end
+    table.sort(ranked, function(a, b) return a.distance < b.distance end)
+    local limit = math.max(1, math.ceil(#ranked / 2))
+    local routed = 0
+    for index = 1, math.min(limit, #ranked) do
+        local record = ranked[index].record
+        -- A pet already on this breakable returns false and sends nothing, so
+        -- calling every tap costs one table compare rather than a remote.
+        local ok = pcall(function() record:SetTarget(target) end)
+        if ok then routed += 1 end
+    end
+    return routed
+end
+
 local function validTarget(model, point, zone)
     if not model or not model:IsDescendantOf(workspace) then return false end
     if model:GetAttribute("ManualDamage") or model:GetAttribute("DisableDamage") then return false end
@@ -811,7 +899,58 @@ end
 local targetScan
 local auraTargets, auraCursor = {}, 0
 local nextTapAt = 0
+
+-- The game taps from its own registry, not from the workspace tree: the record
+-- behind each uid carries dir.NoTapping / disableDamage / modifier.Owner, which
+-- no attribute on the model exposes. Falls through to the tree walk when the
+-- registry module was never discovered.
 local function pickTarget(point, zone)
+    local registry = modules.breakables
+    local byZone, getRecord = registry and registry.AllByZoneAndClass, registry and registry.Get
+    if type(byZone) == "function" and type(getRecord) == "function" and zone then
+        local merged = {}
+        for _, class in ipairs({"Normal", "Chest"}) do
+            local list = byZone(zone, class)
+            if type(list) == "table" then
+                for uid, value in pairs(list) do merged[uid] = value end
+            end
+        end
+        local targets, best, bestUid, bestDistance = {}, nil, nil, math.huge
+        for uid, value in pairs(merged) do
+            -- AllByZoneAndClass hands back the breakable record; the legacy
+            -- variant hands back the model. Accept either.
+            local record = type(value) == "table" and value.model ~= nil and value or nil
+            local model = record and record.model or value
+            if not record then
+                local ok, found = pcall(getRecord, uid)
+                record = ok and type(found) == "table" and found or nil
+            end
+            if record and model and model.Parent then
+                local dir = record.dir
+                local blocked = record.disableDamage == true or (type(dir) == "table" and dir.NoTapping == true)
+                    or not not (record.modifier and record.modifier.Owner and record.modifier.Owner ~= LocalPlayer.Name)
+                if not blocked then
+                    local distance = math.huge
+                    local at = record.position
+                    if at then
+                        local measured, result = pcall(function() return (at - point).Magnitude end)
+                        if measured then distance = result end
+                    end
+                    if distance <= CFG.TapRange then
+                        targets[#targets + 1] = model
+                        if distance <= bestDistance then best, bestUid, bestDistance = model, uid, distance end
+                    end
+                end
+            end
+        end
+        -- An empty registry is a real answer: everything in this zone is
+        -- NoTapping, owned by someone else, or out of range. Walking the folder
+        -- would put exactly those models back.
+        if next(merged) ~= nil then
+            auraTargets, targetScan = targets, nil
+            return best, bestUid
+        end
+    end
     local root = thingsFolder("Breakables")
     if not root then targetScan = nil; return nil, nil end
     if not targetScan or targetScan.root ~= root or targetScan.zone ~= zone then
@@ -883,6 +1022,13 @@ local function tapTick()
     end
     nextTapAt = now + interval
     local ok, message = fire("Breakables_PlayerDealDamage", targetUid)
+    -- Same order as the game's own click: damage first, then pets. Re-route on a
+    -- target change or twice a second, which catches pets equipped mid-farm
+    -- without re-ranking every pet on all 16 taps a second.
+    if targetModel ~= petState.routeTarget or now - (petState.routeAt or 0) >= 0.5 then
+        petState.routeTarget, petState.routeAt = targetModel, now
+        petState.route(targetModel, point)
+    end
     notes.tap = ok and (enabled.clickAura and "aura: " or "tapping ") .. tostring(targetUid) or message
 end
 
@@ -1911,6 +2057,7 @@ syncWorkers = function()
     if not enabled.tap and not enabled.farm and not enabled.clickAura then
         targetModel, targetUid, targetAt, targetScan = nil, nil, nil, nil
         auraTargets, auraCursor = {}, 0
+        petState.routeTarget, petState.routeAt = nil, nil
         notes.tap = "off"
     end
     if not enabled.vacuum and not enabled.farm then restoreOrbCapture(); notes.vacuum = "off" end
@@ -1981,7 +2128,7 @@ local function buildGUI()
     local main = create("Frame", {Name = "Main", Size = UDim2.fromOffset(390, 420), Position = UDim2.fromOffset(40, 90), BackgroundColor3 = Color3.fromRGB(24, 27, 35), BorderSizePixel = 0}, screenGui)
     create("UICorner", {CornerRadius = UDim.new(0, 8)}, main)
     local title = create("Frame", {Name = "Title", Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = Color3.fromRGB(17, 20, 27), BorderSizePixel = 0, Active = true}, main)
-    create("TextLabel", {Size = UDim2.new(1, -130, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "PS99 CLEAN v17", TextColor3 = Color3.fromRGB(125, 212, 236), TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamBold, TextSize = 17}, title)
+    create("TextLabel", {Size = UDim2.new(1, -130, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "PS99 CLEAN v19", TextColor3 = Color3.fromRGB(125, 212, 236), TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamBold, TextSize = 17}, title)
     local function titleButton(text, offset, width, color, callback)
         local button = create("TextButton", {Size = UDim2.fromOffset(width, 26), Position = UDim2.new(1, offset, 0, 6), BackgroundColor3 = color, BorderSizePixel = 0, Text = text, TextColor3 = Color3.fromRGB(245, 245, 245), Font = Enum.Font.GothamBold, TextSize = 13}, title)
         connect(button.Activated, callback)
@@ -2179,7 +2326,10 @@ env.__PS99CLEAN_CLEANUP = cleanup
 local ok, err = pcall(buildGUI)
 if not ok then cleanup(); error("PS99 CLEAN GUI: " .. tostring(err)) end
 if not alive then return controller end
-connect(LocalPlayer.CharacterAdded, function() targetModel, targetUid, targetAt = nil, nil, nil end)
+connect(LocalPlayer.CharacterAdded, function()
+    targetModel, targetUid, targetAt = nil, nil, nil
+    petState.routeTarget, petState.routeAt = nil, nil
+end)
 ensureWorker("status", true, 1, updateStatus)
 stage("Ready; no startup scans | Insert: hide/show | X: unload")
 return controller
