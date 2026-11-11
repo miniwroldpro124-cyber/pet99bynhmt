@@ -51,6 +51,23 @@ local CFG = {
     PetSlotInterval = 6,
     PetSlotBackoff = 12,
     PetSlotMax = 80,
+    KeyInterval = 4,
+    BagInterval = 3,
+    FruitInterval = 4,
+    PotionInterval = 4,
+    MailInterval = 15,
+    FreeGiftInterval = 20,
+    FreeGiftMax = 12,
+    UltimateInterval = 3,
+    DaycareInterval = 8,
+    DaycareReady = 7200,
+    FlagInterval = 60,
+    SecretInterval = 10,
+    TreehouseInterval = 30,
+    FuseInterval = 60,
+    FuseMinStacks = 6,
+    FuseMinPets = 3,
+    FuseMaxPets = 100,
     ProfileInterval = 2,
     SaveRefresh = 30,
     SnapshotTTL = 60,
@@ -69,6 +86,10 @@ local enabled = {
     autoRank = false, autoRebirth = false, antiAfk = false, clickAura = false,
     autoEgg = false, auraVisual = false, optBreakables = false, optPets = false, worldTele = false,
     serverHop = false, autoBuyPetSlots = false, jitter = false,
+    autoKeys = false, autoGiftBags = false, autoFruits = false, autoPotions = false,
+    autoFreeGifts = false, autoUltimate = false, autoDaycare = false, autoFlags = false,
+    autoSecretRooms = false, autoTreehouse = false, autoFuse = false, autoCards = false,
+    autoRelics = false, autoMailClaim = false,
 }
 local alive = true
 local workers, requests, connections = {}, {}, {}
@@ -81,7 +102,8 @@ local pendingStats, statsRemote, statsConnection = nil, nil, nil
 local heapNext, saveNext = 0, 0
 local screenGui, stageLabel, footerLabel
 local infoLabels, toggleButtons = {}, {}
-local notes = {pet = "off", tap = "off", vacuum = "off", tele = "off", buy = "off", quest = "off", rank = "off", rebirth = "off", antiAfk = "off", egg = "off", world = "off", optimize = "off", hop = "off", petSlot = "off", heap = "idle; no startup scan"}
+local notes = {pet = "off", tap = "off", vacuum = "off", tele = "off", buy = "off", quest = "off", rank = "off", rebirth = "off", antiAfk = "off", egg = "off", world = "off", optimize = "off", hop = "off", petSlot = "off", keys = "off", bags = "off", fruits = "off", potions = "off", freeGift = "off", ultimate = "off", daycare = "off", flags = "off", secret = "off", relics = "off", treehouse = "off", fuse = "off", cards = "off", mailClaim = "off", heap = "idle; no startup scan"}
+
 local petHook, petOriginal, petModule
 local petPrevious = setmetatable({}, {__mode = "k"})
 local targetModel, targetUid, targetAt
@@ -93,6 +115,12 @@ local orbCursor = 1
 local questNext, ensureNext, assignedQuests = {}, {}, {}
 local eggNext, worldTeleNext = 0, 0
 local petSlotNext = 0
+local keyNext, bagNext, mailNext = 0, 0, 0
+local freeGiftNext, ultimateNext, daycareNext, flagNext = 0, 0, 0, 0
+local secretNext, relicNext, treehouseNext, fuseNext = 0, 0, 0, 0
+local freeGiftCursor = 1
+local secretTried = {}
+local pendingMail = nil
 local auraPart
 local optBreakableEffects = setmetatable({}, {__mode = "k"})
 local optPetEffects = setmetatable({}, {__mode = "k"})
@@ -102,15 +130,46 @@ local REMOTE_TYPES = {
     ["Get Stats"] = "RemoteFunction",
     ["New Stats"] = "RemoteEvent",
     ["Breakables_PlayerDealDamage"] = "UnreliableRemoteEvent",
+    ["Breakables_JoinPetBulk"] = "RemoteEvent",
     ["Orbs: Collect"] = "RemoteEvent",
     ["Teleports_RequestTeleport"] = "RemoteFunction",
     ["Zones_RequestPurchase"] = "RemoteFunction",
     ["NPC Quests: Ensure"] = "RemoteFunction",
     ["NPC Quests: Redeem"] = "RemoteFunction",
     ["Ranks_ClaimAll"] = "RemoteEvent",
+    ["Ranks_ClaimReward"] = "RemoteEvent",
     ["Rebirth_Request"] = "RemoteFunction",
     ["Eggs_RequestPurchase"] = "RemoteFunction",
     ["EquipSlotsMachine_RequestPurchase"] = "RemoteFunction",
+    ["CrystalKey_Combine"] = "RemoteFunction",
+    ["TechKey_Combine"] = "RemoteFunction",
+    ["VoidKey_Combine"] = "RemoteFunction",
+    ["FantasyKey_Combine"] = "RemoteFunction",
+    ["MVPKey_Combine"] = "RemoteFunction",
+    ["SecretKey_Combine"] = "RemoteFunction",
+    ["TreasureHideout_Combine"] = "RemoteFunction",
+    ["CrystalKey_Unlock"] = "RemoteFunction",
+    ["TechKey_Unlock"] = "RemoteFunction",
+    ["VoidKey_Unlock"] = "RemoteFunction",
+    ["FantasyKey_Unlock"] = "RemoteFunction",
+    ["GiftBag_Open"] = "RemoteFunction",
+    ["Fruits: Consume"] = "RemoteEvent",
+    ["Potions: Consume"] = "RemoteEvent",
+    ["Redeem Free Gift"] = "RemoteFunction",
+    ["Ultimates: Activate"] = "RemoteFunction",
+    ["Daycare: Enroll"] = "RemoteFunction",
+    ["Daycare: Claim"] = "RemoteFunction",
+    ["FlexibleFlags_Consume"] = "RemoteFunction",
+    ["SecretRoom_Unlock"] = "RemoteFunction",
+    ["TreehouseMerchant_Purchase"] = "RemoteFunction",
+    ["FuseMachine_Activate"] = "RemoteFunction",
+    ["CardCombinationMachine_ActivateBulk"] = "RemoteFunction",
+    ["Relics_Request"] = "RemoteFunction",
+    ["Relic_Found"] = "RemoteFunction",
+    ["YS_Load"] = "RemoteFunction",
+    ["RD_Ingest"] = "RemoteFunction",
+    ["Lootables_Open"] = "RemoteFunction",
+    ["Spinny Wheel: Request Spin"] = "RemoteFunction",
 }
 
 local function stage(message)
@@ -459,6 +518,10 @@ local function needsNative()
     -- can exist yet return nil, so always discover the Save module when a profile
     -- is needed, regardless of whether a stats remote was found by name.
     if (enabled.zoneTele or enabled.zoneBuy or enabled.autoQuest or enabled.autoRank or enabled.autoRebirth or enabled.autoEgg or enabled.worldTele or enabled.autoBuyPetSlots) and not save then return true end
+    if not save and (enabled.autoKeys or enabled.autoGiftBags or enabled.autoFruits or enabled.autoPotions
+        or enabled.autoFreeGifts or enabled.autoUltimate or enabled.autoDaycare or enabled.autoFlags
+        or enabled.autoSecretRooms or enabled.autoRelics or enabled.autoTreehouse or enabled.autoFuse
+        or enabled.autoCards or enabled.autoMailClaim) then return true end
     if enabled.autoRebirth and save and not rebirths[save.Rebirths + 1] then return true end
     if enabled.autoQuest and save and type(save.NPCQuests) == "table" then
         for id, data in pairs(save.NPCQuests) do
@@ -1043,6 +1106,373 @@ local function petSlotTick()
     if ok == true then petSlotNext = os.clock() + CFG.PetSlotInterval; saveNext = 0 end
 end
 
+local function serverClock()
+    local ok, value = pcall(function() return workspace:GetServerTimeNow() end)
+    if ok and type(value) == "number" then return value end
+    if type(os.time) == "function" then return os.time() end
+    return 0
+end
+
+local function inventory(save, kind)
+    local inv = save and rawget(save, "Inventory")
+    local bucket = type(inv) == "table" and rawget(inv, kind)
+    return type(bucket) == "table" and bucket or nil
+end
+
+-- Stack items in a save bucket: {uid = id, amount = n, data = raw}, sorted by id.
+local function stackList(bucket)
+    local out = {}
+    if not bucket then return out end
+    for uid, data in pairs(bucket) do
+        if type(data) == "table" and type(data.id) == "string" then
+            out[#out + 1] = {uid = uid, id = data.id, amount = tonumber(data._am) or 1, data = data}
+        end
+    end
+    table.sort(out, function(a, b)
+        if a.id == b.id then return tostring(a.uid) < tostring(b.uid) end
+        return a.id < b.id
+    end)
+    return out
+end
+
+local KEY_PAIRS = {
+    {name = "CrystalKey_Combine", lower = "Crystal Key Lower Half", upper = "Crystal Key Upper Half"},
+    {name = "TechKey_Combine", lower = "Tech Key Lower Half", upper = "Tech Key Upper Half"},
+    {name = "VoidKey_Combine", lower = "Void Key Lower Half", upper = "Void Key Upper Half"},
+    {name = "FantasyKey_Combine", lower = "Fantasy Key Lower Half", upper = "Fantasy Key Upper Half"},
+    {name = "MVPKey_Combine", lower = "MVP Key Lower Half", upper = "MVP Key Upper Half"},
+    {name = "SecretKey_Combine", lower = "Secret Key Lower Half", upper = "Secret Key Upper Half"},
+    {name = "TreasureHideout_Combine", lower = "Treasure Hideout Key Lower Half", upper = "Treasure Hideout Key Upper Half"},
+}
+
+local BAG_KINDS = {"Gift Bag", "Large Gift Bag", "Seed Bag", "Diamond Gift Bag"}
+
+local function keyTick()
+    local now = os.clock()
+    if now < keyNext then return end
+    local save = getSave()
+    if not save then notes.keys = "waiting for profile"; return end
+    local misc = stackList(inventory(save, "Misc"))
+    local halves = {}
+    for _, item in ipairs(misc) do halves[item.id] = (halves[item.id] or 0) + item.amount end
+    for _, pair in ipairs(KEY_PAIRS) do
+        if not alive or not enabled.autoKeys then return end
+        local count = math.min(halves[pair.lower] or 0, halves[pair.upper] or 0)
+        if count > 0 then
+            keyNext = now + CFG.KeyInterval
+            local ok, message = invoke(pair.name, count)
+            if not alive or not enabled.autoKeys then return end
+            notes.keys = ok == true and pair.name .. " x" .. count or tostring(message or "rejected")
+            if ok == true then saveNext = 0 end
+            return
+        end
+    end
+    notes.keys = "no matching key halves in inventory"
+end
+
+local function bagTick()
+    local now = os.clock()
+    if now < bagNext then return end
+    local save = getSave()
+    if not save then notes.bags = "waiting for profile"; return end
+    local buckets = {"Misc", "Lootbox"}
+    for _, kind in ipairs(BAG_KINDS) do
+        for _, bucketName in ipairs(buckets) do
+            local items = stackList(inventory(save, bucketName))
+            for _, item in ipairs(items) do
+                if not alive or not enabled.autoGiftBags then return end
+                if item.id == kind then
+                    bagNext = now + CFG.BagInterval
+                    local amount = math.max(1, math.min(item.amount, 10))
+                    local ok, message = invoke("GiftBag_Open", kind, amount)
+                    if not alive or not enabled.autoGiftBags then return end
+                    notes.bags = ok == true and ("opened " .. kind .. " x" .. amount) or tostring(message or "rejected")
+                    if ok == true then saveNext = 0 end
+                    return
+                end
+            end
+        end
+    end
+    notes.bags = "no unopened bags"
+end
+
+local consumeNext = {Fruit = 0, Potion = 0}
+local function consumeTick(kind, remote, noteKey)
+    local now = os.clock()
+    if now < consumeNext[kind] then return end
+    local save = getSave()
+    if not save then notes[noteKey] = "waiting for profile"; return end
+    local items = stackList(inventory(save, kind))
+    for _, item in ipairs(items) do
+        if not alive then return end
+        consumeNext[kind] = now + CFG.FruitInterval
+        local ok, message = fire(remote, item.uid, math.max(1, math.min(item.amount, 10)))
+        if not alive then return end
+        notes[noteKey] = ok and ("consumed " .. item.id) or tostring(message or "rejected")
+        if ok then saveNext = 0 end
+        return
+    end
+    notes[noteKey] = "nothing to consume"
+end
+
+local function fruitTick() consumeTick("Fruit", "Fruits: Consume", "fruits") end
+local function potionTick() consumeTick("Potion", "Potions: Consume", "potions") end
+
+local function freeGiftTick()
+    local now = os.clock()
+    if now < freeGiftNext then return end
+    local save = getSave()
+    if not save then notes.freeGift = "waiting for profile"; return end
+    local redeemed = type(save.FreeGiftsRedeemed) == "table" and save.FreeGiftsRedeemed or {}
+    local claimed = {}
+    for _, id in ipairs(redeemed) do claimed[tostring(id)] = true end
+    for _ = 1, CFG.FreeGiftMax do
+        if not alive or not enabled.autoFreeGifts then return end
+        local id = freeGiftCursor
+        freeGiftCursor = freeGiftCursor % CFG.FreeGiftMax + 1
+        if not claimed[tostring(id)] then
+            freeGiftNext = now + CFG.FreeGiftInterval
+            local ok, message = invoke("Redeem Free Gift", id)
+            if not alive or not enabled.autoFreeGifts then return end
+            notes.freeGift = ok == true and ("redeemed gift " .. id) or tostring(message or "not ready")
+            if ok == true then saveNext = 0 end
+            return
+        end
+    end
+    notes.freeGift = "all free gifts redeemed"
+end
+
+local function ultimateTick()
+    local now = os.clock()
+    if now < ultimateNext then return end
+    local save = getSave()
+    if not save then notes.ultimate = "waiting for profile"; return end
+    local id = save.EquippedUltimate
+    if type(id) ~= "string" then notes.ultimate = "no ultimate equipped"; return end
+    local cooldowns = type(save.UltimateCooldowns) == "table" and save.UltimateCooldowns or {}
+    local charge = tonumber(cooldowns[id]) or 0
+    if charge < 1 then notes.ultimate = ("charging %s (%d%%)"):format(id, math.floor(charge * 100)); return end
+    ultimateNext = now + CFG.UltimateInterval
+    local ok, message = invoke("Ultimates: Activate", id)
+    if not alive or not enabled.autoUltimate then return end
+    notes.ultimate = ok == true and ("activated " .. id) or tostring(message or "rejected")
+    if ok == true then saveNext = 0 end
+end
+
+local function daycareTick()
+    local now = os.clock()
+    if now < daycareNext then return end
+    local save = getSave()
+    if not save then notes.daycare = "waiting for profile"; return end
+    local active = type(save.DaycareActive) == "table" and save.DaycareActive or {}
+    local serverNow = serverClock()
+    local enroll
+    for uid, record in pairs(active) do
+        if not alive or not enabled.autoDaycare then return end
+        if type(record) == "table" and record.Pet ~= nil then
+            local created = tonumber(record.CreationTime) or serverNow
+            -- Daycare counts offline time at 1x and online time at 3x; assume online.
+            local remaining = 21600 - math.max(0, serverNow - created) * 3
+            if remaining <= 0 then
+                daycareNext = now + CFG.DaycareInterval
+                local ok, message = invoke("Daycare: Claim", tostring(uid))
+                if not alive or not enabled.autoDaycare then return end
+                notes.daycare = ok == true and ("claimed " .. tostring(uid)) or tostring(message or "rejected")
+                if ok == true then saveNext = 0 end
+                return
+            end
+            if not enroll and remaining <= CFG.DaycareReady then
+                enroll = true
+                notes.daycare = ("one pet ready in %d min"):format(math.ceil(remaining / 60))
+            end
+        end
+    end
+    if enroll then return end
+    local used = 0
+    for _, record in pairs(active) do
+        if type(record) == "table" and type(record.Pet) == "table" then used += tonumber(record.Pet._am) or 1 end
+    end
+    local slots = 10 + (tonumber(save.DaycareVouchers) or 0)
+    if used >= slots then notes.daycare = ("all %d slots filled"):format(slots); return end
+    local pets = stackList(inventory(save, "Pet"))
+    local selected, total = {}, 0
+    for _, pet in ipairs(pets) do
+        if not alive or not enabled.autoDaycare then return end
+        if used + total < slots and pet.data._lk ~= true then
+            selected[pet.uid] = pet.amount
+            total += pet.amount
+        end
+        if used + total >= slots then break end
+    end
+    if total <= 0 then notes.daycare = "no unlocked pets to enroll"; return end
+    daycareNext = now + CFG.DaycareInterval
+    local ok, message = invoke("Daycare: Enroll", selected)
+    if not alive or not enabled.autoDaycare then return end
+    notes.daycare = ok == true and ("enrolled " .. total .. " pets") or tostring(message or "rejected")
+    if ok == true then saveNext = 0 end
+end
+
+local function flagTick()
+    local now = os.clock()
+    if now < flagNext then return end
+    local save = getSave()
+    if not save then notes.flags = "waiting for profile"; return end
+    local items = stackList(inventory(save, "Misc"))
+    for _, item in ipairs(items) do
+        if not alive or not enabled.autoFlags then return end
+        if item.id:match(" Flag$") then
+            flagNext = now + CFG.FlagInterval
+            local ok, message = invoke("FlexibleFlags_Consume", item.id, item.uid, 1)
+            if not alive or not enabled.autoFlags then return end
+            notes.flags = ok == true and ("deployed " .. item.id) or tostring(message or "rejected")
+            if ok == true then saveNext = 0 end
+            return
+        end
+    end
+    notes.flags = "no flags in inventory"
+end
+
+local function secretRoomTick()
+    local now = os.clock()
+    if now < secretNext then return end
+    local save = getSave()
+    if not save then notes.secret = "waiting for profile"; return end
+    local owned = type(save.SecretRooms) == "table" and save.SecretRooms or {}
+    local ok, tagged = pcall(function() return game:GetService("CollectionService"):GetTagged("Secret Room") end)
+    if not ok or type(tagged) ~= "table" then notes.secret = "no tagged secret rooms"; return end
+    for _, model in ipairs(tagged) do
+        if not alive or not enabled.autoSecretRooms then return end
+        local name = model.Name
+        if type(name) == "string" and not owned[name] and not secretTried[name] then
+            secretTried[name] = true
+            secretNext = now + CFG.SecretInterval
+            local result, message = invoke("SecretRoom_Unlock", name)
+            if not alive or not enabled.autoSecretRooms then return end
+            notes.secret = result == true and ("unlocked " .. name) or tostring(message or "no secret key")
+            if result == true then saveNext = 0 end
+            return
+        end
+    end
+    notes.secret = "all nearby secret rooms unlocked"
+end
+
+local function treehouseTick()
+    local now = os.clock()
+    if now < treehouseNext then return end
+    treehouseNext = now + CFG.TreehouseInterval
+    for slot = 1, 3 do
+        if not alive or not enabled.autoTreehouse then return end
+        local ok, message = invoke("TreehouseMerchant_Purchase", slot)
+        if not alive or not enabled.autoTreehouse then return end
+        notes.treehouse = ok == true and ("bought slot " .. slot) or tostring(message or "sold out")
+        if ok == true then saveNext = 0; return end
+    end
+end
+
+local function fuseTick()
+    local now = os.clock()
+    if now < fuseNext then return end
+    local save = getSave()
+    if not save then notes.fuse = "waiting for profile"; return end
+    local pets = stackList(inventory(save, "Pet"))
+    local groups, order = {}, {}
+    for _, pet in ipairs(pets) do
+        if pet.data._lk ~= true then
+            local key = pet.id .. (pet.data.sh and "|s" or "") .. (pet.data.pt and ("|" .. pet.data.pt) or "")
+            if not groups[key] then groups[key] = {}; order[#order + 1] = key end
+            table.insert(groups[key], pet)
+        end
+    end
+    if #order < CFG.FuseMinStacks then notes.fuse = ("needs %d distinct pets (have %d)"):format(CFG.FuseMinStacks, #order); return end
+    table.sort(order)
+    local payload, total = {}, 0
+    for _, key in ipairs(order) do
+        if total >= CFG.FuseMaxPets then break end
+        local stack = groups[key][1]
+        local take = math.min(stack.amount, CFG.FuseMaxPets - total)
+        payload[stack.uid] = take
+        total += take
+    end
+    if total < CFG.FuseMinPets then notes.fuse = "not enough pets to fuse (" .. total .. ")"; return end
+    fuseNext = now + CFG.FuseInterval
+    local ok, message = invoke("FuseMachine_Activate", payload)
+    if not alive or not enabled.autoFuse then return end
+    notes.fuse = ok == true and ("fused " .. total .. " pets") or tostring(message or "rejected")
+    if ok == true then saveNext = 0 end
+end
+
+local function cardTick()
+    local now = os.clock()
+    if now < fuseNext then return end
+    local save = getSave()
+    if not save then notes.fuse = "waiting for profile"; return end
+    local payload, total = {}, 0
+    for _, card in ipairs(stackList(inventory(save, "Card"))) do
+        local count = card.amount // 3
+        if count > 0 then payload[card.uid] = count; total += count end
+    end
+    if total <= 0 then return end
+    fuseNext = now + CFG.FuseInterval
+    local ok, message = invoke("CardCombinationMachine_ActivateBulk", payload)
+    if not alive or not enabled.autoFuse then return end
+    notes.fuse = ok == true and ("combined " .. total .. " card sets") or tostring(message or "rejected")
+    if ok == true then saveNext = 0 end
+end
+
+local function relicTick()
+    local now = os.clock()
+    if now < relicNext then return end
+    local save = getSave()
+    if not save then notes.relics = "waiting for profile"; return end
+    local owned = type(save.ShinyRelics) == "table" and save.ShinyRelics or {}
+    local relics, message = invoke("Relics_Request")
+    if not alive or not enabled.autoRelics then return end
+    if type(relics) ~= "table" then notes.relics = tostring(message or relics or "relic list unavailable"); return end
+    local has = {}
+    for _, id in ipairs(owned) do has[tostring(id)] = true end
+    for _, record in pairs(relics) do
+        if not alive or not enabled.autoRelics then return end
+        local id = type(record) == "table" and (record.Id or record._id) or nil
+        if type(id) == "string" and not has[id] then
+            relicNext = now + CFG.SecretInterval
+            local found, message = invoke("Relic_Found", id)
+            if not alive or not enabled.autoRelics then return end
+            notes.relics = found == true and ("relic found: " .. id) or tostring(message or "not reachable")
+            if found == true then saveNext = 0 end
+            return
+        end
+    end
+    notes.relics = "no uncollected relics listed"
+end
+
+local function mailClaimTick()
+    local now = os.clock()
+    if now < mailNext then return end
+    local save = getSave()
+    if not save then notes.mailClaim = "waiting for profile"; return end
+    if not pendingMail then
+        local inbox, loadError = invoke("YS_Load")
+        if not alive or not enabled.autoMailClaim then return end
+        if type(inbox) ~= "table" then notes.mailClaim = tostring(loadError or inbox or "mailbox unavailable"); return end
+        local uuids = {}
+        for _, mail in ipairs(type(inbox.Inbox) == "table" and inbox.Inbox or {}) do
+            if type(mail) == "table" and type(mail.uuid) == "string" then table.insert(uuids, mail.uuid) end
+        end
+        if #uuids == 0 then notes.mailClaim = "mailbox empty"; return end
+        pendingMail = uuids
+    end
+    mailNext = now + CFG.MailInterval
+    local ok, message = invoke("RD_Ingest", pendingMail)
+    if not alive or not enabled.autoMailClaim then return end
+    if ok == true then
+        notes.mailClaim = "claimed " .. #pendingMail .. " mail"
+        saveNext = 0
+    else
+        notes.mailClaim = tostring(message or "claim rejected")
+    end
+    pendingMail = nil
+end
+
 local function httpGet(url)
     if type(game.HttpGet) == "function" then
         local ok, body = pcall(game.HttpGet, game, url)
@@ -1174,6 +1604,20 @@ syncWorkers = function()
     ensureWorker("egg", enabled.autoEgg, 0.5, eggTick, function() enabled.autoEgg = false end)
     ensureWorker("world", enabled.worldTele, 0.5, worldTeleTick, function() enabled.worldTele = false end)
     ensureWorker("petSlot", enabled.autoBuyPetSlots, 1, petSlotTick, function() enabled.autoBuyPetSlots = false end)
+    ensureWorker("keys", enabled.autoKeys, 1, keyTick, function() enabled.autoKeys = false end)
+    ensureWorker("bags", enabled.autoGiftBags, 1, bagTick, function() enabled.autoGiftBags = false end)
+    ensureWorker("fruits", enabled.autoFruits, 1, fruitTick, function() enabled.autoFruits = false end)
+    ensureWorker("potions", enabled.autoPotions, 1, potionTick, function() enabled.autoPotions = false end)
+    ensureWorker("freeGift", enabled.autoFreeGifts, 1, freeGiftTick, function() enabled.autoFreeGifts = false end)
+    ensureWorker("ultimate", enabled.autoUltimate, 1, ultimateTick, function() enabled.autoUltimate = false end)
+    ensureWorker("daycare", enabled.autoDaycare, 1, daycareTick, function() enabled.autoDaycare = false end)
+    ensureWorker("flags", enabled.autoFlags, 1, flagTick, function() enabled.autoFlags = false end)
+    ensureWorker("secret", enabled.autoSecretRooms, 1, secretRoomTick, function() enabled.autoSecretRooms = false end)
+    ensureWorker("treehouse", enabled.autoTreehouse, 1, treehouseTick, function() enabled.autoTreehouse = false end)
+    ensureWorker("fuse", enabled.autoFuse, 1, fuseTick, function() enabled.autoFuse = false end)
+    ensureWorker("cards", enabled.autoCards, 1, cardTick, function() enabled.autoCards = false end)
+    ensureWorker("relics", enabled.autoRelics, 1, relicTick, function() enabled.autoRelics = false end)
+    ensureWorker("mailClaim", enabled.autoMailClaim, 1, mailClaimTick, function() enabled.autoMailClaim = false end)
     ensureWorker("hop", enabled.serverHop, CFG.HopInterval, hopTick, function() enabled.serverHop = false end)
     if not enabled.optBreakables then restoreEffects(optBreakableEffects) end
     if not enabled.optPets then restoreEffects(optPetEffects) end
@@ -1228,6 +1672,8 @@ local function updateStatus()
         infoLabels.farm.Text = "Speed: " .. notes.pet .. "\nTap/Aura: " .. notes.tap .. "\nOrbs: " .. notes.vacuum .. "\nEgg: " .. notes.egg .. "\nFast Farm = speed + tap + orbs. Aura cycles nearby targets; shared 16/s cap."
         infoLabels.tools.Text = "Anti-AFK: " .. notes.antiAfk .. "\nOptimize: " .. notes.optimize .. "\nServer hop: " .. notes.hop .. "\nJitter: " .. (enabled.jitter and "on (randomized tap timing)" or "off") .. "\nOptimize restores effects on OFF."
         infoLabels.zone.Text = "Here: " .. tostring(currentZone() or "unknown") .. "\nBest: " .. tostring(best and zones[best].id or "unknown") .. "\nBuy: " .. notes.buy .. "\nPet slots: " .. notes.petSlot .. "\nTeleport: " .. notes.tele .. "\nWorld " .. worldTarget .. ": " .. notes.world
+        infoLabels.items.Text = "Keys: " .. notes.keys .. "\nBags: " .. notes.bags .. "\nFruits: " .. notes.fruits .. "\nPotions: " .. notes.potions .. "\nFree gifts: " .. notes.freeGift .. "\nUltimate: " .. notes.ultimate .. "\nFlags: " .. notes.flags .. "\nMail: " .. notes.mailClaim
+        infoLabels.pets.Text = "Fuse: " .. notes.fuse .. "\nCards: " .. notes.cards .. "\nDaycare: " .. notes.daycare .. "\nSecret rooms: " .. notes.secret .. "\nRelics: " .. notes.relics .. "\nTreehouse: " .. notes.treehouse
         infoLabels.quest.Text = notes.quest .. "\nClaims finished NPC goals; does not solve every quest type."
         infoLabels.rank.Text = ("Rank: %s | Stars: %s | Rebirths: %s\nRank: %s\nRebirth: %s"):format(
             tostring(save and save.Rank or "?"), tostring(save and save.RankStars or "?"),
@@ -1251,7 +1697,7 @@ local function buildGUI()
     local main = create("Frame", {Name = "Main", Size = UDim2.fromOffset(390, 420), Position = UDim2.fromOffset(40, 90), BackgroundColor3 = Color3.fromRGB(24, 27, 35), BorderSizePixel = 0}, screenGui)
     create("UICorner", {CornerRadius = UDim.new(0, 8)}, main)
     local title = create("Frame", {Name = "Title", Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = Color3.fromRGB(17, 20, 27), BorderSizePixel = 0, Active = true}, main)
-    create("TextLabel", {Size = UDim2.new(1, -130, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "PS99 CLEAN v13", TextColor3 = Color3.fromRGB(125, 212, 236), TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamBold, TextSize = 17}, title)
+    create("TextLabel", {Size = UDim2.new(1, -130, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "PS99 CLEAN v14", TextColor3 = Color3.fromRGB(125, 212, 236), TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamBold, TextSize = 17}, title)
     local function titleButton(text, offset, width, color, callback)
         local button = create("TextButton", {Size = UDim2.fromOffset(width, 26), Position = UDim2.new(1, offset, 0, 6), BackgroundColor3 = color, BorderSizePixel = 0, Text = text, TextColor3 = Color3.fromRGB(245, 245, 245), Font = Enum.Font.GothamBold, TextSize = 13}, title)
         connect(button.Activated, callback)
@@ -1264,6 +1710,8 @@ local function buildGUI()
         {name = "Zone", rows = {{"zoneTele", "Auto Tele Best Zone"}, {"zoneBuy", "Auto Buy Next Zone"}, {"autoBuyPetSlots", "Auto Buy Pet Slots"}, {"worldTele", "Auto World Teleport"}}, info = "zone", world = true},
         {name = "Quest", rows = {{"autoQuest", "Auto Quest (claim completed)"}}, info = "quest"},
         {name = "Rank", rows = {{"autoRank", "Auto Rank Rewards"}, {"claimRank", "Claim Rank Rewards", true}, {"autoRebirth", "Auto Rebirth (resets progress)"}}, info = "rank"},
+        {name = "Items", rows = {{"autoKeys", "Combine Key Halves"}, {"autoGiftBags", "Open Gift Bags"}, {"autoFruits", "Consume Fruits"}, {"autoPotions", "Consume Potions"}, {"autoFreeGifts", "Redeem Free Gifts"}, {"autoUltimate", "Auto Ultimate"}, {"autoFlags", "Deploy Flags"}, {"autoMailClaim", "Mailbox Claim All"}}, info = "items"},
+        {name = "Pets", rows = {{"autoFuse", "Fuse Duplicate Pets"}, {"autoCards", "Combine Pet Cards"}, {"autoDaycare", "Auto Daycare"}, {"autoSecretRooms", "Unlock Secret Rooms"}, {"autoRelics", "Collect Shiny Relics"}, {"autoTreehouse", "Treehouse Merchant"}}, info = "pets"},
         {name = "Tools", rows = {{"antiAfk", "Anti-AFK"}, {"serverHop", "Auto Low-Player Server"}}, info = "tools"},
     }
     local tabBar = create("Frame", {Size = UDim2.new(1, 0, 0, 32), Position = UDim2.fromOffset(0, 38), BackgroundTransparency = 1}, main)
