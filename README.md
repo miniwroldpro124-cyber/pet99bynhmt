@@ -7,7 +7,8 @@ Two pieces, no key check anywhere in the chain.
 | `main.lua` | entry point. wires the engine into the interface and opens it. |
 | `zaphub_ps99.lua` | same file, canonical name. |
 | `zap_deploy.lua` | same file, kept so old links work. |
-| `ps99_engine.lua` | the farm engine — PS99 CLEAN, 35 workers, full remote map. |
+| `ps99_engine_v2.lua` | the farm engine — PS99 CLEAN, 38 wired workers, full remote map. |
+| `ps99_engine.lua` | engine v1, superseded. |
 | `zaphub.lua` | ZapLib 2.0.0, the interface. |
 | `features.lua` | older generic layer. superseded by `main.lua`. |
 
@@ -23,14 +24,32 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber
 
 | tab | contents |
 |---|---|
-| Farm | Auto Farm, Auto Tap, Click Aura, Orb Vacuum, Pet Speed, Auto Hatch, Jitter, Aura Visual |
-| World | Auto Advance, Auto Teleport World, World 1–4 buttons, Auto Teleport Zones, Auto Buy Zones |
+| Farm | Auto Farm, Auto Tap, Click Aura, Orb Vacuum, Hit Rate, Burst Targets, Reach, Target Rescan, Chests First, Route All Pets, Pet Bulk Join, Pet Re-route, Pet Speed, Auto Hatch, Hide Egg Effects, Jitter, Aura Visual |
+| World | Auto Teleport Best Zone, Snap To Zone Centre, Auto Buy Next Zone, Teleport Retry |
 | Progress | Auto Quests, Auto Claim Ranks, Auto Rebirth, Auto Buy Pet Slots |
 | Auto | Keys, Gift Bags, Fruits, Potions, Free Gifts, Ultimates, Dice |
 | Machines | Daycare, Flexible Flags, Secret Rooms, Treehouse, Fuse, Cards, Relics, Mail Claim |
 | Optimise | Reduce Breakable Effects, Reduce Pet Effects, Anti AFK |
 | Server | Auto Server Hop, engine picker panel, All Features Off, Unload |
 | Status | live world / profile / active feature count |
+
+## v2 changes
+
+- **Farm speed** — hit rate 18 → 64/s ceiling (slider 1–48), reach 150 → 220,
+  target rescan 0.35 → 0.12 s, pet interval 0.25 → 0.1 s, pet re-route 0.5 → 0.15 s,
+  plus a burst that sends damage on every extra in-range breakable per tick.
+- **No world teleport** — the world hop toggle, the four Go To World buttons and
+  the advance worker default are gone. `worldAdvance` starts off and nothing in
+  the interface can turn it on. You stay in the world you are in.
+- **Zone teleport is instant** — after the remote is accepted the character is
+  snapped to the zone centre read off `__FAKE_GROUND`, with one 0.15 s re-snap,
+  instead of walking in from the spawn edge.
+- **Hide egg effects** — new toggle. Egg folder names are read off the live things
+  root each pass, so `Eggs`, `ZoneEggs` or any other egg-named folder works.
+- **Smarter pet targeting** — every owned pet is routed, not the nearest half.
+  `Pet Bulk Join` sends `Breakables_JoinPetBulk` once per target so pets count
+  from the first hit instead of after travel.
+- **Chests first** — chests get their own track and win the target tiebreak.
 
 ## Why there are two windows
 
@@ -42,13 +61,15 @@ then turn the worker on. Close it again with **Close Engine Panel**.
 
 ## How the two halves talk
 
-`ps99_engine.lua` publishes a controller on `getgenv().__PS99CLEAN`:
+`ps99_engine_v2.lua` publishes a controller on `getgenv().__PS99CLEAN`:
 
     SetEnabled(key, bool)   SetWorld(n)   SetPick(category, id, value)
+    SetConfig(key, number)  GetConfig(key)
     GetStatus()             AllOff()      Stop()
 
-Every ZapLib toggle is one `SetEnabled` call. Nothing is patched or rewritten;
-the engine runs exactly as it was written.
+Every ZapLib toggle is one `SetEnabled` call. Numeric sliders go through
+`SetConfig`, which rejects any key that is not an existing numeric CFG field.
+Nothing is patched or rewritten; the engine runs as it was written.
 
 ## Provenance
 
@@ -61,5 +82,6 @@ The interface is the recovered Luarmor V4 payload:
 | 3 | decrypted payload, captured in-executor | 149424 |
 
 Stage 3 decrypts to ZapLib alone — the feature tabs are a separate key-gated
-script that never reached disk here. `ps99_engine.lua` is the engine that was
-already present in the executor workspace, unmodified apart from being uploaded.
+script that never reached disk here. `ps99_engine_v2.lua` is the engine that was
+already present in the executor workspace, patched by `patch_engine.py`
+with a hard assert on every replacement.
