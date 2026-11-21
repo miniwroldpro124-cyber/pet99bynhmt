@@ -45,14 +45,8 @@ return function(ctx)
         name = "Chests First", key = "chestFirst", default = true,
         note = "Chests win the tiebreak over normal breakables in the same scan.",
     })
-    ui.toggle(tab, {
-        name = "Route All Pets", key = "petAll", default = true,
-        note = "Off matches the game's own click, which only routes the nearest half.",
-    })
-    ui.toggle(tab, {
-        name = "Pet Bulk Join", key = "petBulkJoin", default = true,
-        note = "Registers every routed pet on the server the moment the target changes.",
-    })
+    ui.paragraph(tab, "Pets",
+        "Route All Pets and Pet Bulk Join live on the Pets tab.")
 
     ui.section(tab, "Movement")
     ui.toggle(tab, {

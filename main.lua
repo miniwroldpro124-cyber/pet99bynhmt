@@ -139,12 +139,17 @@ end
 
 local win = lib.Window
 
-local uiOk, ui = pcall(function()
-    return compile(fetch("lib/ui.lua"), "lib/ui")()
-end, lib, engine)
-if not uiOk or type(ui) ~= "table" then
-    return warn("[ZapHub] ui helper: " .. tostring(ui))
+local uiOk, uiOrErr = pcall(function()
+    local builder = compile(fetch("lib/ui.lua"), "lib/ui")()
+    if type(builder) ~= "function" then
+        error("lib/ui did not return a builder", 0)
+    end
+    return builder(lib, engine)
+end)
+if not uiOk or type(uiOrErr) ~= "table" then
+    return warn("[ZapHub] ui helper: " .. tostring(uiOrErr))
 end
+local ui = uiOrErr
 
 local unloaded = false
 
@@ -189,11 +194,18 @@ for _, entry in ipairs(manifest) do
         if not chunk then
             failed[#failed + 1] = entry.name .. " (" .. tostring(err) .. ")"
         else
-            local ok, runErr = pcall(chunk, ctx)
-            if ok then
-                loaded += 1
+            local ran, builder = pcall(chunk)
+            if not ran then
+                failed[#failed + 1] = entry.name .. " (" .. tostring(builder) .. ")"
+            elseif type(builder) ~= "function" then
+                failed[#failed + 1] = entry.name .. " (no builder returned)"
             else
-                failed[#failed + 1] = entry.name .. " (" .. tostring(runErr) .. ")"
+                local ok, runErr = pcall(builder, ctx)
+                if ok then
+                    loaded += 1
+                else
+                    failed[#failed + 1] = entry.name .. " (" .. tostring(runErr) .. ")"
+                end
             end
         end
     end
