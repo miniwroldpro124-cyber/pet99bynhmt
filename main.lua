@@ -1,5 +1,5 @@
 --[[
-    ZAPX / PS99 - loader v7
+    ZAPX / PS99 - loader v7.2
     -----------------------
     One file boots everything:
 
@@ -21,8 +21,9 @@ local player = Players.LocalPlayer
 assert(player, "[ZAPX] run this on the client")
 
 local BASE = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/"
+local MIRROR = "https://cdn.jsdelivr.net/gh/miniwroldpro124-cyber/pet99bynhmt@main/"
 local REPO = "https://github.com/miniwroldpro124-cyber/pet99bynhmt"
-local VERSION = "7.1"
+local VERSION = "7.2"
 
 local playerGui = player:WaitForChild("PlayerGui", 30)
 assert(playerGui, "[ZAPX] PlayerGui never appeared")
@@ -140,14 +141,11 @@ task.wait(0.1)
 
 ------------------------------------------------------------------- transport
 
-local function httpGet(url)
-    -- The version query defeats the executor's own URL cache.
-    local stamped = url .. (url:find("?", 1, true) and "&" or "?") .. "v=" .. VERSION
+local function getOnce(url)
     for _, call in ipairs({
-        function() return syn.request({ Url = stamped, Method = "GET" }).Body end,
-        function() return request({ Url = stamped, Method = "GET" }).Body end,
-        function() return http_request({ Url = stamped, Method = "GET" }).Body end,
-        function() return game:HttpGet(stamped) end,
+        function() return syn.request({ Url = url, Method = "GET" }).Body end,
+        function() return request({ Url = url, Method = "GET" }).Body end,
+        function() return http_request({ Url = url, Method = "GET" }).Body end,
         function() return game:HttpGet(url) end,
     }) do
         local ok, body = pcall(call)
@@ -158,8 +156,30 @@ local function httpGet(url)
     return nil
 end
 
+-- raw.githubusercontent edges go stale after a push; jsDelivr usually has the
+-- new commit already. Newest version string wins, first answer breaks a tie.
+local function httpGet(relative)
+    local query = relative:find("?", 1, true) and "&" or "?"
+    local best, bestVersion = nil, nil
+    for _, root in ipairs({ BASE, MIRROR }) do
+        local body = getOnce(root .. relative .. query .. "v=" .. VERSION)
+        if body then
+            local served = body:match("^%-%-%[%[%s*ZAPX v([%w%.]+)")
+                or body:match("VERSION%s*=%s*\"([%w%.]+)\"")
+                or VERSION
+            if not best or served > bestVersion then
+                best, bestVersion = body, served
+            end
+            if served >= VERSION then
+                return body
+            end
+        end
+    end
+    return best
+end
+
 local function fetch(relative, label)
-    local body = httpGet(BASE .. relative)
+    local body = httpGet(relative)
     if not body then
         error("[ZAPX] download failed: " .. tostring(label or relative), 0)
     end
@@ -280,7 +300,7 @@ local function boot()
 
     for index, entry in ipairs(manifest) do
         setStage("loading tab  " .. tostring(entry.name), 0.52 + span * (index - 1))
-        local source = httpGet(BASE .. entry.file)
+        local source = httpGet(entry.file)
         if not source then
             failed[#failed + 1] = tostring(entry.name) .. " (download)"
         else

@@ -1,5 +1,5 @@
 --[[
-    ZAPX / PS99 - loader v7
+    ZAPX / PS99 - loader v7.2
     -----------------------
     One file boots everything:
 
@@ -21,8 +21,9 @@ local player = Players.LocalPlayer
 assert(player, "[ZAPX] run this on the client")
 
 local BASE = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/"
+local MIRROR = "https://cdn.jsdelivr.net/gh/miniwroldpro124-cyber/pet99bynhmt@main/"
 local REPO = "https://github.com/miniwroldpro124-cyber/pet99bynhmt"
-local VERSION = "7.1"
+local VERSION = "7.2"
 
 local playerGui = player:WaitForChild("PlayerGui", 30)
 assert(playerGui, "[ZAPX] PlayerGui never appeared")
@@ -140,14 +141,11 @@ task.wait(0.1)
 
 ------------------------------------------------------------------- transport
 
-local function httpGet(url)
-    -- The version query defeats the executor's own URL cache.
-    local stamped = url .. (url:find("?", 1, true) and "&" or "?") .. "v=" .. VERSION
+local function getOnce(url)
     for _, call in ipairs({
-        function() return syn.request({ Url = stamped, Method = "GET" }).Body end,
-        function() return request({ Url = stamped, Method = "GET" }).Body end,
-        function() return http_request({ Url = stamped, Method = "GET" }).Body end,
-        function() return game:HttpGet(stamped) end,
+        function() return syn.request({ Url = url, Method = "GET" }).Body end,
+        function() return request({ Url = url, Method = "GET" }).Body end,
+        function() return http_request({ Url = url, Method = "GET" }).Body end,
         function() return game:HttpGet(url) end,
     }) do
         local ok, body = pcall(call)
@@ -158,8 +156,30 @@ local function httpGet(url)
     return nil
 end
 
+-- raw.githubusercontent edges go stale after a push; jsDelivr usually has the
+-- new commit already. Newest version string wins, first answer breaks a tie.
+local function httpGet(relative)
+    local query = relative:find("?", 1, true) and "&" or "?"
+    local best, bestVersion = nil, nil
+    for _, root in ipairs({ BASE, MIRROR }) do
+        local body = getOnce(root .. relative .. query .. "v=" .. VERSION)
+        if body then
+            local served = body:match("^%-%-%[%[%s*ZAPX v([%w%.]+)")
+                or body:match("VERSION%s*=%s*\"([%w%.]+)\"")
+                or VERSION
+            if not best or served > bestVersion then
+                best, bestVersion = body, served
+            end
+            if served >= VERSION then
+                return body
+            end
+        end
+    end
+    return best
+end
+
 local function fetch(relative, label)
-    local body = httpGet(BASE .. relative)
+    local body = httpGet(relative)
     if not body then
         error("[ZAPX] download failed: " .. tostring(label or relative), 0)
     end
@@ -188,6 +208,12 @@ local function hostGlobal(name)
             end
         end
     end
+    for _, key in ipairs({ "_G", "shared" }) do
+        local ok, host = pcall(function() return _ENV[key] end)
+        if ok and type(host) == "table" and host[name] ~= nil then
+            return host[name]
+        end
+    end
     return nil
 end
 
@@ -207,8 +233,15 @@ end
 local function boot()
     ---------------------------------------------------------------- engine
 
+    -- A controller already in memory is reused only when it is fully formed;
+    -- a half-initialised one is torn down and the engine is fetched again.
     local engine = hostGlobal("__PS99CLEAN")
-    if type(engine) ~= "table" or type(engine.SetEnabled) ~= "function" then
+    if type(engine) ~= "table" or type(engine.SetEnabled) ~= "function"
+        or type(engine.GetStatus) ~= "function" then
+        if type(engine) == "table" and type(engine.Stop) == "function" then
+            pcall(engine.Stop)
+            engine = nil
+        end
         setStage("downloading farm engine", 0.08)
         local source = fetch("ps99_engine_v3.lua", "engine")
 
@@ -220,7 +253,7 @@ local function boot()
         engine = hostGlobal("__PS99CLEAN")
     end
     if type(engine) ~= "table" or type(engine.GetStatus) ~= "function" then
-        error("[ZAPX] engine loaded but published no controller", 0)
+        error("[ZAPX] engine loaded but published no controller - see [PS99 CLEAN] lines above", 0)
     end
 
     ------------------------------------------------------------- interface
@@ -267,7 +300,7 @@ local function boot()
 
     for index, entry in ipairs(manifest) do
         setStage("loading tab  " .. tostring(entry.name), 0.52 + span * (index - 1))
-        local source = httpGet(BASE .. entry.file)
+        local source = httpGet(entry.file)
         if not source then
             failed[#failed + 1] = tostring(entry.name) .. " (download)"
         else
