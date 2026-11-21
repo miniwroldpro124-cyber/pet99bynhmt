@@ -188,6 +188,12 @@ local function hostGlobal(name)
             end
         end
     end
+    for _, key in ipairs({ "_G", "shared" }) do
+        local ok, host = pcall(function() return _ENV[key] end)
+        if ok and type(host) == "table" and host[name] ~= nil then
+            return host[name]
+        end
+    end
     return nil
 end
 
@@ -207,8 +213,15 @@ end
 local function boot()
     ---------------------------------------------------------------- engine
 
+    -- A controller already in memory is reused only when it is fully formed;
+    -- a half-initialised one is torn down and the engine is fetched again.
     local engine = hostGlobal("__PS99CLEAN")
-    if type(engine) ~= "table" or type(engine.SetEnabled) ~= "function" then
+    if type(engine) ~= "table" or type(engine.SetEnabled) ~= "function"
+        or type(engine.GetStatus) ~= "function" then
+        if type(engine) == "table" and type(engine.Stop) == "function" then
+            pcall(engine.Stop)
+            engine = nil
+        end
         setStage("downloading farm engine", 0.08)
         local source = fetch("ps99_engine_v3.lua", "engine")
 
@@ -220,7 +233,7 @@ local function boot()
         engine = hostGlobal("__PS99CLEAN")
     end
     if type(engine) ~= "table" or type(engine.GetStatus) ~= "function" then
-        error("[ZAPX] engine loaded but published no controller", 0)
+        error("[ZAPX] engine loaded but published no controller - see [PS99 CLEAN] lines above", 0)
     end
 
     ------------------------------------------------------------- interface
