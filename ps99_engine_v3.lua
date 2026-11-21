@@ -4,9 +4,42 @@ local UIS = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 assert(LocalPlayer, "PS99 CLEAN must run on the client")
 
-local env = type(getgenv) == "function" and getgenv() or _G
+-- Engine modules are compiled with loadstring, so their _G is the real global
+-- table while main.lua's own _G is the executor's sandboxed view. Publish to
+-- both; main.lua only ever reads back what it published.
+local _G = _G
+local function hostEnv()
+    if type(getgenv) == "function" then
+        local ok, value = pcall(getgenv)
+        if ok and type(value) == "table" then return value end
+    end
+    return nil
+end
+local env = hostEnv() or _G
+local function publish()
+    env.__PS99CLEAN = controller
+    env.__PS99CLEAN_CLEANUP = cleanup
+    if env ~= _G then
+        _G.__PS99CLEAN = controller
+        _G.__PS99CLEAN_CLEANUP = cleanup
+    end
+end
+local function unpublish()
+    if env.__PS99CLEAN_CLEANUP == cleanup then
+        env.__PS99CLEAN = nil
+        env.__PS99CLEAN_CLEANUP = nil
+    end
+    if _G.__PS99CLEAN_CLEANUP == cleanup then
+        _G.__PS99CLEAN = nil
+        _G.__PS99CLEAN_CLEANUP = nil
+    end
+end
 if type(env.__PS99CLEAN_CLEANUP) == "function" then
     local ok, err = pcall(env.__PS99CLEAN_CLEANUP)
+    if not ok then warn("[PS99 CLEAN] previous cleanup: " .. tostring(err)) end
+end
+if env ~= _G and type(_G.__PS99CLEAN_CLEANUP) == "function" then
+    local ok, err = pcall(_G.__PS99CLEAN_CLEANUP)
     if not ok then warn("[PS99 CLEAN] previous cleanup: " .. tostring(err)) end
 end
 
@@ -2457,7 +2490,7 @@ cleanup = function()
     restoreEffects(optBreakableEffects)
     restoreEffects(optPetEffects)
     destroyAuraPart()
-    if env.__PS99CLEAN_CLEANUP == cleanup then env.__PS99CLEAN_CLEANUP = nil; env.__PS99CLEAN = nil end
+    unpublish()
     print("[PS99 CLEAN] unloaded")
 end
 
@@ -2532,8 +2565,7 @@ controller.PickList = function()
     end
     return out
 end
-env.__PS99CLEAN = controller
-env.__PS99CLEAN_CLEANUP = cleanup
+publish()
 if not alive then return controller end
 connect(LocalPlayer.CharacterAdded, function()
     target.model, target.uid, target.at = nil, nil, nil

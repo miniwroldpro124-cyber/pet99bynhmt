@@ -14,6 +14,7 @@ return function(lib, engine)
             Content = tostring(content),
             Duration = duration or 4,
         })
+        print(("[ZAPX] %s: %s"):format(tostring(title), tostring(content)))
     end
 
     function ui.section(tab, name)

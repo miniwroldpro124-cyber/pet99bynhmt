@@ -22,7 +22,7 @@ assert(player, "[ZAPX] run this on the client")
 
 local BASE = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/"
 local REPO = "https://github.com/miniwroldpro124-cyber/pet99bynhmt"
-local VERSION = "7.0"
+local VERSION = "7.1"
 
 local playerGui = player:WaitForChild("PlayerGui", 30)
 assert(playerGui, "[ZAPX] PlayerGui never appeared")
@@ -174,6 +174,23 @@ local function compile(source, label)
     return chunk
 end
 
+-- main.lua runs in the executor sandbox; engine and modules are compiled with
+-- loadstring and write to the host globals. Read the host view first.
+local function hostGlobal(name)
+    local own = rawget(_G, name)
+    if own ~= nil then return own end
+    local readers = { rawget(_G, "getgenv"), getgenv }
+    for _, read in ipairs(readers) do
+        if type(read) == "function" then
+            local ok, host = pcall(read)
+            if ok and type(host) == "table" and host[name] ~= nil then
+                return host[name]
+            end
+        end
+    end
+    return nil
+end
+
 local function copyToClipboard(text)
     local env = getfenv and getfenv() or {}
     for _, name in ipairs({ "setclipboard", "toclipboard" }) do
@@ -190,7 +207,7 @@ end
 local function boot()
     ---------------------------------------------------------------- engine
 
-    local engine = rawget(_G, "__PS99CLEAN")
+    local engine = hostGlobal("__PS99CLEAN")
     if type(engine) ~= "table" or type(engine.SetEnabled) ~= "function" then
         setStage("downloading farm engine", 0.08)
         local source = fetch("ps99_engine_v3.lua", "engine")
@@ -200,7 +217,7 @@ local function boot()
         if not booted then
             error("[ZAPX] engine boot: " .. tostring(bootErr), 0)
         end
-        engine = rawget(_G, "__PS99CLEAN")
+        engine = hostGlobal("__PS99CLEAN")
     end
     if type(engine) ~= "table" or type(engine.GetStatus) ~= "function" then
         error("[ZAPX] engine loaded but published no controller", 0)
@@ -209,7 +226,7 @@ local function boot()
     ------------------------------------------------------------- interface
 
     setStage("downloading ZapHub interface", 0.30)
-    local lib = rawget(_G, "ZapLib")
+    local lib = hostGlobal("ZapLib")
     if type(lib) ~= "table" or type(lib.Window) ~= "table" then
         local source = fetch("zaphub.lua", "zaphub")
         setStage("booting ZapHub interface", 0.40)
@@ -217,7 +234,7 @@ local function boot()
         if not ran then
             error("[ZAPX] interface boot: " .. tostring(err), 0)
         end
-        lib = rawget(_G, "ZapLib")
+        lib = hostGlobal("ZapLib")
     end
     local win = type(lib) == "table" and lib.Window or nil
     if type(win) ~= "table" then
