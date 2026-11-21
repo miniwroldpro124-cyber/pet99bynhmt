@@ -1,73 +1,69 @@
-# ZapHub / PS99 — keyless, modular
+# ZAPX — PS99 loader
 
-`main.lua` is a bootstrap. It downloads the engine, the interface, a manifest and
-one file per tab, then wires them together. Every function lives in the project,
-and the menu is the recovered ZapHub library.
-
-```
-main.lua                bootstrap: fetch, load, wire, unload
-manifest.lua            ordered tab list — add a row, get a tab
-lib/ui.lua              element factories bound to ZapLib + engine
-modules/farm.lua        Auto Farm, Auto Tap, Click Aura, Orb Vacuum, rates, chests
-modules/pets.lua        Pet Speed, Auto Hatch, Hide Egg Effects, routing
-modules/world.lua       Auto Teleport Best Zone, Snap To Island Centre, Auto Buy
-modules/progress.lua    Quests, Ranks, Rebirth, Pet Slots
-modules/consume.lua     Keys, Bags, Fruits, Potions, Gifts, Ultimates, Dice
-modules/machines.lua    Daycare, Flags, Secret Rooms, Treehouse, Fuse, Cards, Relics, Mail
-modules/render.lua      Breakable FX, Pet FX, Anti AFK
-modules/server.lua      Hop, picker panel, All Off, Unload
-zaphub.lua              ZapLib 2.0.0 — the interface
-ps99_engine_v2.lua      PS99 CLEAN — the farm engine
-```
-
-## Run
+One file draws the menu, one file is the farm engine. No ZapLib, no key, no grey
+panel.
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/main.lua"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/main.lua?v=5"))()
 ```
 
-Append `?v=4` to the URL if your executor caches: `main.lua?v=4`.
+`RightControl` window · `X` unload.
 
-`RightControl` window · `Insert` engine pickers · `X` unload.
+## Why the menu changed
 
-## Module contract
-
-Each file under `modules/` returns one function:
+The old build loaded ZapLib and then the farm engine, and the engine built its
+own `PS99 CLEAN v21` window on top. That grey box is what read as "old script
+menu". The engine is now patched **headless** before it loads:
 
 ```lua
-return function(ctx)
-    local tab = ctx.win:CreateTab("Name", "rbxassetid://...")
-    ctx.ui.toggle(tab, { name = "Auto Farm", key = "farm", default = false, note = "..." })
-end
+source = replace(source, "local function buildGUI()\n    local playerGui",
+                         "local function buildGUI()\n    if true then return end\n    local playerGui")
+source = replace(source, "…Insert then gui.root.Enabled…",
+                         "…Insert and gui.root then …")
 ```
 
-`ctx` carries `win`, `lib`, `ui`, `engine`, `player`, `version`, `base`,
-`setPanel`, `unload`, `fetch`, `compile`. A module that throws is caught, named
-on the Status tab, and the rest of the menu still builds.
+Both replacements are asserted on exact text, and the patched source is compiled
+before publish (`test_headless.py`). The engine never creates a ScreenGui.
 
-## Element helpers
+## Files
 
-| call | engine |
+| file | what |
 |---|---|
-| `ui.toggle(tab, spec)` | `SetEnabled(spec.key, bool)` |
-| `ui.slider(tab, spec)` | `SetConfig(spec.key, number)` |
-| `ui.button(tab, name, fn)` | plain callback |
-| `ui.section` / `ui.paragraph` | layout only |
+| `main.lua` | ZAPX loader — own UI, engine fetch, headless patch, all tabs |
+| `zapx.lua` | same file, canonical name |
+| `zap_deploy.lua` / `zaphub_ps99.lua` | same file, old links still boot |
+| `ps99_engine_v2.lua` | farm engine — fetched and patched at runtime |
+| `zaphub.lua` | ZapLib 2.0.0 — unused by the loader, kept for reference |
+| `manifest.lua`, `modules/`, `lib/` | previous modular split — superseded, unused |
 
-`SetConfig` rejects any key that is not an existing numeric `CFG` field, so a
-typo in a module cannot inject state into the engine.
+## Tabs
 
-## Surface
+| tab | controls |
+|---|---|
+| Farm | Auto Farm, Auto Tap, Click Aura, Orb Vacuum, Hit Rate 1–60/s, Burst, Reach, Rescan, Chests First, Jitter, Aura Visual |
+| Pets | Pet Speed, Pet Re-route, Route All Pets, Pet Bulk Join, Auto Hatch, Hide Egg Effects |
+| World | Auto Teleport Best Zone, Snap To Island Centre, Auto Buy Next Zone, Teleport Retry |
+| Progress | Auto Quests, Claim Ranks, Rebirth, Pet Slots |
+| Consume | Keys, Bags, Fruits, Potions, Free Gifts, Ultimates, Dice |
+| Machines | Daycare, Flags, Secret Rooms, Treehouse, Fuse, Cards, Relics, Mail |
+| Render | Breakable FX, Pet FX, Anti AFK |
+| Server | Auto Hop, All Features Off, Unload |
+| Status | world / profile / active count, engine notes, log |
 
-38 toggles and 6 sliders across 8 tabs — every engine key except `worldTele` and
-`worldAdvance`, which stay unwired on purpose. `test_modules.py` builds the whole
-menu against a stub ZapLib and asserts the counts.
+## Interface
 
-## Pickers
+Self-contained: dark frame, drag bar, left tab rail, animated toggles, sliders
+with drag-track, notifications to the console log, live status bar. No external
+UI library, so nothing to fail to load.
 
-The auto-consume workers only touch ids ticked in the engine's own panel.
-**Server → Open Engine Panel**, tick what you own, close it, then turn the worker
-on. The panel is hidden at boot and only that button or `Insert` brings it back.
+## Engine contract used
+
+    SetEnabled(key, bool)   SetConfig(key, number)   GetStatus()
+    AllOff()                Stop()
+
+Everything else in the engine is untouched. With no picker list set, the consume
+workers take everything they find (`allowAll`), which is why the old grey panel
+is not needed.
 
 ## Provenance
 
@@ -77,7 +73,7 @@ on. The panel is hidden at boot and only that button or `Insert` brings it back.
 | 2 | `cdn.luarmor.net/v4_init_novemide.lua` — Luraph V4 superflow | 738759 |
 | 3 | decrypted payload, captured in-executor | 149424 |
 
-Stage 3 decrypts to ZapLib alone. The feature tabs are a separate key-gated
-script that never reached disk here. `ps99_engine_v2.lua` is the engine that was
-already in the executor workspace, patched by `patch_engine.py` with a hard
+Stage 3 decrypts to ZapLib alone. The real feature tabs are a separate key-gated
+script that never reached disk here. `ps99_engine_v2.lua` is the engine already
+present in the executor workspace, patched by `patch_engine.py` with a hard
 assert on every replacement.
