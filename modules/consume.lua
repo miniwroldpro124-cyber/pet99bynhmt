@@ -29,6 +29,6 @@ return function(ctx)
     })
 
     ui.paragraph(tab, "Pickers",
-        "These workers only touch ids ticked in the engine's own panel. "
-        .. "Server tab opens it. Tick what you own, then turn the worker on.")
+        "No separate picker panel. With nothing ticked the engine treats every "
+        .. "item as allowed, so these workers take everything they find.")
 end

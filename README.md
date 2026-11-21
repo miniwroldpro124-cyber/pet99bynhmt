@@ -1,79 +1,76 @@
 # ZAPX — PS99 loader
 
-One file draws the menu, one file is the farm engine. No ZapLib, no key, no grey
-panel.
+One file boots the menu (ZapHub / ZapLib 2.0.0), one file is the farm engine
+(`ps99_engine_v3`, headless — no second window), one file per tab.
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/main.lua?v=5"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/main.lua?v=7"))()
 ```
 
 `RightControl` window · `X` unload.
 
-## Why the menu changed
+## Load order
 
-The old build loaded ZapLib and then the farm engine, and the engine built its
-own `PS99 CLEAN v21` window on top. That grey box is what read as "old script
-menu". The engine is now patched **headless** before it loads:
+`main.lua` → loading screen → `ps99_engine_v3.lua` → `zaphub.lua` (ZapLib) →
+`lib/ui.lua` → `manifest.lua` → one fetch per `modules/*.lua` → Status tab.
 
-```lua
-source = replace(source, "local function buildGUI()\n    local playerGui",
-                         "local function buildGUI()\n    if true then return end\n    local playerGui")
-source = replace(source, "…Insert then gui.root.Enabled…",
-                         "…Insert and gui.root then …")
-```
-
-Both replacements are asserted on exact text, and the patched source is compiled
-before publish (`test_headless.py`). The engine never creates a ScreenGui.
+Every fetch carries `?v=<VERSION>` so the executor URL cache never serves a stale
+file. A tab that fails to download or compile is listed on the Status tab and
+the rest still boot.
 
 ## Files
 
-| file | what |
+| file | role |
 |---|---|
-| `main.lua` | ZAPX loader — own UI, engine fetch, headless patch, all tabs |
-| `zapx.lua` | same file, canonical name |
-| `zap_deploy.lua` / `zaphub_ps99.lua` | same file, old links still boot |
-| `ps99_engine_v2.lua` | farm engine — fetched and patched at runtime |
-| `zaphub.lua` | ZapLib 2.0.0 — unused by the loader, kept for reference |
-| `manifest.lua`, `modules/`, `lib/` | previous modular split — superseded, unused |
+| `main.lua` | loader — progress screen, engine, ZapLib, module loop, Status tab, unload |
+| `ps99_engine_v3.lua` | farm engine, headless: controller on `_G.__PS99CLEAN`, no ScreenGui, no Insert bind |
+| `zaphub.lua` | ZapLib 2.0.0, publishes `_G.ZapLib.Window` |
+| `lib/ui.lua` | element factories bound to `lib` + `engine` |
+| `manifest.lua` | ordered tab list; add a row, nothing else changes |
+| `modules/*.lua` | one builder per tab, receives `ctx` |
+| `features.lua` | standalone ZapLib-only feature layer, kept for reference |
+| `ps99_engine_v2.lua` | previous engine, builds its own GUI, kept for reference |
+| `zapx.lua`, `zap_deploy.lua`, `zaphub_ps99.lua` | old single-file loaders, kept for reference |
+
+## Engine controller (`_G.__PS99CLEAN`)
+
+| call | use |
+|---|---|
+| `SetEnabled(key, bool)` | feature toggle, returns `ok, err` |
+| `SetConfig(key, number)` | numeric knob, rejects anything not already in `CFG` |
+| `AllOff()` | every feature off |
+| `SetWorld(n)` | teleport target world, 1–4 |
+| `SetPick(category, id, bool)` | narrow a consume worker to one id |
+| `GetStatus()` | `running, enabled, world, profile, notes, info` |
+| `GetPicks()` / `PickList()` | current ticks / available ids per category |
+| `ClaimRankRewards()`, `Stop()` | one-shot claim, full teardown |
 
 ## Tabs
 
 | tab | controls |
 |---|---|
-| Farm | Auto Farm, Auto Tap, Click Aura, Orb Vacuum, Hit Rate 1–60/s, Burst, Reach, Rescan, Chests First, Jitter, Aura Visual |
-| Pets | Pet Speed, Pet Re-route, Route All Pets, Pet Bulk Join, Auto Hatch, Hide Egg Effects |
-| World | Auto Teleport Best Zone, Snap To Island Centre, Auto Buy Next Zone, Teleport Retry |
-| Progress | Auto Quests, Claim Ranks, Rebirth, Pet Slots |
-| Consume | Keys, Bags, Fruits, Potions, Free Gifts, Ultimates, Dice |
+| Farm | Auto Farm, Tap, Click Aura, Orb Vacuum, Hit Rate, Burst, Reach, Rescan, Chests First, Jitter, Aura Visual |
+| Pets | Pet Speed, Re-route rate, Auto Hatch, Hide Egg FX, Route All Pets, Pet Bulk Join |
+| World | Teleport Best Zone, Snap To Centre, Buy Next Zone, Teleport Retry |
+| Player | Walk Speed, Jump Power, Infinite Jump, Keep Movement, Reset, Refresh Status |
+| Progress | Quests, Ranks, Rebirth, Pet Slots |
+| Consume | Keys, Gift Bags, Fruits, Potions, Free Gifts, Ultimates, Dice |
+| Picks | per-id narrowing for keys / bags / fruits / potions / free gifts / dice / cards |
 | Machines | Daycare, Flags, Secret Rooms, Treehouse, Fuse, Cards, Relics, Mail |
 | Render | Breakable FX, Pet FX, Anti AFK |
-| Server | Auto Hop, All Features Off, Unload |
-| Status | world / profile / active count, engine notes, log |
+| Server | Auto Hop, Teleport World, All Features Off, Unload, Copy Source |
+| Status | world / profile / zone / rank, active count, failed tabs, build, source |
 
-## Interface
+## Element behaviour
 
-Self-contained: dark frame, drag bar, left tab rail, animated toggles, sliders
-with drag-track, notifications to the console log, live status bar. No external
-UI library, so nothing to fail to load.
+- Toggle without `key` is local: only `onChange` runs.
+- Slider primes its `key` with the build value and never fires `onChange` on
+  build, so nothing moves on load.
+- Dropdown callbacks fire once on build in ZapLib; `modules/picks.lua` arms on
+  its toggle before writing a pick.
 
-## Engine contract used
+## Rebuild
 
-    SetEnabled(key, bool)   SetConfig(key, number)   GetStatus()
-    AllOff()                Stop()
-
-Everything else in the engine is untouched. With no picker list set, the consume
-workers take everything they find (`allowAll`), which is why the old grey panel
-is not needed.
-
-## Provenance
-
-| stage | artifact | bytes |
-|---|---|---|
-| 1 | Luarmor v4 loader stub `a20cb97f94d0d6aafcb766dae08a47c4.lua` | 1275 |
-| 2 | `cdn.luarmor.net/v4_init_novemide.lua` — Luraph V4 superflow | 738759 |
-| 3 | decrypted payload, captured in-executor | 149424 |
-
-Stage 3 decrypts to ZapLib alone. The real feature tabs are a separate key-gated
-script that never reached disk here. `ps99_engine_v2.lua` is the engine already
-present in the executor workspace, patched by `patch_engine.py` with a hard
-assert on every replacement.
+`build_zaphub.py` rebuilds `zaphub.lua` from `zaphub_deobf_raw.lua` and refuses
+to write on a token mismatch or compile failure. `luau-compile --binary` is the
+gate for every other file.
