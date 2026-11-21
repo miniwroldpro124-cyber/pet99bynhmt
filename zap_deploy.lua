@@ -24,7 +24,7 @@ local player = Players.LocalPlayer
 
 local BASE = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/"
 local LIB_URL = BASE .. "zaphub.lua"
-local ENGINE_URL = BASE .. "ps99_engine.lua"
+local ENGINE_URL = BASE .. "ps99_engine_v2.lua"
 
 -- game:HttpGet is not a DataModel member on every executor; the request family is.
 local function httpGet(url)
@@ -137,11 +137,77 @@ toggle(farmTab, "Click Aura", "clickAura", false,
     "Aura ring that taps anything that enters it.")
 toggle(farmTab, "Orb Vacuum", "vacuum", false,
     "Forces the super-magnet flag on nearby orbs and collects them.")
+farmTab:CreateSection("Speed")
+farmTab:CreateSlider({
+    Name = "Hit Rate",
+    Range = { 1, 48 },
+    Increment = 1,
+    Suffix = "/s",
+    CurrentValue = 48,
+    CallbackOnRelease = true,
+    Callback = function(v)
+        engine.SetConfig("MaxTapRate", v)
+        lib:CreateNotification({ Title = "Farm", Content = "Hit rate " .. math.floor(v) .. "/s" })
+    end,
+})
+farmTab:CreateSlider({
+    Name = "Burst Targets",
+    Range = { 0, 12 },
+    Increment = 1,
+    CurrentValue = 6,
+    CallbackOnRelease = true,
+    Callback = function(v)
+        engine.SetConfig("FarmBurst", v)
+        lib:CreateNotification({ Title = "Farm", Content = "Burst " .. math.floor(v) .. " extra per hit" })
+    end,
+})
+farmTab:CreateSlider({
+    Name = "Reach",
+    Range = { 50, 400 },
+    Increment = 10,
+    Suffix = "studs",
+    CurrentValue = 220,
+    CallbackOnRelease = true,
+    Callback = function(v)
+        engine.SetConfig("TapRange", v)
+    end,
+})
+farmTab:CreateSlider({
+    Name = "Target Rescan",
+    Range = { 0.05, 0.6 },
+    Increment = 0.05,
+    Suffix = "s",
+    CurrentValue = 0.12,
+    CallbackOnRelease = true,
+    Callback = function(v)
+        engine.SetConfig("TargetRescan", v)
+    end,
+})
+farmTab:CreateSection("Priority")
+toggle(farmTab, "Chests First", "chestFirst", true,
+    "Chests win the tiebreak over normal breakables in the same scan.")
+toggle(farmTab, "Route All Pets", "petAll", true,
+    "Sends every owned pet at the target. OFF matches the game's own click, which only routes the nearest half.")
+toggle(farmTab, "Pet Bulk Join", "petBulkJoin", true,
+    "Registers every routed pet on the server the moment the target changes, so pets count from the first hit instead of after they travel.")
+farmTab:CreateSlider({
+    Name = "Pet Re-route",
+    Range = { 0.05, 0.5 },
+    Increment = 0.05,
+    Suffix = "s",
+    CurrentValue = 0.15,
+    CallbackOnRelease = true,
+    Callback = function(v)
+        engine.SetConfig("PetRouteRate", v)
+    end,
+})
 farmTab:CreateSection("Pets")
 toggle(farmTab, "Pet Speed", "petSpeed", false,
     "Snaps pet positions to their target each frame. Render-side only.")
 toggle(farmTab, "Auto Hatch", "autoEgg", false,
     "Buys and hatches the nearest egg, up to 50 per pass.")
+toggle(farmTab, "Hide Egg Effects", "hideEggFx", false,
+    "Kills hatch particles, beams and lights under the egg folders.")
 farmTab:CreateSection("Movement")
 toggle(farmTab, "Jitter", "jitter", false,
     "Micro-movement so an idle kick cannot land.")
@@ -150,23 +216,28 @@ toggle(farmTab, "Aura Visual", "auraVisual", false,
 
 local worldTab = win:CreateTab("World", "rbxassetid://16259403210")
 
-worldTab:CreateSection("World")
-toggle(worldTab, "Auto Advance World", "worldAdvance", true,
-    "Moves to the next world once the current one is cleared. Cap is world 4 — the game only defines four.")
-toggle(worldTab, "Auto Teleport To World", "worldTele", false)
-for i = 1, 4 do
-    worldTab:CreateButton({
-        Name = "Go To World " .. i,
-        Callback = function()
-            engine.SetWorld(i)
-            lib:CreateNotification({ Title = "World", Content = "Target set to world " .. i })
-        end,
-    })
-end
 worldTab:CreateSection("Zones")
-toggle(worldTab, "Auto Teleport Zones", "zoneTele", false)
-toggle(worldTab, "Auto Buy Zones", "zoneBuy", false,
+toggle(worldTab, "Auto Teleport Best Zone", "zoneTele", false,
+    "Teleports to the highest zone you own the moment it is available.")
+toggle(worldTab, "Snap To Zone Centre", "teleCenter", true,
+    "Lands you on the middle of the zone instead of the spawn edge. This is what makes the teleport instant.")
+toggle(worldTab, "Auto Buy Next Zone", "zoneBuy", false,
     "Purchases with the game's own currency checks. Nothing is spent that the game would refuse.")
+worldTab:CreateSlider({
+    Name = "Teleport Retry",
+    Range = { 0.2, 5 },
+    Increment = 0.2,
+    Suffix = "s",
+    CurrentValue = 0.4,
+    CallbackOnRelease = true,
+    Callback = function(v)
+        engine.SetConfig("TeleInterval", v)
+    end,
+})
+worldTab:CreateParagraph({
+    Title = "World hopping",
+    Content = "Removed. The engine no longer teleports you between worlds and the advance worker starts off. You stay in the world you are in.",
+})
 
 local progTab = win:CreateTab("Progress", "rbxassetid://15642579187")
 
