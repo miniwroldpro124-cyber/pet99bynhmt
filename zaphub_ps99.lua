@@ -23,8 +23,9 @@ local Players = game:GetService("Players")
 local player = Players.LocalPlayer
 
 local BASE = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/"
-local LIB_URL = BASE .. "zaphub.lua"
-local ENGINE_URL = BASE .. "ps99_engine_v2.lua"
+local VERSION = "v3"
+local LIB_URL = BASE .. "zaphub.lua?" .. VERSION
+local ENGINE_URL = BASE .. "ps99_engine_v2.lua?" .. VERSION
 
 -- game:HttpGet is not a DataModel member on every executor; the request family is.
 local function httpGet(url)
@@ -78,7 +79,13 @@ local function enginePanel()
     return pg and pg:FindFirstChild("PS99CLEAN") or nil
 end
 
-local function showEnginePanel(on)
+-- The engine builds its own panel and leaves it on screen. That panel is the
+-- "PS99 CLEAN v21" grey box, not this menu — it has to stay hidden or the user
+-- sees it instead of the ZapLib window. panelAllowed is the only way back.
+local panelAllowed = false
+
+local function setPanel(on)
+    panelAllowed = on
     local panel = enginePanel()
     if panel then
         panel.Enabled = on
@@ -87,7 +94,29 @@ local function showEnginePanel(on)
     return false
 end
 
-showEnginePanel(false)
+setPanel(false)
+
+do
+    local pg = player:FindFirstChild("PlayerGui") or player:WaitForChild("PlayerGui", 10)
+    if pg then
+        pg.ChildAdded:Connect(function(child)
+            if child.Name == "PS99CLEAN" and not panelAllowed then
+                child.Enabled = false
+            end
+        end)
+    end
+    task.spawn(function()
+        for _ = 1, 60 do
+            if not panelAllowed then
+                local panel = enginePanel()
+                if panel and panel.Enabled then
+                    panel.Enabled = false
+                end
+            end
+            task.wait(0.2)
+        end
+    end)
+end
 
 -- ===========================================================================
 -- interface
@@ -296,7 +325,7 @@ servTab:CreateParagraph({
 servTab:CreateButton({
     Name = "Open Engine Panel",
     Callback = function()
-        if not showEnginePanel(true) then
+        if not setPanel(true) then
             lib:CreateNotification({ Title = "Pickers", Content = "Panel not built yet - give it a second." })
         end
     end,
@@ -304,7 +333,7 @@ servTab:CreateButton({
 servTab:CreateButton({
     Name = "Close Engine Panel",
     Callback = function()
-        showEnginePanel(false)
+        setPanel(false)
     end,
 })
 servTab:CreateSection("Danger")
@@ -339,6 +368,10 @@ local statusParagraph = statusTab:CreateParagraph({
     Title = "Engine",
     Content = "collecting...",
 })
+statusTab:CreateParagraph({
+    Title = "Build",
+    Content = "ZapHub PS99 " .. VERSION .. " — engine " .. tostring(engine.GetConfig and "v2" or "v1"),
+})
 
 local function onCount(t)
     local n = 0
@@ -369,7 +402,7 @@ task.spawn(function()
 end)
 
 lib:CreateNotification({
-    Title = "ZapHub | PS99",
+    Title = "ZapHub | PS99 " .. VERSION,
     Content = "Loaded. RightControl window, Insert pickers, X unload.",
     Duration = 5,
 })

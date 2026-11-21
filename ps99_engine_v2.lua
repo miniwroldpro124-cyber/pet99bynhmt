@@ -83,7 +83,7 @@ local CFG = {
     RemoteTimeout = 10,
     DiscoveryInterval = 1,
     TreeInterval = 60,
-    HeapInterval = 120,
+    HeapInterval = 25,
     HeapRetryInterval = 5,
     HeapCap = 2000,
     TreeCap = 1000,
@@ -912,7 +912,8 @@ local function petTick()
     local count = 0
     local seen = {}
     local function apply(record)
-        if seen[record] or record.owner ~= LocalPlayer or record.destroyed then return end
+        if seen[record] or record.destroyed
+            or (record.owner ~= nil and record.owner ~= LocalPlayer) then return end
         seen[record] = true
         if petState.previous[record] == nil then petState.previous[record] = tonumber(record.speedMult) end
         -- The record is the game's live object; a write can throw if the pet
@@ -960,8 +961,12 @@ function petState.route(target, point)
     end
     -- Nearest first, matching the game's table.sort by distance to the target.
     local ranked = {}
+    -- v3: GetByPlayer is already scoped to the local player, and some builds
+    -- leave owner nil on those records. A missing owner is not a reason to
+    -- leave a pet standing still while the click lands.
     for _, record in ipairs(local_pets) do
-        if not record.destroyed and record.owner == LocalPlayer and type(record.GetPosition) == "function" then
+        local foreign = rawget(record, "owner") ~= nil and rawget(record, "owner") ~= LocalPlayer
+        if not record.destroyed and not foreign and type(record.GetPosition) == "function" then
             local distance = math.huge
             local ok, at = pcall(record.GetPosition, record)
             if ok and at then
@@ -982,6 +987,12 @@ function petState.route(target, point)
         -- A pet already on this breakable returns false and sends nothing, so
         -- calling every tap costs one table compare rather than a remote.
         local ok = pcall(function() record:SetTarget(target) end)
+        if not ok then
+            -- v3: a record that lost SetTarget still routes if the field the
+            -- game itself reads is written directly.
+            pcall(function() record.target = target end)
+            pcall(function() record.Target = target end)
+        end
         if ok then routed += 1 end
     end
     -- v2: register the pets on the server side too. Breakables_JoinPetBulk is
@@ -1249,17 +1260,38 @@ local function vacuumTick()
 end
 
 
--- v2: the ground model carries one part per zone id, so the centre is a
--- lookup, not a walk. Falls back to the model pivot when the part is a mesh
--- container instead of a single BasePart.
+-- v3: the middle of the island is where the breakables are, not where the
+-- zone's ground plate happens to sit. Centroid of the zone's own breakable
+-- positions first, ground plate second, model bounding box last.
 local function zoneCenter(id)
+    if type(id) ~= "string" then return nil end
+    local registry = modules.breakables
+    if registry and type(registry.AllByZoneAndClass) == "function" then
+        local sum, count = Vector3.zero, 0
+        for _, class in ipairs({"Normal", "Chest"}) do
+            local ok, list = pcall(registry.AllByZoneAndClass, id, class)
+            if ok and type(list) == "table" then
+                for _, value in pairs(list) do
+                    local record = type(value) == "table" and value.model ~= nil and value or nil
+                    local at = record and record.position or (typeof(value) == "Instance" and modelPosition(value))
+                    if typeof(at) == "Vector3" then
+                        sum += at
+                        count += 1
+                    end
+                    if count >= 400 then break end
+                end
+            end
+            if count >= 400 then break end
+        end
+        if count > 0 then return sum / count end
+    end
     local ground = thingsFolder("__FAKE_GROUND")
-    if not ground or type(id) ~= "string" then return nil end
+    if not ground then return nil end
     local target = ground:FindFirstChild(id, true)
     if not target then return nil end
-    if target:IsA("BasePart") then return target.Position end
     local ok, box = pcall(function() return target:GetBoundingBox() end)
     if ok and box then return box.Position end
+    if target:IsA("BasePart") then return target.Position end
     local ok2, pivot = pcall(function() return target:GetPivot().Position end)
     return ok2 and pivot or nil
 end
@@ -1296,9 +1328,12 @@ local function teleTick()
             local centre = zoneCenter(id)
             if centre then
                 snapTo(centre)
-                -- one re-snap: the zone switch can land a frame after the
-                -- remote returns and would overwrite the CFrame.
-                task.delay(0.15, function()
+                -- the zone switch can land a frame or two after the remote
+                -- returns and would overwrite the CFrame, so re-snap twice.
+                task.delay(0.2, function()
+                    if alive and enabled.teleCenter then snapTo(zoneCenter(id)) end
+                end)
+                task.delay(0.6, function()
                     if alive and enabled.teleCenter then snapTo(zoneCenter(id)) end
                 end)
             end
