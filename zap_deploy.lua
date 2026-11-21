@@ -1,5 +1,5 @@
 --[[
-    ZAPX / PS99 - loader v7.2
+    ZAPX / PS99 - loader v7.3
     -----------------------
     One file boots everything:
 
@@ -20,10 +20,13 @@ local Tween = game:GetService("TweenService")
 local player = Players.LocalPlayer
 assert(player, "[ZAPX] run this on the client")
 
+local REPO = "https://github.com/miniwroldpro124-cyber/pet99bynhmt"
+local COMMIT = "ec8fda4"
+local VERSION = "7.3"
+local PINNED = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/" .. COMMIT .. "/"
+local MIRROR_PINNED = "https://cdn.jsdelivr.net/gh/miniwroldpro124-cyber/pet99bynhmt@" .. COMMIT .. "/"
 local BASE = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/"
 local MIRROR = "https://cdn.jsdelivr.net/gh/miniwroldpro124-cyber/pet99bynhmt@main/"
-local REPO = "https://github.com/miniwroldpro124-cyber/pet99bynhmt"
-local VERSION = "7.2"
 
 local playerGui = player:WaitForChild("PlayerGui", 30)
 assert(playerGui, "[ZAPX] PlayerGui never appeared")
@@ -156,17 +159,23 @@ local function getOnce(url)
     return nil
 end
 
--- raw.githubusercontent edges go stale after a push; jsDelivr usually has the
--- new commit already. Newest version string wins, first answer breaks a tie.
+-- raw.githubusercontent edges and jsDelivr's @main branch pointer both go stale
+-- after a push. Commit-pinned URLs are immutable and never stale, so they are
+-- tried first; the branch pointers are the fallback. Newest version wins.
+local function stamp(body)
+    return body:match("^%-%-%[%[%s*ZAPX v([%w%.]+)")
+        or body:match("VERSION%s*=%s*\"([%w%.]+)\"")
+        or VERSION
+end
+
 local function httpGet(relative)
     local query = relative:find("?", 1, true) and "&" or "?"
+    local bust = query .. "v=" .. VERSION
     local best, bestVersion = nil, nil
-    for _, root in ipairs({ BASE, MIRROR }) do
-        local body = getOnce(root .. relative .. query .. "v=" .. VERSION)
+    for _, root in ipairs({ PINNED, MIRROR_PINNED, BASE, MIRROR }) do
+        local body = getOnce(root .. relative .. bust)
         if body then
-            local served = body:match("^%-%-%[%[%s*ZAPX v([%w%.]+)")
-                or body:match("VERSION%s*=%s*\"([%w%.]+)\"")
-                or VERSION
+            local served = stamp(body)
             if not best or served > bestVersion then
                 best, bestVersion = body, served
             end
