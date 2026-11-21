@@ -51,6 +51,21 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber
   from the first hit instead of after travel.
 - **Chests first** — chests get their own track and win the target tiebreak.
 
+## v3 changes
+
+- **Old menu fixed** - the grey PS99 CLEAN v21 panel is the engine's own window
+  and it came up enabled on some loads. It is now hidden on creation, on
+  PlayerGui.ChildAdded, and on a 12 s watchdog. Only **Server -> Open Engine
+  Panel** or Insert brings it back.
+- **Cache buster** - zaphub.lua and ps99_engine_v2.lua are fetched with
+  ?v=3. Append it to main.lua too if your executor caches: main.lua?v=3.
+- **Pets attack** - pet records were filtered on an owner field that some
+  builds leave nil, so auto click fired and every pet stayed put. Records from
+  GetByPlayer are trusted now; SetTarget has a field-write fallback; heap
+  rediscovery interval 120 s -> 25 s.
+- **Island centre** - the teleport target is the centroid of the zone's own
+  breakables (up to 400), not the ground plate. Re-snaps at 0.2 s and 0.6 s.
+
 ## Why there are two windows
 
 The engine ships its own panel. It is hidden by default because the ZapLib
