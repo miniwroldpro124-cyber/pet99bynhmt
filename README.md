@@ -4,8 +4,12 @@ One file boots the menu (ZapHub / ZapLib 2.0.0), one file is the farm engine
 (`ps99_engine_v3`, headless — no second window), one file per tab.
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/c77eaae/main.lua?v=7.4"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/main.lua?v=7.5"))()
 ```
+
+Always run the `main` URL, not a commit-pinned one. A pinned URL freezes whatever
+copy that commit held — including a broken one — and no later push can reach it.
+`main` plus the version query is what serves the current loader.
 
 `RightControl` window · `X` unload.
 
