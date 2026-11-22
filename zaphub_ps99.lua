@@ -1,5 +1,5 @@
 --[[
-    ZAPX / PS99 - loader v7.4
+    ZAPX / PS99 - loader v7.5
     -----------------------
     One file boots everything:
 
@@ -21,8 +21,8 @@ local player = Players.LocalPlayer
 assert(player, "[ZAPX] run this on the client")
 
 local REPO = "https://github.com/miniwroldpro124-cyber/pet99bynhmt"
-local COMMIT = "dfe12ff"
-local VERSION = "7.4"
+local COMMIT = "3a63485"
+local VERSION = "7.6"
 local PINNED = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/" .. COMMIT .. "/"
 local MIRROR_PINNED = "https://cdn.jsdelivr.net/gh/miniwroldpro124-cyber/pet99bynhmt@" .. COMMIT .. "/"
 local BASE = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/"
@@ -159,9 +159,11 @@ local function getOnce(url)
     return nil
 end
 
--- raw.githubusercontent edges and jsDelivr's @main branch pointer both go stale
--- after a push. Commit-pinned URLs are immutable and never stale, so they are
--- tried first; the branch pointers are the fallback. Newest version wins.
+-- Branch pointers are the shipping channel and are tried first, so a push
+-- lands without a loader rewrite. raw.githubusercontent caches a branch ref
+-- for a few minutes and jsDelivr's @main pointer misses recent pushes, which
+-- is what the pinned commit fallback is for: it is immutable and can serve a
+-- stale-but-working copy rather than nothing.
 local function stamp(body)
     return body:match("^%-%-%[%[%s*ZAPX v([%w%.]+)")
         or body:match("VERSION%s*=%s*\"([%w%.]+)\"")
@@ -169,10 +171,18 @@ local function stamp(body)
 end
 
 local function httpGet(relative)
+    if type(readfile) == "function" then
+        for _, candidate in ipairs({ relative, "zaphub-src/" .. relative, "pet99/" .. relative }) do
+            local ok, content = pcall(readfile, candidate)
+            if ok and type(content) == "string" and #content > 32 then
+                return content
+            end
+        end
+    end
     local query = relative:find("?", 1, true) and "&" or "?"
     local bust = query .. "v=" .. VERSION
     local best, bestVersion = nil, nil
-    for _, root in ipairs({ PINNED, MIRROR_PINNED, BASE, MIRROR }) do
+    for _, root in ipairs({ BASE, MIRROR, PINNED, MIRROR_PINNED }) do
         local body = getOnce(root .. relative .. bust)
         if body then
             local served = stamp(body)
@@ -203,6 +213,19 @@ local function compile(source, label)
     return chunk
 end
 
+-- Both engine and interface end in `return <object>`. Executors disagree on
+-- whether a chunk's writes reach the sandbox _G, but the return value is
+-- always the chunk's own. Run it, keep what it returned, and only fall back
+-- to globals when the return is not a table.
+local function runBell(source, label)
+    local chunk = compile(source, label)
+    local ok, result = pcall(chunk)
+    if not ok then
+        error("[ZAPX] " .. label .. " boot: " .. tostring(result), 0)
+    end
+    return result
+end
+
 -- main.lua runs in the executor sandbox; engine and modules are compiled with
 -- loadstring and write to the host globals. Read the host view first.
 local function hostGlobal(name)
@@ -224,6 +247,16 @@ local function hostGlobal(name)
         end
     end
     return nil
+end
+
+-- Some executors hand back a readonly _G. Every publish is best-effort: the
+-- return value is what the boot actually uses, the global is a convenience for
+-- a re-run in the same session.
+local function publishGlobal(name, value)
+    pcall(rawset, _G, name, value)
+    if type(getgenv) == "function" then
+        pcall(function() getgenv()[name] = value end)
+    end
 end
 
 local function copyToClipboard(text)
@@ -255,11 +288,11 @@ local function boot()
         local source = fetch("ps99_engine_v3.lua", "engine")
 
         setStage("booting farm engine", 0.20)
-        local booted, bootErr = pcall(compile(source, "ps99_engine"))
-        if not booted then
-            error("[ZAPX] engine boot: " .. tostring(bootErr), 0)
+        local returned = runBell(source, "ps99_engine")
+        engine = type(returned) == "table" and returned or hostGlobal("__PS99CLEAN")
+        if type(engine) == "table" then
+            publishGlobal("__PS99CLEAN", engine)
         end
-        engine = hostGlobal("__PS99CLEAN")
     end
     if type(engine) ~= "table" or type(engine.GetStatus) ~= "function" then
         error("[ZAPX] engine loaded but published no controller - see [PS99 CLEAN] lines above", 0)
@@ -272,11 +305,11 @@ local function boot()
     if type(lib) ~= "table" or type(lib.Window) ~= "table" then
         local source = fetch("zaphub.lua", "zaphub")
         setStage("booting ZapHub interface", 0.40)
-        local ran, err = pcall(compile(source, "zaphub"))
-        if not ran then
-            error("[ZAPX] interface boot: " .. tostring(err), 0)
+        local returned = runBell(source, "zaphub")
+        lib = type(returned) == "table" and returned or hostGlobal("ZapLib")
+        if type(lib) == "table" then
+            publishGlobal("ZapLib", lib)
         end
-        lib = hostGlobal("ZapLib")
     end
     local win = type(lib) == "table" and lib.Window or nil
     if type(win) ~= "table" then

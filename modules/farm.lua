@@ -1,35 +1,45 @@
 -- modules/farm.lua
--- Breakables: the click loop, aura, orbs and the rate knobs.
+-- Breakables: fast click loop, fast farm, pet teleport after attack only, aura, orbs and rate knobs.
 return function(ctx)
     local tab = ctx.win:CreateTab("Farm", "rbxassetid://82329173638641")
     local ui = ctx.ui
 
     ui.section(tab, "Breakables")
     ui.toggle(tab, {
-        name = "Auto Farm", key = "farm", default = false,
-        note = "Sends Breakables_PlayerDealDamage on the engine's own tick and routes pets at the same target.",
+        name = "Fast Auto Farm", key = "farm", default = false,
+        note = "High-speed breakable damage + multi-target burst + routes pets to the attacked target.",
     })
     ui.toggle(tab, {
-        name = "Auto Tap", key = "tap", default = false,
-        note = "Taps every breakable in range without moving the character.",
+        name = "Fast Click (Auto Tap)", key = "tap", default = false,
+        note = "Rapidly taps breakables in range without double-throttling.",
     })
     ui.toggle(tab, {
         name = "Click Aura", key = "clickAura", default = false,
-        note = "Cycles the aura ring and taps anything inside it.",
+        note = "Cycles the aura ring and taps every breakable inside it while keeping pets locked on their target.",
     })
     ui.toggle(tab, {
         name = "Orb Vacuum", key = "vacuum", default = false,
-        note = "Forces the super-magnet flag on nearby orb records.",
+        note = "Forces the super-magnet flag on all orb records.",
+    })
+
+    ui.section(tab, "Pet Attack Behaviour")
+    ui.toggle(tab, {
+        name = "Pet Tele After Attack Only", key = "petTeleAfterAttack", default = true,
+        note = "Pets ONLY teleport and boost speed after attacking a breakable. When not attacking, pets walk normally.",
+    })
+    ui.slider(tab, {
+        name = "Pet Target Dwell", key = "PetAttackDwell",
+        range = { 0.2, 1.2 }, increment = 0.05, suffix = "s", value = 0.45,
     })
 
     ui.section(tab, "Rates")
     ui.slider(tab, {
         name = "Hit Rate", key = "MaxTapRate",
-        range = { 1, 48 }, increment = 1, suffix = "/s", value = 48,
+        range = { 1, 120 }, increment = 1, suffix = "/s", value = 90,
     })
     ui.slider(tab, {
         name = "Burst Targets", key = "FarmBurst",
-        range = { 0, 12 }, increment = 1, value = 6,
+        range = { 0, 20 }, increment = 1, value = 10,
     })
     ui.slider(tab, {
         name = "Reach", key = "TapRange",
@@ -45,16 +55,14 @@ return function(ctx)
         name = "Chests First", key = "chestFirst", default = true,
         note = "Chests win the tiebreak over normal breakables in the same scan.",
     })
-    ui.paragraph(tab, "Pets",
-        "Route All Pets and Pet Bulk Join live on the Pets tab.")
 
     ui.section(tab, "Movement")
     ui.toggle(tab, {
         name = "Jitter", key = "jitter", default = false,
-        note = "Micro-movement so an idle kick cannot land.",
+        note = "Micro-delay variation on tap intervals.",
     })
     ui.toggle(tab, {
         name = "Aura Visual", key = "auraVisual", default = false,
-        note = "Draws the aura ring. Cosmetic.",
+        note = "Draws the aura ring around your character.",
     })
 end

@@ -22,7 +22,7 @@ assert(player, "[ZAPX] run this on the client")
 
 local REPO = "https://github.com/miniwroldpro124-cyber/pet99bynhmt"
 local COMMIT = "3a63485"
-local VERSION = "7.5"
+local VERSION = "7.6"
 local PINNED = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/" .. COMMIT .. "/"
 local MIRROR_PINNED = "https://cdn.jsdelivr.net/gh/miniwroldpro124-cyber/pet99bynhmt@" .. COMMIT .. "/"
 local BASE = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/"
@@ -171,6 +171,14 @@ local function stamp(body)
 end
 
 local function httpGet(relative)
+    if type(readfile) == "function" then
+        for _, candidate in ipairs({ relative, "zaphub-src/" .. relative, "pet99/" .. relative }) do
+            local ok, content = pcall(readfile, candidate)
+            if ok and type(content) == "string" and #content > 32 then
+                return content
+            end
+        end
+    end
     local query = relative:find("?", 1, true) and "&" or "?"
     local bust = query .. "v=" .. VERSION
     local best, bestVersion = nil, nil

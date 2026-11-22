@@ -1,6 +1,5 @@
 -- modules/picks.lua
--- Per-item selections the engine's consume workers respect. Nothing ticked in
--- a category means every id is allowed; one tick narrows the worker to it.
+-- Per-item selections across all game categories (Islands, Potions, Eggs, Huges, Items, Bags, Fruits, Flags, Keys, Dice, Gifts, Cards).
 return function(ctx)
     local tab = ctx.win:CreateTab("Picks", "rbxassetid://6031090990")
     local ui = ctx.ui
@@ -8,7 +7,7 @@ return function(ctx)
 
     local listParagraph = tab:CreateParagraph({
         Title = "Picks",
-        Content = "reading engine inventory...",
+        Content = "reading engine catalog...",
     })
 
     local function tickedSummary()
@@ -16,7 +15,7 @@ return function(ctx)
         if not ok or type(picks) ~= "table" then
             return "engine not reporting"
         end
-        local order = { "keys", "bags", "fruits", "potions", "freeGifts", "dice", "cards", "zones" }
+        local order = { "zones", "potions", "eggs", "huges", "items", "bags", "fruits", "flags", "keys", "dice", "freeGifts", "cards" }
         local parts = {}
         for _, category in ipairs(order) do
             local store = picks[category] or {}
@@ -38,12 +37,13 @@ return function(ctx)
         for _, id in ipairs(entry.items or {}) do
             ids[#ids + 1] = tostring(id)
         end
-        table.sort(ids)
         return ids, tostring(entry.title or category)
     end
 
     local function refreshSummary()
-        listParagraph.Set({ Title = "Picks", Content = tickedSummary() })
+        pcall(function()
+            listParagraph.Set({ Title = "Picks", Content = tickedSummary() })
+        end)
     end
 
     local function build(category, label)
@@ -56,8 +56,9 @@ return function(ctx)
         local chosen = ids[1]
         local armed = false
         ui.dropdown(tab, {
-            name = label .. " item",
+            name = ("%s (%d)"):format(label, #ids),
             options = ids,
+            current = chosen,
             callback = function(option)
                 chosen = tostring(option)
                 if not armed then return end
@@ -67,7 +68,7 @@ return function(ctx)
             end,
         })
         ui.toggle(tab, {
-            name = label .. " only",
+            name = label .. " - Tick Selected",
             default = false,
             onChange = function(value)
                 armed = value == true
@@ -80,17 +81,25 @@ return function(ctx)
                 refreshSummary()
             end,
         })
-        ui.paragraph(tab, label,
-            "Toggle drives the currently selected id. Untick everything to let the worker take the whole category.")
+        ui.button(tab, "Clear All " .. label .. " Picks (Allow All)", function()
+            pcall(engine.ClearPicks, category)
+            ui.notify(label, "cleared all picks in " .. label)
+            refreshSummary()
+        end)
     end
 
     local groups = {
-        { "keys", "Keys" },
-        { "bags", "Gift Bags" },
+        { "zones", "Islands / Zones" },
+        { "potions", "Potions & XP Potions" },
+        { "eggs", "Eggs" },
+        { "huges", "Huge / Titanic / Gargantuan Pets" },
+        { "items", "All Items" },
+        { "bags", "Gift Bags & Lootboxes" },
         { "fruits", "Fruits" },
-        { "potions", "Potions" },
+        { "flags", "Zone Flags" },
+        { "keys", "Keys" },
+        { "dice", "Lucky Dice" },
         { "freeGifts", "Free Gifts" },
-        { "dice", "Dice" },
         { "cards", "Cards" },
     }
 

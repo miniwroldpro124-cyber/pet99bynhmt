@@ -1,26 +1,82 @@
 -- modules/world.lua
--- Zone teleporting. World hopping is deliberately not wired.
+-- Direct CFrame island teleport (stands in the middle, never uses game cannon teleport)
+-- plus Best World teleport across Worlds 1-4 and all 279 islands.
 return function(ctx)
     local tab = ctx.win:CreateTab("World", "rbxassetid://16259403210")
     local ui = ctx.ui
+    local engine = ctx.engine
 
-    ui.section(tab, "Zones")
+    ui.section(tab, "Auto Farm Island Teleport")
     ui.toggle(tab, {
-        name = "Auto Teleport Best Zone", key = "zoneTele", default = false,
-        note = "Teleports to the highest zone you own the moment it is available.",
+        name = "Auto Teleport Best Island (Middle)", key = "zoneTele", default = false,
+        note = "Directly snaps CFrame to the middle of your best owned island without calling Teleports_RequestTeleport.",
     })
     ui.toggle(tab, {
-        name = "Snap To Island Centre", key = "teleCenter", default = true,
-        note = "Lands on the centroid of the zone's own breakables, not the spawn edge.",
+        name = "Keep Standing In Island Middle", key = "teleCenter", default = true,
+        note = "Anchors your farm position to the centroid of INTERACT.BREAK_ZONES in the middle of the island.",
     })
     ui.toggle(tab, {
-        name = "Auto Buy Next Zone", key = "zoneBuy", default = false,
-        note = "Purchases with the game's own currency checks. Nothing is spent that the game would refuse.",
+        name = "Auto Buy Next Island", key = "zoneBuy", default = false,
+        note = "Automatically purchases the next locked zone as soon as you can afford it.",
     })
     ui.slider(tab, {
-        name = "Teleport Retry", key = "TeleInterval",
+        name = "Teleport Check Interval", key = "TeleInterval",
         range = { 0.2, 5 }, increment = 0.2, suffix = "s", value = 0.4,
     })
-    ui.paragraph(tab, "World hopping",
-        "Not wired. The engine never teleports you between worlds and the advance worker starts off.")
+
+    ui.section(tab, "Best World Teleport (Worlds 1 - 4)")
+    ui.button(tab, "Teleport To Best World Now", function()
+        local ok, res, msg = pcall(engine.TeleportBestWorld)
+        if ok then
+            ui.notify("Best World", tostring(msg or res))
+        else
+            ui.notify("Best World", tostring(res))
+        end
+    end)
+    ui.toggle(tab, {
+        name = "Auto Teleport Best World", key = "worldTele", default = false,
+        note = "Switches worlds via World1..4Teleport and snaps to the middle of the highest unlocked island.",
+    })
+    ui.toggle(tab, {
+        name = "Auto Advance To Highest Unlocked World", key = "worldAdvance", default = false,
+        note = "Automatically advances target world from World 1 up to World 4 as zones unlock.",
+    })
+
+    local worldOptions = { "World 1", "World 2", "World 3", "World 4" }
+    ui.dropdown(tab, {
+        name = "Select Target World",
+        options = worldOptions,
+        current = worldOptions[1],
+        callback = function(option)
+            local target = tonumber(tostring(option):match("(%d+)"))
+            if not target then return end
+            pcall(engine.SetWorld, target)
+            ui.notify("World", "Target world set to World " .. target)
+        end,
+    })
+
+    ui.section(tab, "All Islands Teleport (279 Islands)")
+    local okCat, cat = pcall(engine.GetCatalog)
+    local islands = (okCat and type(cat) == "table" and type(cat.islands) == "table" and #cat.islands > 0)
+        and cat.islands or { "Spawn" }
+    local selectedIsland = islands[1]
+
+    ui.dropdown(tab, {
+        name = "Select Island (" .. tostring(#islands) .. " Islands)",
+        options = islands,
+        current = selectedIsland,
+        callback = function(option)
+            selectedIsland = tostring(option)
+        end,
+    })
+
+    ui.button(tab, "Teleport To Selected Island (Stand In Middle)", function()
+        if not selectedIsland then return end
+        local ok, res, msg = pcall(engine.TeleportIsland, selectedIsland)
+        if ok then
+            ui.notify("Island Teleport", tostring(msg or res))
+        else
+            ui.notify("Island Teleport", tostring(res))
+        end
+    end)
 end

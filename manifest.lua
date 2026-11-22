@@ -10,6 +10,7 @@ return {
     { name = "Progress", file = "modules/progress.lua", icon = "rbxassetid://15642579187" },
     { name = "Consume",  file = "modules/consume.lua",  icon = "rbxassetid://16089599792" },
     { name = "Picks",    file = "modules/picks.lua",    icon = "rbxassetid://6031090990" },
+    { name = "Cheat",    file = "modules/cheat.lua",    icon = "rbxassetid://6031090990" },
     { name = "Machines", file = "modules/machines.lua", icon = "rbxassetid://126141499544212" },
     { name = "Render",   file = "modules/render.lua",   icon = "rbxassetid://6035047409" },
     { name = "Server",   file = "modules/server.lua",   icon = "rbxassetid://16093555964" },
