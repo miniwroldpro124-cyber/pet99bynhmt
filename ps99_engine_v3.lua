@@ -54,11 +54,11 @@ if env ~= _G and type(hostGet(_G, "__PS99CLEAN_CLEANUP")) == "function" then
 end
 
 local CFG = {
-    -- Controlled attack speed multiplier: fast enough to snap pets cleanly onto
-    -- attacked breakables without NaN/flicker or thrashing when idle.
-    PetSpeedMult = 250,
+    -- Finite high speed multiplier for instant 1-frame snap when attacking a
+    -- breakable; idle/following pets stay at their normal speed multiplier.
+    PetSpeedMult = 10000,
     PetAttackDwell = 0.45,
-    PetInterval = 0.1,
+    PetInterval = 0.05,
     TapRate = 60,
     FarmTapRate = 90,
     TapRange = 220,
@@ -313,6 +313,7 @@ local REMOTE_TYPES = {
     ["Relic_Found"] = "RemoteFunction",
     ["YS_Load"] = "RemoteFunction",
     ["RD_Ingest"] = "RemoteFunction",
+    ["KX_Release"] = "RemoteFunction",
     ["Lootables_Open"] = "RemoteFunction",
     ["Spinny Wheel: Request Spin"] = "RemoteFunction",
 }
@@ -421,7 +422,34 @@ local function looksLikeSave(value)
         and type(rawget(value, "Rebirths")) == "number"
 end
 
+CFG.BootstrapDone = false
+function CFG.BootstrapModules()
+    if CFG.BootstrapDone then return end
+    CFG.BootstrapDone = true
+    local lib = RS:FindFirstChild("Library")
+    local cli = lib and lib:FindFirstChild("Client")
+    if not cli then return end
+    local function tryReq(slot, name)
+        if modules[slot] then return end
+        local child = cli:FindFirstChild(name)
+        if not child then return end
+        local ok, mod = pcall(require, child)
+        if ok and type(mod) == "table" then
+            modules[slot] = mod
+        end
+    end
+    tryReq("save", "Save")
+    tryReq("network", "Network")
+    tryReq("pet", "PlayerPet")
+    tryReq("breakables", "BreakableCmds")
+    tryReq("gamepasses", "Gamepasses")
+    tryReq("ultimates", "UltimateCmds")
+end
+
 local function getSave()
+    if not modules.save and not CFG.BootstrapDone then
+        CFG.BootstrapModules()
+    end
     if snap.cache then
         local ok, value = pcall(function() return rawget(snap.cache, LocalPlayer) end)
         if ok and looksLikeSave(value) then
@@ -986,7 +1014,14 @@ local function restorePetSpeed()
                 local cpet = record.cpet
                 if type(cpet) == "table" then
                     cpet:Broadcast("petSpeedMult", previous)
-                    cpet.parallelIn.petSpeedMult = previous
+                    cpet:Broadcast("petSpeed", 0.45)
+                    if cpet.parallelIn then
+                        cpet.parallelIn.petSpeedMult = previous
+                        cpet.parallelIn.petSpeed = 0.45
+                    end
+                    if cpet.actor and type(cpet.actor.SendMessage) == "function" then
+                        cpet.actor:SendMessage("Update", cpet.uid, cpet.bucketId, { petSpeedMult = previous, petSpeed = 0.45 })
+                    end
                 end
             end)
             if not ok then warn("[PS99 CLEAN] pet reset: " .. tostring(err)) end
@@ -1004,21 +1039,30 @@ end
 
 function petState.isAttacking(record)
     if not enabled.petTeleAfterAttack then return true end
-    local now = os.clock()
-    if now - (petState.lastAttackAt or -math.huge) > 0.9 then return false end
     if record then
-        local assigned = petState.assignedModel[record] or petState.attackModel
-        if not assigned or not assigned.Parent then return false end
         local cpet = rawget(record, "cpet")
-        if type(cpet) == "table" and cpet.targetType ~= nil and cpet.targetType ~= "Breakable" then
-            return false
+        if type(cpet) == "table" and cpet.targetType == "Breakable" then
+            return true
         end
-        return true
+        local assigned = petState.assignedModel[record]
+        if assigned and assigned.Parent then
+            return true
+        end
+        local tgt = rawget(record, "target")
+        if typeof(tgt) == "Instance" and tgt.Parent and tgt:GetAttribute("BreakableUID") ~= nil then
+            return true
+        end
+        return false
     end
-    return petState.attackModel ~= nil and petState.attackModel.Parent ~= nil
+    local now = os.clock()
+    return (petState.attackModel ~= nil and petState.attackModel.Parent ~= nil)
+        or (now - (petState.lastAttackAt or -math.huge) <= 0.9)
 end
 
 local function petTick()
+    if not modules.pet and not CFG.BootstrapDone then
+        CFG.BootstrapModules()
+    end
     local mod = modules.pet
     if not mod and next(petState.records) == nil then notes.pet = "waiting for PlayerPet; " .. notes.heap; return end
     if mod then
@@ -1053,16 +1097,18 @@ local function petTick()
     end
     local count, activeCount = 0, 0
     local seen = {}
+    local boostBaseSpeed = (CFG.PetSpeedMult >= 1000) and 50 or math.max(0.45, CFG.PetSpeedMult * 0.05)
     local function apply(record)
         if seen[record] or record.destroyed
             or (record.owner ~= nil and record.owner ~= LocalPlayer) then return end
         seen[record] = true
         if petState.previous[record] == nil then
             local prev = tonumber(record.speedMult)
-            petState.previous[record] = (prev and prev < CFG.PetSpeedMult and prev) or 1
+            petState.previous[record] = (prev and prev < 50 and prev) or 1
         end
         local petAttacking = petState.isAttacking(record)
         local desiredSpeed = petAttacking and CFG.PetSpeedMult or (petState.previous[record] or 1)
+        local desiredBase = petAttacking and boostBaseSpeed or 0.45
         if petAttacking then
             activeCount += 1
         else
@@ -1075,8 +1121,17 @@ local function petTick()
         if not ok then return end
         local cpet = record.cpet
         if type(cpet) == "table" then
-            pcall(function() cpet:Broadcast("petSpeedMult", desiredSpeed) end)
-            pcall(function() cpet.parallelIn.petSpeedMult = desiredSpeed end)
+            pcall(function()
+                cpet:Broadcast("petSpeedMult", desiredSpeed)
+                cpet:Broadcast("petSpeed", desiredBase)
+                if cpet.parallelIn then
+                    cpet.parallelIn.petSpeedMult = desiredSpeed
+                    cpet.parallelIn.petSpeed = desiredBase
+                end
+                if cpet.actor and type(cpet.actor.SendMessage) == "function" then
+                    cpet.actor:SendMessage("Update", cpet.uid, cpet.bucketId, { petSpeedMult = desiredSpeed, petSpeed = desiredBase })
+                end
+            end)
         end
         count += 1
     end
@@ -1092,7 +1147,7 @@ local function petTick()
     if count == 0 then
         notes.pet = "no pets equipped"
     elseif activeCount > 0 then
-        notes.pet = ("1-pet-1-ore | %d/%d pets attacking"):format(activeCount, count)
+        notes.pet = ("fast x%d | %d/%d pets attacking"):format(math.floor(CFG.PetSpeedMult), activeCount, count)
     else
         notes.pet = ("idle | %d pets waiting for attack"):format(count)
     end
@@ -1222,11 +1277,16 @@ function petState.routeSpread(candidates, point)
                     local ringPos = targetPos + Vector3.new(math.cos(angle) * 3.5, 0, math.sin(angle) * 3.5)
                     local ringCF = CFrame.lookAt(ringPos, Vector3.new(targetPos.X, ringPos.Y, targetPos.Z))
                     pcall(function()
+                        local boostBase = (CFG.PetSpeedMult >= 1000) and 50 or math.max(0.45, CFG.PetSpeedMult * 0.05)
                         record.speedMult = CFG.PetSpeedMult
                         local cpet = rawget(record, "cpet")
                         if type(cpet) == "table" then
-                            if cpet.parallelIn then cpet.parallelIn.petSpeedMult = CFG.PetSpeedMult end
+                            if cpet.parallelIn then
+                                cpet.parallelIn.petSpeedMult = CFG.PetSpeedMult
+                                cpet.parallelIn.petSpeed = boostBase
+                            end
                             cpet:Broadcast("petSpeedMult", CFG.PetSpeedMult)
+                            cpet:Broadcast("petSpeed", boostBase)
                             if cpet.physical and cpet.physical.Parent then
                                 cpet.physical:PivotTo(ringCF)
                             end
@@ -1236,6 +1296,7 @@ function petState.routeSpread(candidates, point)
                                 cpet.parallelOut.farming = true
                             end
                             if cpet.actor and type(cpet.actor.SendMessage) == "function" then
+                                cpet.actor:SendMessage("Update", cpet.uid, cpet.bucketId, { petSpeedMult = CFG.PetSpeedMult, petSpeed = boostBase })
                                 cpet.actor:SendMessage("Reposition", cpet.uid, cpet.bucketId)
                             end
                         end
@@ -1466,7 +1527,8 @@ local function tapTick()
     -- (Breakables_PlayerDealDamage) has fired.
     if ok and primaryModel and primaryUid then
         petState.lastAttackAt = now
-        if primaryModel ~= petState.routeTarget or now - (petState.routeAt or 0) >= 0.2 then
+        local routeInterval = math.clamp(tonumber(CFG.PetRouteRate) or 0.35, 0.1, 1.0)
+        if primaryModel ~= petState.routeTarget or now - (petState.routeAt or 0) >= routeInterval then
             petState.routeTarget, petState.routeAt = primaryModel, now
             petState.route(primaryModel, point, primaryUid)
         end
@@ -2446,6 +2508,15 @@ local function allowAll(store, id)
     return pickCount(store) == 0 or store[id] == true
 end
 
+local KEY_UNLOCKS = {
+    {item = "Crystal Key", remote = "CrystalKey_Unlock", pick = "CrystalKey_Combine"},
+    {item = "Tech Key", remote = "TechKey_Unlock", pick = "TechKey_Combine"},
+    {item = "Void Key", remote = "VoidKey_Unlock", pick = "VoidKey_Combine"},
+    {item = "Fantasy Key", remote = "FantasyKey_Unlock", pick = "FantasyKey_Combine"},
+    {item = "Secret Key", remote = "SecretKey_Unlock", pick = "SecretKey_Combine"},
+    {item = "Prison Key", remote = "PrisonKey_Use", pick = "PrisonKey_Combine"},
+}
+
 local function keyTick()
     local now = os.clock()
     if now < nextAt.key then return end
@@ -2467,8 +2538,30 @@ local function keyTick()
             return
         end
     end
-    notes.keys = "no selected key halves to combine"
+    for _, unlock in ipairs(KEY_UNLOCKS) do
+        if not alive or not enabled.autoKeys then return end
+        local have = halves[unlock.item] or 0
+        if have > 0 and allowAll(picked.keys, unlock.pick) then
+            nextAt.key = now + CFG.KeyInterval
+            local ok, message = invoke(unlock.remote)
+            if not alive or not enabled.autoKeys then return end
+            if ok == true then
+                notes.keys = "unlocked " .. unlock.item
+                nextAt.save = 0
+                return
+            end
+        end
+    end
+    notes.keys = "no selected keys to combine or unlock"
 end
+
+local MISC_GIFT_BAG_SET = {
+    ["Gift Bag"] = true, ["Large Gift Bag"] = true, ["Seed Bag"] = true,
+    ["Diamond Gift Bag"] = true, ["Fruit Bundle"] = true, ["Potion Bundle"] = true,
+    ["Large Potion Bundle"] = true, ["Enchant Bundle"] = true, ["Large Enchant Bundle"] = true,
+    ["Flag Bundle"] = true, ["Toy Bundle"] = true, ["Mini Chest"] = true,
+    ["Rainbow Mini Chest"] = true, ["Charm Stone"] = true,
+}
 
 local function bagTick()
     local now = os.clock()
@@ -2476,24 +2569,37 @@ local function bagTick()
     local save = getSave()
     if not save then notes.bags = "waiting for profile"; return end
     scanLiveDirectory()
-    local buckets = {"Misc", "Lootbox"}
-    for _, bucketName in ipairs(buckets) do
-        for _, item in ipairs(stackList(inventory(save, bucketName))) do
+    -- Lootboxes (Hype Eggs, Anniversary Gifts, Clan Gifts, Packs, etc.) use KX_Release(uid, amount, nil).
+    for _, item in ipairs(stackList(inventory(save, "Lootbox"))) do
+        if not alive or not enabled.autoGiftBags then return end
+        if allowAll(picked.bags, item.id) then
+            nextAt.bag = now + CFG.BagInterval
+            local amount = math.max(1, math.min(item.amount, CFG.BagMaxOpen))
+            local ok, message = invoke("KX_Release", item.uid, amount, nil)
             if not alive or not enabled.autoGiftBags then return end
-            if allowAll(picked.bags, item.id) then
-                nextAt.bag = now + CFG.BagInterval
-                local amount = math.max(1, math.min(item.amount, CFG.BagMaxOpen))
-                local ok, message = invoke("GiftBag_Open", item.id, amount)
-                if not alive or not enabled.autoGiftBags then return end
-                if ok == true then
-                    notes.bags = ("opened %s x%d"):format(item.id, amount)
-                    nextAt.save = 0
-                    return
-                end
+            if ok == true then
+                notes.bags = ("opened lootbox %s x%d"):format(item.id, amount)
+                nextAt.save = 0
+                return
             end
         end
     end
-    notes.bags = "no selected bags in inventory"
+    -- Misc gift bags & bundles use GiftBag_Open(id, amount).
+    for _, item in ipairs(stackList(inventory(save, "Misc"))) do
+        if not alive or not enabled.autoGiftBags then return end
+        if (MISC_GIFT_BAG_SET[item.id] or picked.bags[item.id]) and allowAll(picked.bags, item.id) then
+            nextAt.bag = now + CFG.BagInterval
+            local amount = math.max(1, math.min(item.amount, CFG.BagMaxOpen))
+            local ok, message = invoke("GiftBag_Open", item.id, amount)
+            if not alive or not enabled.autoGiftBags then return end
+            if ok == true then
+                notes.bags = ("opened %s x%d"):format(item.id, amount)
+                nextAt.save = 0
+                return
+            end
+        end
+    end
+    notes.bags = "no selected bags or lootboxes in inventory"
 end
 
 local consumeNext = {Fruit = 0, Potion = 0, potionCooldown = {}}
@@ -3587,8 +3693,14 @@ syncWorkers = function()
     syncFly()
     syncGamepasses()
     syncGates()
-    local profileWanted = enabled.zoneTele or enabled.zoneBuy or enabled.autoQuest or enabled.autoDoQuest or enabled.autoRank or enabled.autoRebirth or enabled.autoEgg or enabled.worldTele or enabled.autoBuyPetSlots or enabled.worldAdvance or enabled.unlockGamepasses
-    local discoveryWanted = profileWanted or enabled.petSpeed or enabled.farm or enabled.vacuum or enabled.autoPotions or enabled.autoFruits or enabled.autoGiftBags or enabled.autoKeys
+    local profileWanted = enabled.zoneTele or enabled.zoneBuy or enabled.autoQuest or enabled.autoDoQuest
+        or enabled.autoRank or enabled.autoRebirth or enabled.autoEgg or enabled.worldTele
+        or enabled.autoBuyPetSlots or enabled.worldAdvance or enabled.unlockGamepasses
+        or enabled.autoKeys or enabled.autoGiftBags or enabled.autoFruits or enabled.autoPotions
+        or enabled.autoFreeGifts or enabled.autoUltimate or enabled.autoDaycare or enabled.autoFlags
+        or enabled.autoSecretRooms or enabled.autoTreehouse or enabled.autoFuse or enabled.autoCards
+        or enabled.autoRelics or enabled.autoMailClaim or enabled.autoDice
+    local discoveryWanted = profileWanted or enabled.petSpeed or enabled.farm or enabled.vacuum or enabled.tap or enabled.clickAura
     ensureWorker("profile", profileWanted, CFG.ProfileInterval, profileTick)
     ensureWorker("discovery", discoveryWanted, CFG.DiscoveryInterval, discoveryTick)
     if not discoveryWanted then heapObjects, heapCursor, treeScan = nil, nil, nil end
@@ -3765,8 +3877,15 @@ local controller = {
         local number = tonumber(value)
         if not number then return false, "not a number" end
         CFG[key] = number
+        if key == "TapRange" and auraPart and auraPart.Parent then
+            pcall(function() auraPart.Size = Vector3.new(0.3, number * 2, number * 2) end)
+        end
         syncWorkers()
         return true, number
+    end,
+    HopNow = function()
+        task.spawn(hopTick)
+        return true, "searching low-player server"
     end,
     GetConfig = function(key)
         if CFG[key] == nil then return nil end
@@ -3816,6 +3935,7 @@ end
 worldTarget = currentWorldNumber()
 publish()
 if not alive then return controller end
+task.defer(CFG.BootstrapModules)
 task.defer(scanLiveDirectory)
 connect(LocalPlayer.CharacterAdded, function()
     target.model, target.uid, target.at = nil, nil, nil

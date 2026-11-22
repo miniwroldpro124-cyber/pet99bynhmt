@@ -16,7 +16,7 @@ return function(ctx)
     })
     ui.slider(tab, {
         name = "Pet Attack Speed", key = "PetSpeedMult",
-        range = { 20, 600 }, increment = 10, value = 250,
+        range = { 100, 50000 }, increment = 500, value = 10000,
     })
     ui.slider(tab, {
         name = "Pet Re-route Interval", key = "PetRouteRate",

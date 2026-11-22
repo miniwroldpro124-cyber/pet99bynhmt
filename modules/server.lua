@@ -45,8 +45,16 @@ return function(ctx)
     ui.section(tab, "Hop")
     ui.toggle(tab, {
         name = "Auto Server Hop", key = "serverHop", default = false,
-        note = "Hops when the server drops below the engine's player threshold.",
+        note = "Hops to a low-player server when current server players exceed Max Players.",
     })
+    ui.slider(tab, {
+        name = "Max Players Threshold", key = "HopMaxPlayers",
+        range = { 1, 20 }, increment = 1, value = 4,
+    })
+    ui.button(tab, "Hop To Low-Player Server Now", function()
+        local ok, res, msg = pcall(engine.HopNow)
+        ui.notify("Server Hop", tostring(msg or res))
+    end)
 
     ui.section(tab, "Kill switches")
     ui.button(tab, "All Features Off", function()
