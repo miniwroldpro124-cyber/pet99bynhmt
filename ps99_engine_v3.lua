@@ -104,7 +104,8 @@ local CFG = {
     MailInterval = 15,
     FreeGiftInterval = 20,
     FreeGiftMax = 12,
-    UltimateInterval = 3,
+    UltimateInterval = 1,
+    SprinklerInterval = 10,
     DaycareInterval = 8,
     DaycareDuration = 21600,
     DaycareOnlineSpeedup = 3,
@@ -144,7 +145,7 @@ local CFG = {
 }
 
 local enabled = {
-    petSpeed = false, tap = false, vacuum = false, farm = false,
+    petSpeed = false, tap = false, vacuum = false, farm = false, fastFarmBeta = false,
     zoneTele = false, zoneBuy = false, autoQuest = false, autoDoQuest = false,
     autoRank = false, autoRebirth = false, antiAfk = false, clickAura = false,
     autoEgg = false, auraVisual = false, optBreakables = false, optPets = false, worldTele = false,
@@ -153,7 +154,7 @@ local enabled = {
     petBulkJoin = true, petTeleAfterAttack = true, drinkHighestTier = true,
     serverHop = false, autoBuyPetSlots = false, jitter = false,
     autoKeys = false, autoGiftBags = false, autoFruits = false, autoPotions = false,
-    autoFreeGifts = false, autoUltimate = false, autoDaycare = false, autoFlags = false,
+    autoFreeGifts = false, autoUltimate = false, autoSprinkler = false, autoDaycare = false, autoFlags = false,
     autoSecretRooms = false, autoTreehouse = false, autoFuse = false, autoCards = false,
     autoRelics = false, autoMailClaim = false, autoDice = false,
     noclip = false, fly = false, unlockGamepasses = false, removeGates = false,
@@ -197,14 +198,14 @@ local worldTarget = 1
 local snap = {raw = nil, at = -math.huge, source = "waiting", cache = nil}
 local stats = {pending = nil, remote = nil, connection = nil}
 local nextAt = {
-    heap = 0, save = 0, quest = {}, ensure = {}, doQuest = 0,
+    heap = 0, save = 0, quest = {}, ensure = {}, doQuest = 0, coinJar = 0,
     egg = 0, worldTele = 0, petSlot = 0,
     key = 0, bag = 0, mail = 0,
-    freeGift = 0, ultimate = 0, daycare = 0, flag = 0,
+    freeGift = 0, ultimate = 0, sprinkler = 0, daycare = 0, flag = 0,
     secret = 0, relic = 0, treehouse = 0, fuse = 0, card = 0, dice = 0,
     freeGiftCursor = 1, tree = 0, tap = 0, tele = 0, buy = 0, rank = 0, rebirth = 0,
 }
-local notes = {pet = "off", tap = "off", vacuum = "off", tele = "off", buy = "off", quest = "off", doQuest = "off", rank = "off", rebirth = "off", antiAfk = "off", egg = "off", world = "off", advance = "off", optimize = "off", hop = "off", petSlot = "off", keys = "off", bags = "off", fruits = "off", potions = "off", freeGift = "off", ultimate = "off", daycare = "off", flags = "off", secret = "off", relics = "off", treehouse = "off", fuse = "off", cards = "off", dice = "off", mailClaim = "off", cheat = "ready", heap = "idle; no startup scan", profile = "waiting for discovery"}
+local notes = {pet = "off", tap = "off", betaFarm = "off", vacuum = "off", tele = "off", buy = "off", quest = "off", doQuest = "off", rank = "off", rebirth = "off", antiAfk = "off", egg = "off", world = "off", advance = "off", optimize = "off", hop = "off", petSlot = "off", keys = "off", bags = "off", fruits = "off", potions = "off", freeGift = "off", ultimate = "off", sprinkler = "off", daycare = "off", flags = "off", secret = "off", relics = "off", treehouse = "off", fuse = "off", cards = "off", dice = "off", mailClaim = "off", cheat = "ready", heap = "idle; no startup scan", profile = "waiting for discovery"}
 
 local petState = {
     previous = setmetatable({}, {__mode = "k"}),
@@ -244,6 +245,9 @@ local REMOTE_TYPES = {
     ["Breakables_PlayerDealDamage"] = "UnreliableRemoteEvent",
     ["Breakables_JoinPetBulk"] = "RemoteEvent",
     ["Breakables_RenderWorld"] = "RemoteEvent",
+    ["CQ_Route"] = "RemoteEvent",
+    ["CQ_Pin"] = "RemoteEvent",
+    ["Sprinklers: Consume"] = "RemoteFunction",
     ["Orbs: Collect"] = "RemoteEvent",
     ["Teleports_RequestTeleport"] = "RemoteFunction",
     ["World1Teleport"] = "RemoteFunction",
@@ -444,6 +448,7 @@ function CFG.BootstrapModules()
     tryReq("breakables", "BreakableCmds")
     tryReq("gamepasses", "Gamepasses")
     tryReq("ultimates", "UltimateCmds")
+    tryReq("sprinklers", "SprinklerCmds")
 end
 
 local function getSave()
@@ -3249,16 +3254,57 @@ local function doQuestTick()
                     end
                 end
             end
-        -- 31/37/68 = COIN_JAR, 32/38/69 = COMET, 43/66/70 = PINATA, 44/67/71 = LUCKYBLOCK
-        elseif gtype == 31 or gtype == 37 or gtype == 68 or gtype == 32 or gtype == 38 or gtype == 69
+        -- 7 = CURRENCY, 99 = OBTAIN_CURRENCY, 100 = CLAIM_FREE_DIAMONDS
+        -- Collect Gem / Diamonds: open Large Gift Bag, Small Gift Bag ("Gift Bag"), or Diamond Gift Bag.
+        elseif gtype == 7 or gtype == 99 or gtype == 100 then
+            local curr = tostring(goal.CurrencyID or goal.Currency or ""):lower()
+            if gtype == 100 or curr:find("diamond", 1, true) or curr:find("gem", 1, true) then
+                local miscList = stackList(inventory(save, "Misc"))
+                local gemBags = {"Large Gift Bag", "Gift Bag", "Diamond Gift Bag"}
+                for _, bagName in ipairs(gemBags) do
+                    for _, item in ipairs(miscList) do
+                        if item.id == bagName and item.amount > 0 then
+                            local openAmt = math.max(1, math.min(item.amount, 5))
+                            if invoke("GiftBag_Open", item.id, openAmt) == true then
+                                notes.doQuest = ("quest gems: opened %s x%d"):format(item.id, openAmt)
+                                nextAt.save = 0
+                                return
+                            end
+                        end
+                    end
+                end
+            end
+        -- 31/37/68 = COIN_JAR (easiest/cheapest coin jar first: Basic -> Normal -> Magic -> Giant)
+        elseif gtype == 31 or gtype == 37 or gtype == 68 then
+            if now >= (nextAt.coinJar or 0) then
+                local best = maxOwned(save)
+                if best and zones[best] and currentZone() ~= zones[best].id then
+                    teleportToIslandMiddle(zones[best].id)
+                end
+                local miscList = stackList(inventory(save, "Misc"))
+                local jarOrder = {"Basic Coin Jar", "Normal Coin Jar", "Coin Jar", "Magic Coin Jar", "Giant Coin Jar"}
+                for _, jarName in ipairs(jarOrder) do
+                    for _, item in ipairs(miscList) do
+                        if item.id == jarName and item.amount > 0 then
+                            if invoke("CoinJar_Spawn", item.uid) == true then
+                                nextAt.coinJar = now + 12
+                                notes.doQuest = "quest coin jar (easy first): " .. item.id
+                                nextAt.save = 0
+                                return
+                            end
+                        end
+                    end
+                end
+            end
+        -- 32/38/69 = COMET, 43/66/70 = PINATA, 44/67/71 = LUCKYBLOCK
+        elseif gtype == 32 or gtype == 38 or gtype == 69
             or gtype == 43 or gtype == 66 or gtype == 70 or gtype == 44 or gtype == 67 or gtype == 71 then
             local best = maxOwned(save)
             if best and zones[best] and currentZone() ~= zones[best].id then
                 teleportToIslandMiddle(zones[best].id)
             end
             local wantName, remoteName
-            if gtype == 31 or gtype == 37 or gtype == 68 then wantName, remoteName = "Coin Jar", "CoinJar_Spawn"
-            elseif gtype == 32 or gtype == 38 or gtype == 69 then wantName, remoteName = "Comet", "Comet_Spawn"
+            if gtype == 32 or gtype == 38 or gtype == 69 then wantName, remoteName = "Comet", "Comet_Spawn"
             elseif gtype == 43 or gtype == 66 or gtype == 70 then wantName, remoteName = "Pinata", "Pinata_Spawn"
             else wantName, remoteName = "Lucky Block", "LuckyBlock_Spawn" end
             for _, item in ipairs(stackList(inventory(save, "Misc"))) do
@@ -3270,11 +3316,13 @@ local function doQuestTick()
                 end
             end
         -- 10/14 = BUY/COLLECT POTION, 11/15 = BUY/COLLECT ENCHANT, 65 = COLLECT FRUIT
+        -- Only open matching category bundles; NEVER waste Gift Bags when not needed.
         elseif gtype == 10 or gtype == 14 or gtype == 11 or gtype == 15 or gtype == 65 then
-            local bundleMatch = (gtype == 10 or gtype == 14) and "Potion" or ((gtype == 11 or gtype == 15) and "Enchant" or "Fruit")
+            local bundleMatch = (gtype == 10 or gtype == 14) and "Potion Bundle"
+                or ((gtype == 11 or gtype == 15) and "Enchant Bundle" or "Fruit Bundle")
             for _, item in ipairs(stackList(inventory(save, "Misc"))) do
-                if item.id:find(bundleMatch, 1, true) or item.id:find("Gift Bag", 1, true) then
-                    if invoke("GiftBag_Open", item.id, math.min(item.amount, 10)) == true then
+                if item.id:find(bundleMatch, 1, true) then
+                    if invoke("GiftBag_Open", item.id, math.min(item.amount, 5)) == true then
                         notes.doQuest = "quest opened " .. item.id
                         return
                     end
@@ -3305,6 +3353,192 @@ local function doQuestTick()
     pcall(tapTick)
     pcall(vacuumTick)
     notes.doQuest = ("working on %d quest goal(s) (type %s)"):format(#activeGoals, tostring(activeGoals[1].goal.Type))
+end
+
+-- Auto Use Sprinkler: keeps a Breakable Sprinkler running in the current island
+-- without wasting charges while one is already active (> 15s left).
+function CFG.SprinklerTick()
+    local now = os.clock()
+    if now < nextAt.sprinkler then return end
+    local save = getSave()
+    if not save then notes.sprinkler = "waiting for profile"; return end
+    local zone = currentZone()
+    if not zone then notes.sprinkler = "stand inside a zone"; return end
+    local spCmds = modules.sprinklers
+    if spCmds and type(spCmds.GetActiveSprinkler) == "function" then
+        local ok, active = pcall(spCmds.GetActiveSprinkler, zone)
+        if ok and type(active) == "table" and tonumber(active.EndTime) then
+            local left = active.EndTime - serverClock()
+            if left > 15 then
+                notes.sprinkler = ("active in %s (%ds left)"):format(zone, math.floor(left))
+                nextAt.sprinkler = now + math.min(left - 10, CFG.SprinklerInterval)
+                return
+            end
+        end
+    end
+    for _, item in ipairs(stackList(inventory(save, "Misc"))) do
+        if not alive or not enabled.autoSprinkler then return end
+        if item.id == "Breakable Sprinkler" and item.amount > 0 then
+            nextAt.sprinkler = now + CFG.SprinklerInterval
+            local ok, message = invoke("Sprinklers: Consume", "Breakable Sprinkler", item.uid, 1)
+            if not alive or not enabled.autoSprinkler then return end
+            notes.sprinkler = ok == true and ("placed Breakable Sprinkler in " .. zone) or tostring(message or "cannot place here")
+            if ok == true then nextAt.save = 0 end
+            return
+        end
+    end
+    notes.sprinkler = "no Breakable Sprinkler in inventory"
+end
+
+-- Fast Farm [BETA]: Heartbeat-driven bypass that skips client tap throttle,
+-- skips pet walk travel delay by sending CQ_Route + Breakables_JoinPetBulk in
+-- the same frame (1 pet = 1 distinct breakable), fires cpet.Arrived, and
+-- pushes petSpeedMult = 1e6 / petSpeed = 100 directly to parallel pet actors.
+CFG.BetaState = { conn = nil, lastStep = 0 }
+function CFG.SyncFastFarmBeta()
+    local st = CFG.BetaState
+    if not alive or not enabled.fastFarmBeta then
+        if st.conn then st.conn:Disconnect(); st.conn = nil end
+        notes.betaFarm = "off"
+        return
+    end
+    if st.conn then return end
+    if not CFG.BootstrapDone then CFG.BootstrapModules() end
+    notes.betaFarm = "running [BETA bypass]"
+    st.conn = game:GetService("RunService").Heartbeat:Connect(function()
+        if not alive or not enabled.fastFarmBeta then return end
+        local now = os.clock()
+        if now - st.lastStep < 0.03 then return end
+        st.lastStep = now
+        local point = position()
+        if not point then return end
+        local zone = currentZone()
+        if pickCount(picked.zones) > 0 and zone and not picked.zones[zone] then return end
+        if #auraTargets == 0 or now - (target.at or 0) >= 0.08 then
+            target.model, target.uid = pickTarget(point, zone)
+            target.at = now
+        end
+        local validList = {}
+        local seenM = {}
+        if target.model and validTarget(target.model, point, nil) then
+            seenM[target.model] = true
+            validList[#validList + 1] = { model = target.model, uid = target.model:GetAttribute("BreakableUID") }
+        end
+        for _, m in ipairs(auraTargets) do
+            if not seenM[m] and validTarget(m, point, nil) then
+                local u = m:GetAttribute("BreakableUID")
+                if u ~= nil then
+                    seenM[m] = true
+                    validList[#validList + 1] = { model = m, uid = u }
+                end
+            end
+        end
+        if #validList == 0 then
+            petState.attackModel, petState.attackUid = nil, nil
+            notes.betaFarm = "waiting for breakables"
+            return
+        end
+        -- 1. Multi-target tap damage burst (bypasses 8/s BreakableFrontend throttle)
+        local burstMax = math.min(#validList, math.max(CFG.FarmBurst or 12, 16))
+        for i = 1, burstMax do
+            fire("Breakables_PlayerDealDamage", validList[i].uid)
+        end
+        petState.lastAttackAt = now
+        -- 2. Direct 1-pet-1-breakable CQ_Route + same-frame Breakables_JoinPetBulk bypass
+        local mod = modules.pet
+        local pets, seenP = {}, {}
+        local group = mod and type(mod.GetByPlayer) == "function" and mod.GetByPlayer(LocalPlayer) or nil
+        if type(group) == "table" then
+            for _, rec in pairs(group) do if not seenP[rec] then seenP[rec] = true; pets[#pets + 1] = rec end end
+        end
+        for rec in pairs(petState.records) do
+            if not seenP[rec] then seenP[rec] = true; pets[#pets + 1] = rec end
+        end
+        local validByModel = {}
+        for _, e in ipairs(validList) do validByModel[e.model] = e.uid end
+        local usedByModel = {}
+        local cqRoute, joinBulk = {}, {}
+        local assignedCount = 0
+        for _, rec in ipairs(pets) do
+            if not rec.destroyed and (rawget(rec, "owner") == nil or rawget(rec, "owner") == LocalPlayer) then
+                local cur = petState.assignedModel[rec]
+                if cur and validByModel[cur] and not usedByModel[cur] then
+                    usedByModel[cur] = rec
+                    petState.assignedUid[rec] = validByModel[cur]
+                else
+                    petState.assignedModel[rec] = nil
+                    petState.assignedUid[rec] = nil
+                end
+            end
+        end
+        local idxCursor = 1
+        for pIdx, rec in ipairs(pets) do
+            if not rec.destroyed and (rawget(rec, "owner") == nil or rawget(rec, "owner") == LocalPlayer) then
+                if not petState.assignedModel[rec] then
+                    for scan = 1, #validList do
+                        local pickIdx = ((idxCursor + scan - 2) % #validList) + 1
+                        local entry = validList[pickIdx]
+                        if not usedByModel[entry.model] then
+                            usedByModel[entry.model] = rec
+                            petState.assignedModel[rec] = entry.model
+                            petState.assignedUid[rec] = entry.uid
+                            idxCursor = (pickIdx % #validList) + 1
+                            break
+                        end
+                    end
+                end
+                local tModel = petState.assignedModel[rec]
+                local tUid = petState.assignedUid[rec]
+                if tModel and tUid and tModel.Parent then
+                    assignedCount += 1
+                    petState.attackModel, petState.attackUid = tModel, tUid
+                    local euid = rawget(rec, "euid")
+                    if petState.joinedTarget[rec] ~= tModel then
+                        petState.joinedTarget[rec] = tModel
+                        pcall(function() rec:SetTarget(tModel) end)
+                        if euid ~= nil then
+                            cqRoute[euid] = { t = 2, v = tUid }
+                            joinBulk[euid] = tUid
+                        end
+                        local tPos = modelPosition(tModel)
+                        if tPos then
+                            local angle = (pIdx / math.max(#pets, 1)) * math.pi * 2
+                            local ringPos = tPos + Vector3.new(math.cos(angle) * 3.0, 0, math.sin(angle) * 3.0)
+                            local ringCF = CFrame.lookAt(ringPos, Vector3.new(tPos.X, ringPos.Y, tPos.Z))
+                            pcall(function()
+                                rec.speedMult = 1e6
+                                local cpet = rawget(rec, "cpet")
+                                if type(cpet) == "table" then
+                                    if cpet.parallelIn then
+                                        cpet.parallelIn.petSpeedMult = 1e6
+                                        cpet.parallelIn.petSpeed = 100
+                                    end
+                                    cpet:Broadcast("petSpeedMult", 1e6)
+                                    cpet:Broadcast("petSpeed", 100)
+                                    if cpet.physical and cpet.physical.Parent then cpet.physical:PivotTo(ringCF) end
+                                    if type(cpet.parallelOut) == "table" then
+                                        cpet.parallelOut.cf = ringCF
+                                        cpet.parallelOut.arrived = true
+                                        cpet.parallelOut.farming = true
+                                    end
+                                    if cpet.actor and type(cpet.actor.SendMessage) == "function" then
+                                        cpet.actor:SendMessage("Update", cpet.uid, cpet.bucketId, { petSpeedMult = 1e6, petSpeed = 100 })
+                                        cpet.actor:SendMessage("Reposition", cpet.uid, cpet.bucketId)
+                                    end
+                                    if type(cpet.Arrived) == "table" and type(cpet.Arrived.Fire) == "function" then
+                                        cpet.Arrived:Fire()
+                                    end
+                                end
+                            end)
+                        end
+                    end
+                end
+            end
+        end
+        if next(cqRoute) ~= nil then pcall(fire, "CQ_Route", cqRoute) end
+        if next(joinBulk) ~= nil then pcall(fire, "Breakables_JoinPetBulk", joinBulk) end
+        notes.betaFarm = ("BETA | %d pets -> %d ores"):format(assignedCount, #validList)
+    end)
 end
 
 -- Item 7: Edit & Cheat in Game (Stats/Currency editor, Gamepass unlocker,
@@ -3693,27 +3927,28 @@ syncWorkers = function()
     syncFly()
     syncGamepasses()
     syncGates()
+    CFG.SyncFastFarmBeta()
     local profileWanted = enabled.zoneTele or enabled.zoneBuy or enabled.autoQuest or enabled.autoDoQuest
         or enabled.autoRank or enabled.autoRebirth or enabled.autoEgg or enabled.worldTele
         or enabled.autoBuyPetSlots or enabled.worldAdvance or enabled.unlockGamepasses
         or enabled.autoKeys or enabled.autoGiftBags or enabled.autoFruits or enabled.autoPotions
-        or enabled.autoFreeGifts or enabled.autoUltimate or enabled.autoDaycare or enabled.autoFlags
+        or enabled.autoFreeGifts or enabled.autoUltimate or enabled.autoSprinkler or enabled.autoDaycare or enabled.autoFlags
         or enabled.autoSecretRooms or enabled.autoTreehouse or enabled.autoFuse or enabled.autoCards
         or enabled.autoRelics or enabled.autoMailClaim or enabled.autoDice
-    local discoveryWanted = profileWanted or enabled.petSpeed or enabled.farm or enabled.vacuum or enabled.tap or enabled.clickAura
+    local discoveryWanted = profileWanted or enabled.petSpeed or enabled.farm or enabled.fastFarmBeta or enabled.vacuum or enabled.tap or enabled.clickAura
     ensureWorker("profile", profileWanted, CFG.ProfileInterval, profileTick)
     ensureWorker("discovery", discoveryWanted, CFG.DiscoveryInterval, discoveryTick)
     if not discoveryWanted then heapObjects, heapCursor, treeScan = nil, nil, nil end
-    local petWanted = enabled.petSpeed or enabled.farm
+    local petWanted = enabled.petSpeed or enabled.farm or enabled.fastFarmBeta
     if not petWanted and petState.hook then restorePetSpeed() end
-    ensureWorker("pet", petWanted, CFG.PetInterval, petTick, function() enabled.petSpeed = false; enabled.farm = false; restorePetSpeed() end)
+    ensureWorker("pet", petWanted, CFG.PetInterval, petTick, function() enabled.petSpeed = false; enabled.farm = false; enabled.fastFarmBeta = false; restorePetSpeed() end)
     local tapRate = enabled.clickAura and CFG.AuraRate or (enabled.farm and CFG.FarmTapRate or CFG.TapRate)
     ensureWorker("tap", enabled.tap or enabled.farm or enabled.clickAura, 1 / math.clamp(math.min(tapRate, CFG.MaxTapRate), 1, 120), tapTick, function() enabled.tap = false; enabled.farm = false; enabled.clickAura = false end)
-    if (enabled.vacuum or enabled.farm) and not orbState.hook then
+    if (enabled.vacuum or enabled.farm or enabled.fastFarmBeta) and not orbState.hook then
         if not orbBackfillNeeded then nextAt.heap = math.min(nextAt.heap, os.clock() + CFG.HeapRetryInterval) end
         orbBackfillNeeded = true
     end
-    ensureWorker("vacuum", enabled.vacuum or enabled.farm, CFG.VacuumRate, vacuumTick, function() enabled.vacuum = false; enabled.farm = false end)
+    ensureWorker("vacuum", enabled.vacuum or enabled.farm or enabled.fastFarmBeta, CFG.VacuumRate, vacuumTick, function() enabled.vacuum = false; enabled.farm = false end)
     ensureWorker("tele", enabled.zoneTele, 0.5, teleTick, function() enabled.zoneTele = false end)
     ensureWorker("buy", enabled.zoneBuy, 0.5, buyTick, function() enabled.zoneBuy = false end)
     ensureWorker("quest", enabled.autoQuest, CFG.QuestInterval, questTick, function() enabled.autoQuest = false end)
@@ -3730,6 +3965,7 @@ syncWorkers = function()
     ensureWorker("potions", enabled.autoPotions, 1, potionTick, function() enabled.autoPotions = false end)
     ensureWorker("freeGift", enabled.autoFreeGifts, 1, freeGiftTick, function() enabled.autoFreeGifts = false end)
     ensureWorker("ultimate", enabled.autoUltimate, 1, ultimateTick, function() enabled.autoUltimate = false end)
+    ensureWorker("sprinkler", enabled.autoSprinkler, 2, CFG.SprinklerTick, function() enabled.autoSprinkler = false end)
     ensureWorker("daycare", enabled.autoDaycare, 1, daycareTick, function() enabled.autoDaycare = false end)
     ensureWorker("flags", enabled.autoFlags, 1, flagTick, function() enabled.autoFlags = false end)
     ensureWorker("secret", enabled.autoSecretRooms, 1, secretRoomTick, function() enabled.autoSecretRooms = false end)
@@ -3749,15 +3985,18 @@ syncWorkers = function()
         notes.optimize = "off"
     end
     if enabled.auraVisual then ensureAuraPart() else destroyAuraPart() end
-    if not enabled.tap and not enabled.farm and not enabled.clickAura and not enabled.autoDoQuest then
+    if not enabled.tap and not enabled.farm and not enabled.fastFarmBeta and not enabled.clickAura and not enabled.autoDoQuest then
         target.model, target.uid, target.at, targetScan = nil, nil, nil, nil
         auraTargets, auraCursor = {}, 0
         petState.routeTarget, petState.routeAt = nil, nil
         petState.attackModel, petState.attackUid = nil, nil
         table.clear(petState.teleportedTarget)
+        table.clear(petState.assignedModel)
+        table.clear(petState.assignedUid)
+        table.clear(petState.joinedTarget)
         notes.tap = "off"
     end
-    if not enabled.vacuum and not enabled.farm and not enabled.autoDoQuest then restoreOrbCapture(); notes.vacuum = "off" end
+    if not enabled.vacuum and not enabled.farm and not enabled.fastFarmBeta and not enabled.autoDoQuest then restoreOrbCapture(); notes.vacuum = "off" end
 end
 
 updateToggles = function() end
@@ -3820,6 +4059,7 @@ cleanup = function()
     syncFly()
     syncGamepasses()
     syncGates()
+    CFG.SyncFastFarmBeta()
     for name in pairs(workers) do stopWorker(name) end
     heapObjects, heapCursor, treeScan, targetScan, stats.pending = nil, nil, nil, nil, nil
     for _, request in pairs(requests) do
