@@ -21,7 +21,7 @@ local player = Players.LocalPlayer
 assert(player, "[ZAPX] run this on the client")
 
 local REPO = "https://github.com/miniwroldpro124-cyber/pet99bynhmt"
-local COMMIT = "d684186"
+local COMMIT = "dfe12ff"
 local VERSION = "7.4"
 local PINNED = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/" .. COMMIT .. "/"
 local MIRROR_PINNED = "https://cdn.jsdelivr.net/gh/miniwroldpro124-cyber/pet99bynhmt@" .. COMMIT .. "/"
