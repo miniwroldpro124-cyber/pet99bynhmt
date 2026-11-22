@@ -210,6 +210,9 @@ local petState = {
     previous = setmetatable({}, {__mode = "k"}),
     records = setmetatable({}, {__mode = "k"}),
     teleportedTarget = setmetatable({}, {__mode = "k"}),
+    assignedModel = setmetatable({}, {__mode = "k"}),
+    assignedUid = setmetatable({}, {__mode = "k"}),
+    joinedTarget = setmetatable({}, {__mode = "k"}),
     lastAttackAt = -math.huge,
     attackModel = nil,
     attackUid = nil,
@@ -706,6 +709,12 @@ local function inspectObject(object)
     if type(rawget(object, "Owns")) == "function" and type(rawget(object, "Active")) == "function" then
         modules.gamepasses = object
     end
+    if type(rawget(object, "GetEquippedItem")) == "function"
+        and type(rawget(object, "GetChargePercentage")) == "function"
+        and type(rawget(object, "IsCharged")) == "function"
+        and type(rawget(object, "Activate")) == "function" then
+        modules.ultimates = object
+    end
     -- BreakableCmds is a frozen table of forwarded BreakableFrontend calls. Its
     -- zone index knows each breakable's dir (NoTapping, ManualDamage), which no
     -- attribute on the model carries, so it beats walking the workspace tree.
@@ -985,6 +994,9 @@ local function restorePetSpeed()
     end
     table.clear(petState.previous)
     table.clear(petState.teleportedTarget)
+    table.clear(petState.assignedModel)
+    table.clear(petState.assignedUid)
+    table.clear(petState.joinedTarget)
     petState.attackModel, petState.attackUid, petState.bulkTarget = nil, nil, nil
     petState.module, petState.original, petState.hook = nil, nil, nil
     notes.pet = "off"
@@ -993,15 +1005,17 @@ end
 function petState.isAttacking(record)
     if not enabled.petTeleAfterAttack then return true end
     local now = os.clock()
-    if not petState.attackModel or not petState.attackModel.Parent then return false end
     if now - (petState.lastAttackAt or -math.huge) > 0.9 then return false end
     if record then
+        local assigned = petState.assignedModel[record] or petState.attackModel
+        if not assigned or not assigned.Parent then return false end
         local cpet = rawget(record, "cpet")
         if type(cpet) == "table" and cpet.targetType ~= nil and cpet.targetType ~= "Breakable" then
             return false
         end
+        return true
     end
-    return true
+    return petState.attackModel ~= nil and petState.attackModel.Parent ~= nil
 end
 
 local function petTick()
@@ -1039,7 +1053,6 @@ local function petTick()
     end
     local count, activeCount = 0, 0
     local seen = {}
-    local attacking = petState.isAttacking(nil)
     local function apply(record)
         if seen[record] or record.destroyed
             or (record.owner ~= nil and record.owner ~= LocalPlayer) then return end
@@ -1048,9 +1061,16 @@ local function petTick()
             local prev = tonumber(record.speedMult)
             petState.previous[record] = (prev and prev < CFG.PetSpeedMult and prev) or 1
         end
-        local petAttacking = attacking and petState.isAttacking(record)
+        local petAttacking = petState.isAttacking(record)
         local desiredSpeed = petAttacking and CFG.PetSpeedMult or (petState.previous[record] or 1)
-        if petAttacking then activeCount += 1 else petState.teleportedTarget[record] = nil end
+        if petAttacking then
+            activeCount += 1
+        else
+            petState.teleportedTarget[record] = nil
+            petState.assignedModel[record] = nil
+            petState.assignedUid[record] = nil
+            petState.joinedTarget[record] = nil
+        end
         local ok = pcall(function() record.speedMult = desiredSpeed end)
         if not ok then return end
         local cpet = record.cpet
@@ -1072,19 +1092,18 @@ local function petTick()
     if count == 0 then
         notes.pet = "no pets equipped"
     elseif activeCount > 0 then
-        notes.pet = ("attacking | %d/%d pets routed"):format(activeCount, count)
+        notes.pet = ("1-pet-1-ore | %d/%d pets attacking"):format(activeCount, count)
     else
         notes.pet = ("idle | %d pets waiting for attack"):format(count)
     end
 end
 
--- Routes pets and teleports them to the target breakable ONLY after an attack
--- (Breakables_PlayerDealDamage) has landed on that breakable. Also formats
--- Breakables_JoinPetBulk as a table { [euid] = uid } matching PlayerPet.luau.
-function petState.route(targetModel, point, explicitUid)
-    if not alive or not targetModel or not targetModel.Parent then return 0 end
-    local uid = explicitUid or targetModel:GetAttribute("BreakableUID")
-    if uid == nil then return 0 end
+-- 1 Pet = 1 Breakable (strictly distributes pets so each pet locks onto its own
+-- distinct breakable without stacking all pets onto 1 ore, attacks that
+-- breakable first via Breakables_PlayerDealDamage, then teleports the pet and
+-- registers all pet->breakable pairs in Breakables_JoinPetBulk).
+function petState.routeSpread(candidates, point)
+    if not alive or type(candidates) ~= "table" or #candidates == 0 then return 0 end
     local mod = modules.pet
     local local_pets, seen = {}, {}
     local group = mod and type(mod.GetByPlayer) == "function" and mod.GetByPlayer(LocalPlayer) or nil
@@ -1109,54 +1128,137 @@ function petState.route(targetModel, point, explicitUid)
     end
     table.sort(ranked, function(a, b) return a.distance < b.distance end)
     local total = math.min(enabled.petAll and #ranked or math.max(1, math.ceil(#ranked / 2)), #ranked)
-    local targetPos = modelPosition(targetModel)
-    local routed = 0
-    local bulkJoin = {}
-    for index = 1, total do
-        local record = ranked[index].record
-        local ok = pcall(function() record:SetTarget(targetModel) end)
-        if not ok then
-            pcall(function() record.target = targetModel end)
-            pcall(function() record.Target = targetModel end)
-        end
-        if ok then routed += 1 end
-        local euid = rawget(record, "euid")
-        if euid ~= nil then
-            bulkJoin[euid] = uid
-        end
-        -- Snap the pet to the breakable ring ONCE when switching onto this
-        -- attacked target, never when idle and never repeatedly while dwelling.
-        if targetPos and petState.teleportedTarget[record] ~= targetModel then
-            petState.teleportedTarget[record] = targetModel
-            local angle = ((index - 1) / math.max(total, 1)) * math.pi * 2
-            local ringPos = targetPos + Vector3.new(math.cos(angle) * 4.2, 0, math.sin(angle) * 4.2)
-            local ringCF = CFrame.lookAt(ringPos, Vector3.new(targetPos.X, ringPos.Y, targetPos.Z))
-            pcall(function()
-                record.speedMult = CFG.PetSpeedMult
-                local cpet = rawget(record, "cpet")
-                if type(cpet) == "table" then
-                    if cpet.parallelIn then cpet.parallelIn.petSpeedMult = CFG.PetSpeedMult end
-                    cpet:Broadcast("petSpeedMult", CFG.PetSpeedMult)
-                    if cpet.physical and cpet.physical.Parent then
-                        cpet.physical:PivotTo(ringCF)
-                    end
-                    if type(cpet.parallelOut) == "table" then
-                        cpet.parallelOut.cf = ringCF
-                        cpet.parallelOut.arrived = true
-                        cpet.parallelOut.farming = true
-                    end
-                    if cpet.actor and type(cpet.actor.SendMessage) == "function" then
-                        cpet.actor:SendMessage("Reposition", cpet.uid, cpet.bucketId)
-                    end
-                end
-            end)
+    if total == 0 then return 0 end
+
+    local validByModel = {}
+    local ordered = {}
+    for _, model in ipairs(candidates) do
+        if model and model.Parent then
+            local uid = model:GetAttribute("BreakableUID")
+            if uid ~= nil and not validByModel[model] then
+                validByModel[model] = uid
+                ordered[#ordered + 1] = {model = model, uid = uid}
+            end
         end
     end
-    if enabled.petBulkJoin and petState.bulkTarget ~= targetModel and next(bulkJoin) ~= nil then
-        petState.bulkTarget = targetModel
+    if #ordered == 0 then return 0 end
+
+    -- Pass 1: preserve existing living 1-to-1 assignments so a pet stays on its
+    -- own breakable until that breakable is destroyed (no duplicate overlap).
+    local usedByModel = {}
+    for index = 1, total do
+        local record = ranked[index].record
+        local curModel = petState.assignedModel[record]
+        local curUid = curModel and validByModel[curModel] or nil
+        if curModel and curUid and not usedByModel[curModel] then
+            usedByModel[curModel] = record
+            petState.assignedUid[record] = curUid
+        else
+            petState.assignedModel[record] = nil
+            petState.assignedUid[record] = nil
+        end
+    end
+
+    -- Pass 2: assign every remaining pet to an unused breakable (1 pet = 1 ore).
+    local cursor = 1
+    for index = 1, total do
+        local record = ranked[index].record
+        if not petState.assignedModel[record] then
+            local pickedEntry = nil
+            for scan = 1, #ordered do
+                local idx = ((cursor + scan - 2) % #ordered) + 1
+                local entry = ordered[idx]
+                if not usedByModel[entry.model] then
+                    pickedEntry = entry
+                    cursor = (idx % #ordered) + 1
+                    break
+                end
+            end
+            if pickedEntry then
+                usedByModel[pickedEntry.model] = record
+                petState.assignedModel[record] = pickedEntry.model
+                petState.assignedUid[record] = pickedEntry.uid
+            else
+                -- More pets than breakables on the entire island: leave extra
+                -- pet unassigned or on its own without stacking onto occupied ores.
+                petState.assignedModel[record] = nil
+                petState.assignedUid[record] = nil
+            end
+        end
+    end
+
+    -- Pass 3: attack each assigned breakable first, then route & snap each pet
+    -- once to its own breakable and batch Breakables_JoinPetBulk.
+    local routed = 0
+    local bulkJoin = {}
+    local attackedThisTick = {}
+    for index = 1, total do
+        local record = ranked[index].record
+        local tModel = petState.assignedModel[record]
+        local tUid = petState.assignedUid[record]
+        if tModel and tUid and tModel.Parent then
+            if not attackedThisTick[tUid] then
+                attackedThisTick[tUid] = true
+                fire("Breakables_PlayerDealDamage", tUid)
+            end
+            petState.attackModel, petState.attackUid = tModel, tUid
+            petState.lastAttackAt = os.clock()
+            local ok = pcall(function() record:SetTarget(tModel) end)
+            if not ok then
+                pcall(function() record.target = tModel end)
+                pcall(function() record.Target = tModel end)
+            end
+            routed += 1
+            local euid = rawget(record, "euid")
+            if euid ~= nil and petState.joinedTarget[record] ~= tModel then
+                petState.joinedTarget[record] = tModel
+                bulkJoin[euid] = tUid
+            end
+            if petState.teleportedTarget[record] ~= tModel then
+                local targetPos = modelPosition(tModel)
+                if targetPos then
+                    petState.teleportedTarget[record] = tModel
+                    local angle = ((index - 1) / math.max(total, 1)) * math.pi * 2
+                    local ringPos = targetPos + Vector3.new(math.cos(angle) * 3.5, 0, math.sin(angle) * 3.5)
+                    local ringCF = CFrame.lookAt(ringPos, Vector3.new(targetPos.X, ringPos.Y, targetPos.Z))
+                    pcall(function()
+                        record.speedMult = CFG.PetSpeedMult
+                        local cpet = rawget(record, "cpet")
+                        if type(cpet) == "table" then
+                            if cpet.parallelIn then cpet.parallelIn.petSpeedMult = CFG.PetSpeedMult end
+                            cpet:Broadcast("petSpeedMult", CFG.PetSpeedMult)
+                            if cpet.physical and cpet.physical.Parent then
+                                cpet.physical:PivotTo(ringCF)
+                            end
+                            if type(cpet.parallelOut) == "table" then
+                                cpet.parallelOut.cf = ringCF
+                                cpet.parallelOut.arrived = true
+                                cpet.parallelOut.farming = true
+                            end
+                            if cpet.actor and type(cpet.actor.SendMessage) == "function" then
+                                cpet.actor:SendMessage("Reposition", cpet.uid, cpet.bucketId)
+                            end
+                        end
+                    end)
+                end
+            end
+        end
+    end
+    if enabled.petBulkJoin and next(bulkJoin) ~= nil then
         pcall(fire, "Breakables_JoinPetBulk", bulkJoin)
     end
     return routed
+end
+
+function petState.route(targetModel, point, explicitUid)
+    local list = {}
+    if targetModel and targetModel.Parent then list[#list + 1] = targetModel end
+    for _, cand in ipairs(auraTargets) do
+        if cand ~= targetModel and cand and cand.Parent then
+            list[#list + 1] = cand
+        end
+    end
+    return petState.routeSpread(list, point)
 end
 
 local function validTarget(model, point, zone)
@@ -1360,11 +1462,11 @@ local function tapTick()
             end
         end
     end
-    -- Route & teleport pets ONLY AFTER our attack (Breakables_PlayerDealDamage)
-    -- has fired on the target breakable.
+    -- Route & teleport pets (1 pet = 1 distinct breakable) ONLY AFTER our attack
+    -- (Breakables_PlayerDealDamage) has fired.
     if ok and primaryModel and primaryUid then
         petState.lastAttackAt = now
-        if primaryModel ~= petState.routeTarget or now - (petState.routeAt or 0) >= math.max(CFG.PetRouteRate, 0.35) then
+        if primaryModel ~= petState.routeTarget or now - (petState.routeAt or 0) >= 0.2 then
             petState.routeTarget, petState.routeAt = primaryModel, now
             petState.route(primaryModel, point, primaryUid)
         end
@@ -1831,21 +1933,27 @@ local function currentWorldNumber()
 end
 
 local function bestUnlockedWorld(save)
+    local here = currentWorldNumber()
     local best = maxOwned(save) or 1
     local reb = save and tonumber(save.Rebirths) or 0
-    if best >= (CFG.WorldFirst[4] or 240) or (best >= 239 and reb >= 8) then return 4 end
-    if best >= (CFG.WorldFirst[3] or 200) or (best >= 199 and reb >= 8) then return 3 end
-    if best >= (CFG.WorldFirst[2] or 100) or (best >= 99 and reb >= 4) then return 2 end
-    return 1
+    local calc = 1
+    if best >= (CFG.WorldFirst[4] or 240) or (best >= 239 and reb >= 8) then calc = 4
+    elseif best >= (CFG.WorldFirst[3] or 200) or (best >= 199 and reb >= 8) then calc = 3
+    elseif best >= (CFG.WorldFirst[2] or 100) or (best >= 99 and reb >= 4) then calc = 2 end
+    return math.max(here, calc)
 end
 
 local function teleportToWorldOrBestIsland(targetW)
     local save = getSave()
-    local desiredWorld = tonumber(targetW) or (save and bestUnlockedWorld(save)) or worldTarget
-    desiredWorld = math.clamp(math.floor(desiredWorld), 1, CFG.WorldCount)
-    worldTarget = desiredWorld
     local hereWorld = currentWorldNumber()
-    if hereWorld ~= desiredWorld then
+    local desiredWorld = tonumber(targetW) or (save and bestUnlockedWorld(save)) or math.max(worldTarget, hereWorld)
+    desiredWorld = math.clamp(math.floor(desiredWorld), 1, CFG.WorldCount)
+    -- Never auto-downgrade or auto-tele back to World 1 when already in a higher world.
+    if desiredWorld < hereWorld then
+        desiredWorld = hereWorld
+    end
+    worldTarget = desiredWorld
+    if hereWorld ~= desiredWorld and desiredWorld > 1 then
         local remoteName = "World" .. tostring(desiredWorld) .. "Teleport"
         local ok, message = invoke(remoteName)
         return ok == true, ok == true and ("switching to World " .. desiredWorld) or tostring(message or ("invoke " .. remoteName .. " failed"))
@@ -1863,11 +1971,14 @@ local function worldTeleTick()
     if now < nextAt.worldTele then return end
     local save = getSave()
     if not save then notes.world = "waiting for profile"; return end
-    if enabled.worldAdvance then
-        worldTarget = bestUnlockedWorld(save)
-    end
     local hereWorld = currentWorldNumber()
-    if hereWorld ~= worldTarget then
+    if worldTarget < hereWorld then
+        worldTarget = hereWorld
+    end
+    if enabled.worldAdvance then
+        worldTarget = math.max(hereWorld, bestUnlockedWorld(save))
+    end
+    if hereWorld ~= worldTarget and worldTarget > hereWorld then
         nextAt.worldTele = now + CFG.WorldBackoff
         local remoteName = "World" .. tostring(worldTarget) .. "Teleport"
         local ok, message = invoke(remoteName)
@@ -1875,19 +1986,19 @@ local function worldTeleTick()
         notes.world = ok == true and ("teleporting -> World " .. worldTarget) or tostring(message or "world teleport rejected")
         return
     end
-    local number = bestInWorld(save, worldTarget)
-    if not number then notes.world = "world " .. worldTarget .. " zone map unavailable"; return end
+    local number = bestInWorld(save, hereWorld)
+    if not number then notes.world = "world " .. hereWorld .. " zone map unavailable"; return end
     local id = zones[number].id
     local centre = zoneCenter(id)
     local pos = position()
     local dist2D = (pos and centre) and (Vector3.new(pos.X, 0, pos.Z) - Vector3.new(centre.X, 0, centre.Z)).Magnitude or math.huge
     if currentZone() == id and dist2D <= 18 then
-        notes.world = ("in world %d middle (%s)"):format(worldTarget, id)
+        notes.world = ("in world %d middle (%s)"):format(hereWorld, id)
         return
     end
     nextAt.worldTele = now + CFG.WorldInterval
     local ok, message = teleportToIslandMiddle(id)
-    notes.world = ok and ("world %d -> middle of %s"):format(worldTarget, id) or tostring(message)
+    notes.world = ok and ("world %d -> middle of %s"):format(hereWorld, id) or tostring(message)
 end
 
 CFG.AdvanceTick = function()
@@ -1895,21 +2006,18 @@ CFG.AdvanceTick = function()
     if now < (CFG.AdvanceNext or 0) then return end
     local save = getSave()
     if not save then notes.advance = "waiting for profile"; return end
+    local hereWorld = currentWorldNumber()
     local limit = math.min(CFG.WorldAdvanceLimit, CFG.WorldCount)
-    local bestW = math.min(bestUnlockedWorld(save), limit)
-    if bestW == worldTarget and currentWorldNumber() == bestW then
-        notes.advance = ("at best world %d (owned zone %d)"):format(bestW, maxOwned(save) or 1)
+    local bestW = math.max(hereWorld, math.min(bestUnlockedWorld(save), limit))
+    if bestW <= hereWorld then
+        worldTarget = hereWorld
+        notes.advance = ("at world %d (owned zone %d)"):format(hereWorld, maxOwned(save) or 1)
         return
     end
     CFG.AdvanceNext = now + CFG.WorldAdvanceInterval
     worldTarget = bestW
-    if currentWorldNumber() ~= bestW then
-        local ok, msg = teleportToWorldOrBestIsland(bestW)
-        notes.advance = ok and ("hopping -> world " .. bestW) or tostring(msg)
-    else
-        nextAt.worldTele = 0
-        notes.advance = "advanced -> world " .. bestW
-    end
+    local ok, msg = teleportToWorldOrBestIsland(bestW)
+    notes.advance = ok and ("hopping -> world " .. bestW) or tostring(msg)
 end
 
 local EFFECT_CLASSES = {
@@ -2482,35 +2590,129 @@ local function freeGiftTick()
     notes.freeGift = "all free gifts redeemed"
 end
 
+local function getUltimateCmds()
+    if modules.ultimates then return modules.ultimates end
+    local ok, mod = pcall(function()
+        local lib = RS:FindFirstChild("Library")
+        local cli = lib and lib:FindFirstChild("Client")
+        local u = cli and cli:FindFirstChild("UltimateCmds")
+        return u and require(u) or nil
+    end)
+    if ok and type(mod) == "table" then
+        modules.ultimates = mod
+        return mod
+    end
+    return nil
+end
+
+local function isUltimateHudReady()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    local mainGui = pg and pg:FindFirstChild("Main")
+    if not mainGui then return false end
+    local ready = mainGui:FindFirstChild("UltimateReady", true)
+    return ready ~= nil and ready:IsA("GuiObject") and ready.Visible == true
+end
+
 local function ultimateTick()
     local now = os.clock()
     if now < nextAt.ultimate then return end
     local save = getSave()
     if not save then notes.ultimate = "waiting for profile"; return end
     if (tonumber(save.Rebirths) or 0) < 4 then notes.ultimate = "unlocks at 4 rebirths"; return end
-    local id = save.EquippedUltimate
-    if type(id) ~= "string" then
-        local best, bestXP = nil, -1
-        for candidate, xp in pairs(type(save.Ultimates) == "table" and save.Ultimates or {}) do
-            local value = tonumber(xp) or 0
-            if type(candidate) == "string" and value > bestXP then best, bestXP = candidate, value end
+
+    local ultCmds = getUltimateCmds()
+    local ultId = nil
+
+    if ultCmds and type(ultCmds.GetEquippedItem) == "function" then
+        local okEq, item = pcall(ultCmds.GetEquippedItem)
+        if okEq and type(item) == "table" and type(item.GetId) == "function" then
+            local okId, resolved = pcall(item.GetId, item)
+            if okId and type(resolved) == "string" then
+                ultId = resolved
+            end
+        end
+    end
+
+    if not ultId then
+        local rawEq = save.EquippedUltimate
+        local ultBucket = inventory(save, "Ultimate")
+        if type(rawEq) == "string" and #rawEq > 0 then
+            if ultBucket and type(ultBucket[rawEq]) == "table" and type(ultBucket[rawEq].id) == "string" then
+                ultId = ultBucket[rawEq].id
+            else
+                ultId = rawEq
+            end
+        end
+    end
+
+    if type(ultId) ~= "string" or #ultId == 0 then
+        local best = nil
+        local ultStacks = stackList(inventory(save, "Ultimate"))
+        if #ultStacks > 0 then
+            best = ultStacks[1].id
+        else
+            local bestXP = -1
+            for candidate, xp in pairs(type(save.Ultimates) == "table" and save.Ultimates or {}) do
+                local value = tonumber(xp) or 0
+                if type(candidate) == "string" and value > bestXP then best, bestXP = candidate, value end
+            end
         end
         if not best then notes.ultimate = "no ultimate owned"; return end
-        nextAt.ultimate = now + CFG.UltimateInterval
+        nextAt.ultimate = now + 1.5
         local ok, message = invoke("Ultimates: Equip", best)
         if not alive or not enabled.autoUltimate then return end
         notes.ultimate = ok == true and ("equipped " .. best) or tostring(message or "rejected")
         if ok == true then nextAt.save = 0 end
         return
     end
-    local cooldowns = type(save.UltimateCooldowns) == "table" and save.UltimateCooldowns or {}
-    local charge = tonumber(cooldowns[id]) or 0
-    if charge < 1 then notes.ultimate = ("charging %s (%d%%)"):format(id, math.floor(charge * 100)); return end
-    nextAt.ultimate = now + CFG.UltimateInterval
-    local ok, message = invoke("Ultimates: Activate", id)
+
+    -- Check charge via UltimateCmds.GetChargePercentage / IsCharged (since
+    -- save.UltimateCooldowns[id] stores raw points 0..Cooldown(level), NOT 0..1).
+    local pct = 0
+    local charged = false
+    local activeNow = false
+    if ultCmds then
+        if type(ultCmds.IsActive) == "function" then
+            local okAct, act = pcall(ultCmds.IsActive)
+            if okAct and act == true then activeNow = true end
+        end
+        if type(ultCmds.GetChargePercentage) == "function" then
+            local okPct, val = pcall(ultCmds.GetChargePercentage, ultId)
+            if okPct and type(val) == "number" then pct = val end
+        end
+        if type(ultCmds.IsCharged) == "function" then
+            local okChg, val = pcall(ultCmds.IsCharged, ultId)
+            if okChg and val == true then charged = true end
+        end
+    end
+    if pct >= 1 or isUltimateHudReady() then
+        charged = true
+        if pct < 1 then pct = 1 end
+    end
+    if activeNow then
+        notes.ultimate = "active: " .. ultId
+        return
+    end
+    if not charged then
+        notes.ultimate = ("charging %s (%d%%)"):format(ultId, math.floor(pct * 100))
+        return
+    end
+
+    nextAt.ultimate = now + 1.0
+    local ok, message = false, nil
+    if ultCmds and type(ultCmds.Activate) == "function" then
+        local okCall, res = pcall(ultCmds.Activate, ultId)
+        if okCall and res == true then
+            ok = true
+        end
+    end
+    if not ok then
+        local invOk, invMsg = invoke("Ultimates: Activate", ultId)
+        ok, message = invOk == true, invMsg
+    end
     if not alive or not enabled.autoUltimate then return end
-    notes.ultimate = ok == true and ("activated " .. id) or tostring(message or "rejected")
-    if ok == true then nextAt.save = 0 end
+    notes.ultimate = ok and ("activated " .. ultId) or tostring(message or "rejected")
+    if ok then nextAt.save = 0 end
 end
 
 local function daycareRemaining(save, record, serverNow)
@@ -3611,6 +3813,7 @@ controller.PickList = function()
     end
     return out
 end
+worldTarget = currentWorldNumber()
 publish()
 if not alive then return controller end
 task.defer(scanLiveDirectory)
@@ -3619,6 +3822,9 @@ connect(LocalPlayer.CharacterAdded, function()
     petState.routeTarget, petState.routeAt = nil, nil
     petState.attackModel, petState.attackUid = nil, nil
     table.clear(petState.teleportedTarget)
+    table.clear(petState.assignedModel)
+    table.clear(petState.assignedUid)
+    table.clear(petState.joinedTarget)
 end)
 ensureWorker("status", true, 1, updateStatus)
 stage("Ready; headless; no startup scans")

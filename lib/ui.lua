@@ -105,12 +105,26 @@ return function(lib, engine)
     end
 
     function ui.dropdown(tab, spec)
-        return tab:CreateDropdown({
+        local priming = true
+        local dropdown = tab:CreateDropdown({
             Name = spec.name,
             Options = spec.options,
             CurrentOption = spec.current or spec.options[1],
-            Callback = spec.callback,
+            Callback = function(option)
+                if priming then
+                    priming = false
+                    return
+                end
+                if spec.callback then
+                    local ran, err = pcall(spec.callback, option)
+                    if not ran then
+                        ui.notify("UI", tostring(err))
+                    end
+                end
+            end,
         })
+        priming = false
+        return dropdown
     end
 
     return ui

@@ -48,33 +48,6 @@ return function(ctx)
         note = "Hops when the server drops below the engine's player threshold.",
     })
 
-    ui.section(tab, "World")
-    local worldMax = 4
-    local okWorld, _, maxWorld = pcall(engine.GetWorld)
-    if okWorld and type(maxWorld) == "number" then
-        worldMax = maxWorld
-    end
-    local worldOptions = {}
-    for index = 1, worldMax do
-        worldOptions[#worldOptions + 1] = "World " .. index
-    end
-    ui.dropdown(tab, {
-        name = "Teleport World",
-        options = worldOptions,
-        callback = function(option)
-            local target = tonumber(tostring(option):match("(%d+)"))
-            if not target then return end
-            local ok, err = pcall(engine.SetWorld, target)
-            if not ok then
-                ui.notify("Engine", tostring(err))
-                return
-            end
-            pcall(engine.SetEnabled, "worldTele", true)
-            ui.notify("World", "teleporting to world " .. target)
-            refresh()
-        end,
-    })
-
     ui.section(tab, "Kill switches")
     ui.button(tab, "All Features Off", function()
         local ok, err = pcall(engine.AllOff)

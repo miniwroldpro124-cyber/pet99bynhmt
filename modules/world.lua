@@ -34,25 +34,8 @@ return function(ctx)
         end
     end)
     ui.toggle(tab, {
-        name = "Auto Teleport Best World", key = "worldTele", default = false,
-        note = "Switches worlds via World1..4Teleport and snaps to the middle of the highest unlocked island.",
-    })
-    ui.toggle(tab, {
         name = "Auto Advance To Highest Unlocked World", key = "worldAdvance", default = false,
-        note = "Automatically advances target world from World 1 up to World 4 as zones unlock.",
-    })
-
-    local worldOptions = { "World 1", "World 2", "World 3", "World 4" }
-    ui.dropdown(tab, {
-        name = "Select Target World",
-        options = worldOptions,
-        current = worldOptions[1],
-        callback = function(option)
-            local target = tonumber(tostring(option):match("(%d+)"))
-            if not target then return end
-            pcall(engine.SetWorld, target)
-            ui.notify("World", "Target world set to World " .. target)
-        end,
+        note = "Automatically advances forward to the highest unlocked world (never teleports back to World 1).",
     })
 
     ui.section(tab, "All Islands Teleport (279 Islands)")
