@@ -16,8 +16,16 @@ local function hostEnv()
     return nil
 end
 local env = hostEnv() or _G
-local function hostPut(target, key, value) target[key] = value end
-local function hostGet(target, key) return target[key] end
+-- Some executors hand back a readonly _G. A failed write must not take the
+-- engine down: the chunk's return value is the real delivery path.
+local function hostPut(target, key, value)
+    pcall(function() target[key] = value end)
+end
+local function hostGet(target, key)
+    local ok, value = pcall(function() return target[key] end)
+    if ok then return value end
+    return nil
+end
 local function publish()
     hostPut(env, "__PS99CLEAN", controller)
     hostPut(env, "__PS99CLEAN_CLEANUP", cleanup)
