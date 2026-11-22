@@ -1,6 +1,6 @@
 -- lib/ui.lua
 -- Element factories bound to one library + engine pair. Every module talks to
--- ZapLib through this table, so a module never repeats the SetEnabled plumbing
+-- Steph HUB's UI wrapper through this table, so a module never repeats the SetEnabled plumbing
 -- and every toggle behaves the same way when the engine refuses a call.
 --
 -- spec.key is optional. With a key the element drives the engine; without one
@@ -14,7 +14,7 @@ return function(lib, engine)
             Content = tostring(content),
             Duration = duration or 4,
         })
-        print(("[ZAPX] %s: %s"):format(tostring(title), tostring(content)))
+        print(("[Steph HUB] %s: %s"):format(tostring(title), tostring(content)))
     end
 
     function ui.section(tab, name)

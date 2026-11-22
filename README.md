@@ -1,80 +1,49 @@
-# ZAPX — PS99 loader
+# Steph HUB — PS99 (v8.0)
 
-One file boots the menu (ZapHub / ZapLib 2.0.0), one file is the farm engine
-(`ps99_engine_v3`, headless — no second window), one file per tab.
+Modular Pet Simulator 99 script: one loader (`main.lua`), one headless engine (`ps99_engine_v3.lua`), the Steph HUB UI (`zaphub.lua`), and one file per tab under `modules/*.lua`.
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/main.lua?v=7.5"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/main.lua?v=8.0"))()
 ```
 
-Always run the `main` URL, not a commit-pinned one. A pinned URL freezes whatever
-copy that commit held — including a broken one — and no later push can reach it.
-`main` plus the version query is what serves the current loader.
-
-`RightControl` window · `X` unload.
+`RightControl` toggles the Steph HUB window · `X` unloads everything.
 
 ## Load order
 
-`main.lua` → loading screen → `ps99_engine_v3.lua` → `zaphub.lua` (ZapLib) →
-`lib/ui.lua` → `manifest.lua` → one fetch per `modules/*.lua` → Status tab.
+`main.lua` → loading screen → `ps99_engine_v3.lua` → `zaphub.lua` (Steph HUB UI) → `lib/ui.lua` → `manifest.lua` → `modules/*.lua` → Status tab.
 
-Every fetch carries `?v=<VERSION>` so the executor URL cache never serves a stale
-file. A tab that fails to download or compile is listed on the Status tab and
-the rest still boot.
-
-## Files
+## Repository layout
 
 | file | role |
 |---|---|
-| `main.lua` | loader — progress screen, engine, ZapLib, module loop, Status tab, unload |
-| `ps99_engine_v3.lua` | farm engine, headless: controller on `_G.__PS99CLEAN`, no ScreenGui, no Insert bind |
-| `zaphub.lua` | ZapLib 2.0.0, publishes `_G.ZapLib.Window` |
-| `lib/ui.lua` | element factories bound to `lib` + `engine` |
-| `manifest.lua` | ordered tab list; add a row, nothing else changes |
-| `modules/*.lua` | one builder per tab, receives `ctx` |
-| `features.lua` | standalone ZapLib-only feature layer, kept for reference |
-| `ps99_engine_v2.lua` | previous engine, builds its own GUI, kept for reference |
-| `zapx.lua`, `zap_deploy.lua`, `zaphub_ps99.lua` | old single-file loaders, kept for reference |
+| `main.lua` | loader — progress bar, engine bootstrap, Steph HUB UI, module loader, Status tab, unload (`X`) |
+| `ps99_engine_v3.lua` | headless farm, teleport (World 1–4 / Zones 1–279), enchant mastery, flag/ultimate/TNT, perf & Pumpkin Tycoon engine on `_G.__PS99CLEAN` |
+| `zaphub.lua` | Steph HUB UI runtime (`_G.ZapLib`) |
+| `lib/ui.lua` | UI element helpers bound to `lib` + `engine` |
+| `manifest.lua` | ordered tab manifest (`Pumpkin Tycoon` → `Server`) |
+| `modules/event.lua` | Current Event tab (**Pumpkin Tycoon** Part 1 & Part 2, Movement Mode, Optimizer, Turkey, Wild Pets, Nets, Cocoa, Boosts, Gifts) |
+| `modules/farm.lua` | Fast Auto Farm, Fast Farm v2_Beta, Auto Tap (Real Game Speed), Flag selector + active check, Ultimate, Sprinkler, TNT / TNT Crate, Auto Equip Enchants (Mastery-aware) |
+| `modules/pets.lua` | Pet Speed, Re-route rate, Auto Hatch, Hide Egg FX, Route All Pets, Bulk Join |
+| `modules/world.lua` | World 1–4 & Zone 1–279 teleport (Best Zone, Snap To Centre, Buy Next Zone, Spawn / Void 200 / Fantasy 240 quick teleports) |
+| `modules/player.lua` | Walk Speed, Jump Power, Infinite Jump, Keep Movement |
+| `modules/progress.lua` | Quests, Ranks, Rebirth, Player Upgrades, Pet Equip Slots, Egg Bundle Slots, Forever Free Pack, Auto Equip Enchants |
+| `modules/consume.lua` | Keys, Gift Bags, Fruits, Potions, Free Gifts, Forever Free Pack, Dice |
+| `modules/picks.lua` | Per-item filter selections for keys / bags / fruits / potions / gifts / dice / cards |
+| `modules/cheat.lua` | Chest / Balloon / Lucky Block / Coin Jar / Comet / Meteoric / Pinata / Digsite / Fishing / Claw targets |
+| `modules/machines.lua` | Daycare, Secret Rooms, Treehouse, Fuse, Cards, Shiny Relics, Mailbox |
+| `modules/render.lua` | White Screen (3D render off), Reduce CPU & RAM mode, FPS Cap, Breakable/Pet FX toggles, Anti-AFK |
+| `modules/server.lua` | Auto Server Hop, World 1–4 teleport, All Features Off, Unload, Copy Source URL |
 
 ## Engine controller (`_G.__PS99CLEAN`)
 
 | call | use |
 |---|---|
-| `SetEnabled(key, bool)` | feature toggle, returns `ok, err` |
-| `SetConfig(key, number)` | numeric knob, rejects anything not already in `CFG` |
-| `AllOff()` | every feature off |
-| `SetWorld(n)` | teleport target world, 1–4 |
-| `SetPick(category, id, bool)` | narrow a consume worker to one id |
-| `GetStatus()` | `running, enabled, world, profile, notes, info` |
-| `GetPicks()` / `PickList()` | current ticks / available ids per category |
-| `ClaimRankRewards()`, `Stop()` | one-shot claim, full teardown |
-
-## Tabs
-
-| tab | controls |
-|---|---|
-| Farm | Auto Farm, Tap, Click Aura, Orb Vacuum, Hit Rate, Burst, Reach, Rescan, Chests First, Jitter, Aura Visual |
-| Pets | Pet Speed, Re-route rate, Auto Hatch, Hide Egg FX, Route All Pets, Pet Bulk Join |
-| World | Teleport Best Zone, Snap To Centre, Buy Next Zone, Teleport Retry |
-| Player | Walk Speed, Jump Power, Infinite Jump, Keep Movement, Reset, Refresh Status |
-| Progress | Quests, Ranks, Rebirth, Pet Slots |
-| Consume | Keys, Gift Bags, Fruits, Potions, Free Gifts, Ultimates, Dice |
-| Picks | per-id narrowing for keys / bags / fruits / potions / free gifts / dice / cards |
-| Machines | Daycare, Flags, Secret Rooms, Treehouse, Fuse, Cards, Relics, Mail |
-| Render | Breakable FX, Pet FX, Anti AFK |
-| Server | Auto Hop, Teleport World, All Features Off, Unload, Copy Source |
-| Status | world / profile / zone / rank, active count, failed tabs, build, source |
-
-## Element behaviour
-
-- Toggle without `key` is local: only `onChange` runs.
-- Slider primes its `key` with the build value and never fires `onChange` on
-  build, so nothing moves on load.
-- Dropdown callbacks fire once on build in ZapLib; `modules/picks.lua` arms on
-  its toggle before writing a pick.
-
-## Rebuild
-
-`build_zaphub.py` rebuilds `zaphub.lua` from `zaphub_deobf_raw.lua` and refuses
-to write on a token mismatch or compile failure. `luau-compile --binary` is the
-gate for every other file.
+| `SetEnabled(key, bool)` | toggle any feature; returns `ok, err` |
+| `SetConfig(key, value)` | set numeric or string option (e.g. `SelectedFlag`, `EventMoveMode`) |
+| `AllOff()` | disable every feature |
+| `SetWorld(n)` | switch/teleport World `1`–`4` |
+| `EnterPumpkinTycoon()` | enter Pumpkin Tycoon event |
+| `SetEventOpt(key, val)` / `GetEventOpts()` | configure selected Pumpkin Tycoon merchant items, boosts, and upgrades |
+| `SetPick(category, id, bool)` | filter specific consumable IDs |
+| `GetStatus()` | returns `running, enabled, world, profile, notes, info` |
+| `Stop()` | clean teardown (restores rendering, FPS cap, White Screen, clears loops) |

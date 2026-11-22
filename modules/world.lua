@@ -1,5 +1,5 @@
 -- modules/world.lua
--- Compact Direct CFrame Island Teleport (middle, no cannon tele), Best World, and All 279 Islands.
+-- Direct CFrame Island Teleport (Zones 1-279 incl. World 3 200+ & World 4 240+), Best World, and All Islands.
 return function(ctx)
     local tab = ctx.win:CreateTab("World", "rbxassetid://16259403210")
     local ui = ctx.ui
@@ -11,10 +11,18 @@ return function(ctx)
     ui.toggle(tab, { name = "Auto Buy Next Island", key = "zoneBuy", default = false })
     ui.slider(tab, { name = "Tele Check Interval", key = "TeleInterval", range = { 0.2, 5 }, increment = 0.2, suffix = "s", value = 0.4 })
 
-    ui.section(tab, "Best World & All Islands")
+    ui.section(tab, "World Teleports (1-4 / Zones 200+)")
     ui.button(tab, "Teleport To Best World", function()
         local ok, res, msg = pcall(engine.TeleportBestWorld)
         ui.notify("Best World", tostring(ok and (msg or res) or res))
+    end)
+    ui.button(tab, "Teleport World 3 (Void Spawn 200)", function()
+        local ok, res, msg = pcall(engine.TeleportIsland, "Void Spawn")
+        ui.notify("World 3", tostring(ok and (msg or res) or res))
+    end)
+    ui.button(tab, "Teleport World 4 (Fantasy Spawn 240)", function()
+        local ok, res, msg = pcall(engine.TeleportIsland, "Fantasy Spawn")
+        ui.notify("World 4", tostring(ok and (msg or res) or res))
     end)
     ui.toggle(tab, { name = "Auto Advance Highest World", key = "worldAdvance", default = false })
 

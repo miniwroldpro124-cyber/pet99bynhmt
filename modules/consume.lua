@@ -1,5 +1,5 @@
 -- modules/consume.lua
--- Compact Potions (select + highest tier first) and Auto Consumables (Sprinkler, Keys, Bags, Fruits, Gifts, Ultimates, Dice).
+-- Potions (select + highest tier first) and Auto Consumables (Keys, Bags, Fruits, Gifts, Dice, Forever Free Pack).
 return function(ctx)
     local tab = ctx.win:CreateTab("Consume", "rbxassetid://16089599792")
     local ui = ctx.ui
@@ -53,11 +53,10 @@ return function(ctx)
     end)
 
     ui.section(tab, "Auto Use")
-    ui.toggle(tab, { name = "Auto Use Sprinkler", key = "autoSprinkler", default = false })
-    ui.toggle(tab, { name = "Auto Dice", key = "autoDice", default = false })
+    ui.toggle(tab, { name = "Auto Claim Forever Free Pack", key = "autoForeverPack", default = false })
     ui.toggle(tab, { name = "Auto Free Gifts", key = "autoFreeGifts", default = false })
+    ui.toggle(tab, { name = "Auto Dice", key = "autoDice", default = false })
     ui.toggle(tab, { name = "Auto Fruits", key = "autoFruits", default = false })
     ui.toggle(tab, { name = "Auto Gift Bags & Lootboxes", key = "autoGiftBags", default = false })
     ui.toggle(tab, { name = "Auto Keys (Combine & Unlock)", key = "autoKeys", default = false })
-    ui.toggle(tab, { name = "Auto Ultimates", key = "autoUltimate", default = false })
 end

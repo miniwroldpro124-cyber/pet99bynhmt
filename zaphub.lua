@@ -1,6 +1,6 @@
 --[[
-    ZapHub / ZapLib 2.0.0
-    by zap_xyz and 1dnt
+    Steph HUB UI 8.0
+    Steph HUB PS99 Edition
 
     Recovered from the Luarmor V4 loader chain:
       stage 1  api.luarmor.net/files/v4/loaders/a20cb97f94d0d6aafcb766dae08a47c4.lua
@@ -26,8 +26,8 @@ game:GetService("TweenService")local e=game:GetService("StarterGui")local f=game
 game:GetService("Lighting")local i=a["LocalPlayer"];
 local j=not(c["TouchEnabled"]and not c["MouseEnabled"])local k={["IsFolder"]=isfolder,["MakeFolder"]=makefolder,
 ["IsFile"]=isfile,["WriteFile"]=writefile,["ReadFile"]=readfile,["GetHui"]=(gethui or get_hidden_gui),["SetClipboard"]=
-(setclipboard or toclipboard),["DeleteFile"]=delfile}local l={["Version"]="2.0.0",["FolderName"]="ZapLib",["FileName"]=
-"Settings.zaplib",["ReservedKey"]="__ZapLibSettings",["DefaultIcon"]="rbxassetid://16259403210",["NotificationIcon"]=
+(setclipboard or toclipboard),["DeleteFile"]=delfile}local l={["Version"]="2.0.0",["FolderName"]="StephHUB",["FileName"]=
+"Settings.steph",["ReservedKey"]="__StephHUBSettings",["DefaultIcon"]="rbxassetid://16259403210",["NotificationIcon"]=
 "rbxassetid://15642579187",["LogoIcon"]="rbxassetid://120561115194230",["StatIcon"]="rbxassetid://82329173638641",
 ["ClickIcon"]="rbxassetid://16089599792",["ChevronIcon"]="rbxassetid://16093555964",["LockIcon"]="rbxassetid://126141499544212",
 ["MinimizeIcon"]="rbxassetid://71627683074088",["CloseIcon"]="rbxassetid://91413233063028",["SettingsIcon"]="rbxassetid://87867412432006",
@@ -291,10 +291,10 @@ local q={["Name"]="Dark",["Colors"]=n["Dark"]}local r={"English","Bahasa Indones
 ["Türkçe"]="Görevler",["Русский"]="Задания",["Українська"]="Завдання",["ไทย"]="ภารกิจ"},["Cancel"]={["Bahasa Indonesia"]=
 "Batal",["Deutsch"]="Abbrechen",["Español"]="Cancelar",["Filipino"]="Kanselahin",["Français"]="Annuler",["Polski"]=
 "Anuluj",["Português"]="Cancelar",["Română"]="Anulează",["Tiếng Việt"]="Hủy",["Türkçe"]="İptal",["Русский"]="Отмена",
-["Українська"]="Скасувати",["ไทย"]="ยกเลิก"},["Close ZapHub?"]={["Bahasa Indonesia"]="Tutup ZapHub?",["Deutsch"]=
-"ZapHub schließen?",["Español"]="¿Cerrar ZapHub?",["Filipino"]="Isara ang ZapHub?",["Français"]="Fermer ZapHub ?",
-["Polski"]="Zamknąć ZapHub?",["Português"]="Fechar o ZapHub?",["Română"]="Închizi ZapHub?",["Tiếng Việt"]="Đóng ZapHub?",
-["Türkçe"]="ZapHub kapatılsın mı?",["Русский"]="Закрыть ZapHub?",["Українська"]="Закрити ZapHub?",["ไทย"]="ปิด ZapHub ไหม?"},
+["Українська"]="Скасувати",["ไทย"]="ยกเลิก"},["Close Steph HUB?"]={["Bahasa Indonesia"]="Tutup Steph HUB?",["Deutsch"]=
+"Steph HUB schließen?",["Español"]="¿Cerrar Steph HUB?",["Filipino"]="Isara ang Steph HUB?",["Français"]="Fermer Steph HUB ?",
+["Polski"]="Zamknąć Steph HUB?",["Português"]="Fechar o Steph HUB?",["Română"]="Închizi Steph HUB?",["Tiếng Việt"]="Đóng Steph HUB?",
+["Türkçe"]="Steph HUB kapatılsın mı?",["Русский"]="Закрыть Steph HUB?",["Українська"]="Закрити Steph HUB?",["ไทย"]="ปิด Steph HUB ไหม?"},
 ["All running functions and loops will be stopped immediately. To reopen it, re-execute your script."]={["Bahasa Indonesia"]=
 "Semua fungsi dan loop yang berjalan akan langsung dihentikan. Untuk membukanya lagi, jalankan ulang skrip kamu.",
 ["Deutsch"]="Alle laufenden Funktionen und Schleifen werden sofort beendet. Um es erneut zu öffnen, führe dein Skript noch einmal aus.",
@@ -308,24 +308,24 @@ local q={["Name"]="Dark",["Colors"]=n["Dark"]}local r={"English","Bahasa Indones
 ["Türkçe"]="Çalışan tüm fonksiyonlar ve döngüler hemen durdurulacak. Yeniden açmak için scriptini tekrar çalıştır.",
 ["Русский"]="Все запущенные функции и циклы будут немедленно остановлены. Чтобы открыть снова, перезапустите скрипт.",
 ["Українська"]="Усі запущені функції та цикли буде негайно зупинено. Щоб відкрити знову, перезапустіть скрипт.",
-["ไทย"]="ฟังก์ชันและลูปที่กำลังทำงานทั้งหมดจะหยุดทันที หากต้องการเปิดอีกครั้ง ให้รันสคริปต์ใหม่"},["Closing ZapHub"]=
-{["Bahasa Indonesia"]="Menutup ZapHub",["Deutsch"]="ZapHub wird geschlossen",["Español"]="Cerrando ZapHub",["Filipino"]=
-"Isinasara ang ZapHub",["Français"]="Fermeture de ZapHub",["Polski"]="Zamykanie ZapHub",["Português"]="Fechando o ZapHub",
-["Română"]="Se închide ZapHub",["Tiếng Việt"]="Đang đóng ZapHub",["Türkçe"]="ZapHub kapatılıyor",["Русский"]=
-"Закрытие ZapHub",["Українська"]="Закриття ZapHub",["ไทย"]="กำลังปิด ZapHub"},["ZapHub is closing. All running functions and loops will be stopped immediately. To reopen it, re-execute your script."]=
-{["Bahasa Indonesia"]="ZapHub sedang ditutup. Semua fungsi dan loop yang berjalan akan langsung dihentikan. Untuk membukanya lagi, jalankan ulang skrip kamu.",
-["Deutsch"]="ZapHub wird geschlossen. Alle laufenden Funktionen und Schleifen werden sofort beendet. Um es erneut zu öffnen, führe dein Skript noch einmal aus.",
-["Español"]="ZapHub se está cerrando. Todas las funciones y bucles en ejecución se detendrán de inmediato. Para volver a abrirlo, ejecuta tu script de nuevo.",
-["Filipino"]="Isinasara na ang ZapHub. Agad na hihinto ang lahat ng tumatakbong function at loop. Para buksan ulit, i-execute muli ang iyong script.",
-["Français"]="ZapHub se ferme. Toutes les fonctions et boucles en cours seront arrêtées immédiatement. Pour le rouvrir, relancez votre script.",
-["Polski"]="ZapHub się zamyka. Wszystkie działające funkcje i pętle zostaną natychmiast zatrzymane. Aby otworzyć ponownie, uruchom skrypt jeszcze raz.",
-["Português"]="O ZapHub está fechando. Todas as funções e loops em execução serão interrompidos imediatamente. Para reabrir, execute seu script novamente.",
-["Română"]="ZapHub se închide. Toate funcțiile și buclele active vor fi oprite imediat. Pentru a-l redeschide, rulează din nou scriptul.",
-["Tiếng Việt"]="ZapHub đang đóng. Tất cả chức năng và vòng lặp đang chạy sẽ dừng ngay lập tức. Để mở lại, hãy chạy lại script của bạn.",
-["Türkçe"]="ZapHub kapanıyor. Çalışan tüm fonksiyonlar ve döngüler hemen durdurulacak. Yeniden açmak için scriptini tekrar çalıştır.",
-["Русский"]="ZapHub закрывается. Все запущенные функции и циклы будут немедленно остановлены. Чтобы открыть снова, перезапустите скрипт.",
-["Українська"]="ZapHub закривається. Усі запущені функції та цикли буде негайно зупинено. Щоб відкрити знову, перезапустіть скрипт.",
-["ไทย"]="ZapHub กำลังปิด ฟังก์ชันและลูปที่กำลังทำงานทั้งหมดจะหยุดทันที หากต้องการเปิดอีกครั้ง ให้รันสคริปต์ใหม่"},
+["ไทย"]="ฟังก์ชันและลูปที่กำลังทำงานทั้งหมดจะหยุดทันที หากต้องการเปิดอีกครั้ง ให้รันสคริปต์ใหม่"},["Closing Steph HUB"]=
+{["Bahasa Indonesia"]="Menutup Steph HUB",["Deutsch"]="Steph HUB wird geschlossen",["Español"]="Cerrando Steph HUB",["Filipino"]=
+"Isinasara ang Steph HUB",["Français"]="Fermeture de Steph HUB",["Polski"]="Zamykanie Steph HUB",["Português"]="Fechando o Steph HUB",
+["Română"]="Se închide Steph HUB",["Tiếng Việt"]="Đang đóng Steph HUB",["Türkçe"]="Steph HUB kapatılıyor",["Русский"]=
+"Закрытие Steph HUB",["Українська"]="Закриття Steph HUB",["ไทย"]="กำลังปิด Steph HUB"},["Steph HUB is closing. All running functions and loops will be stopped immediately. To reopen it, re-execute your script."]=
+{["Bahasa Indonesia"]="Steph HUB sedang ditutup. Semua fungsi dan loop yang berjalan akan langsung dihentikan. Untuk membukanya lagi, jalankan ulang skrip kamu.",
+["Deutsch"]="Steph HUB wird geschlossen. Alle laufenden Funktionen und Schleifen werden sofort beendet. Um es erneut zu öffnen, führe dein Skript noch einmal aus.",
+["Español"]="Steph HUB se está cerrando. Todas las funciones y bucles en ejecución se detendrán de inmediato. Para volver a abrirlo, ejecuta tu script de nuevo.",
+["Filipino"]="Isinasara na ang Steph HUB. Agad na hihinto ang lahat ng tumatakbong function at loop. Para buksan ulit, i-execute muli ang iyong script.",
+["Français"]="Steph HUB se ferme. Toutes les fonctions et boucles en cours seront arrêtées immédiatement. Pour le rouvrir, relancez votre script.",
+["Polski"]="Steph HUB się zamyka. Wszystkie działające funkcje i pętle zostaną natychmiast zatrzymane. Aby otworzyć ponownie, uruchom skrypt jeszcze raz.",
+["Português"]="O Steph HUB está fechando. Todas as funções e loops em execução serão interrompidos imediatamente. Para reabrir, execute seu script novamente.",
+["Română"]="Steph HUB se închide. Toate funcțiile și buclele active vor fi oprite imediat. Pentru a-l redeschide, rulează din nou scriptul.",
+["Tiếng Việt"]="Steph HUB đang đóng. Tất cả chức năng và vòng lặp đang chạy sẽ dừng ngay lập tức. Để mở lại, hãy chạy lại script của bạn.",
+["Türkçe"]="Steph HUB kapanıyor. Çalışan tüm fonksiyonlar ve döngüler hemen durdurulacak. Yeniden açmak için scriptini tekrar çalıştır.",
+["Русский"]="Steph HUB закрывается. Все запущенные функции и циклы будут немедленно остановлены. Чтобы открыть снова, перезапустите скрипт.",
+["Українська"]="Steph HUB закривається. Усі запущені функції та цикли буде негайно зупинено. Щоб відкрити знову, перезапустіть скрипт.",
+["ไทย"]="Steph HUB กำลังปิด ฟังก์ชันและลูปที่กำลังทำงานทั้งหมดจะหยุดทันที หากต้องการเปิดอีกครั้ง ให้รันสคริปต์ใหม่"},
 ["Key System"]={["Bahasa Indonesia"]="Sistem Kunci",["Deutsch"]="Schlüsselsystem",["Español"]="Sistema de claves",
 ["Filipino"]="Key System",["Français"]="Système de clés",["Polski"]="System kluczy",["Português"]="Sistema de chaves",
 ["Română"]="Sistem de chei",["Tiếng Việt"]="Hệ thống key",["Türkçe"]="Anahtar Sistemi",["Русский"]="Система ключей",
@@ -575,7 +575,7 @@ end
 local function O(a,...)return task.spawn(function(...)local b=coroutine.running()z[b]=true;
         local a,c=pcall(a,...)z[b]=nil;
         if not a then
-             warn("[ZapLib] Thread Error: ",c)
+             warn("[Steph HUB] Thread Error: ",c)
         end
      end
     ,...)
@@ -666,11 +666,11 @@ local U={}local function V(a,b,...)if ((type(b)~="function")) then
         ;
         U[c]=(U[c]or 0)+1;
         if ((U[c]>=2)) then
-             warn("[ZapLib] Callback '",a,"' has failed 2 consecutive times and requires supervision, report this to the Discord server - ",
+             warn("[Steph HUB] Callback '",a,"' has failed 2 consecutive times and requires supervision, report this to the Discord server - ",
             d)return
          end
         ;
-        warn("[ZapLib] Callback Error: ",a," - ",d)task.wait(5+math.random())
+        warn("[Steph HUB] Callback Error: ",a," - ",d)task.wait(5+math.random())
     end
 end
 ;
@@ -940,7 +940,7 @@ t.RegisterTheme=function(a,a,b)if ((type(a)~="string")or(type(b)~="table")) then
      end
     ;
     if ( p[a]) then
-         warn("[ZapLib] Theme: '"..a.."' is built in and cannot be overwritten, use another name")return false
+         warn("[Steph HUB] Theme: '"..a.."' is built in and cannot be overwritten, use another name")return false
      end
     ;
     local c=setmetatable({},{["__index"]=n["Dark"]})for a,b in pairs(b) do
@@ -1193,7 +1193,7 @@ v.Apply=function(a)local b=0;
      end
     )v["Batch"]=v["Batch"]-1;
     if not a then
-         warn("[ZapLib] Config Error: ",c)
+         warn("[Steph HUB] Config Error: ",c)
     end
     ;
     v["Dirty"]=true;
@@ -1584,7 +1584,7 @@ local function e(a)B()local b=L()for a,a in ipairs(b:GetChildren()) do
     local c=1100;
     local d=620;
     local a={["Title"]=(a["Title"]or "Kaitun"),["SubTitle"]=(a["SubTitle"]or "Premium only"),["Footer"]=(a["Footer"]or
-     "discord.gg/zaphub"),["Elapsed"]=0,["Running"]=true,["Order"]=0}local e={}local g=eb("ScreenGui",{["Name"]=
+     "github.com/miniwroldpro124-cyber/pet99bynhmt"),["Elapsed"]=0,["Running"]=true,["Order"]=0}local e={}local g=eb("ScreenGui",{["Name"]=
     "KaitunZapLib",["ResetOnSpawn"]=false,["ZIndexBehavior"]=Enum["ZIndexBehavior"]["Sibling"],["DisplayOrder"]=
     999999999,["IgnoreGuiInset"]=true})pcall(function()g["ScreenInsets"]=Enum["ScreenInsets"]["None"]
     end
@@ -1603,9 +1603,9 @@ local function e(a)B()local b=L()for a,a in ipairs(b:GetChildren()) do
     UDim2.new(0,52,0,52),["Image"]=l["LogoIcon"],["LayoutOrder"]=1},{Y(26)}),eb("Frame",{["Name"]="Name",["Size"]=
     UDim2.new(0,0,1,0),["AutomaticSize"]=Enum["AutomaticSize"]['X'],["BackgroundTransparency"]=1,["LayoutOrder"]=
     2},{gb(0,Enum["FillDirection"].Horizontal,Enum["HorizontalAlignment"].Left,Enum["VerticalAlignment"].Center),
-    eb("TextLabel",{["Name"]="Zap",["Size"]=UDim2.new(0,0,1,0),["AutomaticSize"]=Enum["AutomaticSize"]['X'],["Text"]=
-    "Zap",["FontFace"]=m["Heavy"],["TextSize"]=40,["LayoutOrder"]=1,["Theme"]={["TextColor3"]="Text"}}),eb("TextLabel",
-    {["Name"]="Hub",["Size"]=UDim2.new(0,0,1,0),["AutomaticSize"]=Enum["AutomaticSize"]['X'],["Text"]="Hub",["FontFace"]=
+    eb("TextLabel",{["Name"]="Steph",["Size"]=UDim2.new(0,0,1,0),["AutomaticSize"]=Enum["AutomaticSize"]['X'],["Text"]=
+    "Steph",["FontFace"]=m["Heavy"],["TextSize"]=40,["LayoutOrder"]=1,["Theme"]={["TextColor3"]="Text"}}),eb("TextLabel",
+    {["Name"]="Hub",["Size"]=UDim2.new(0,0,1,0),["AutomaticSize"]=Enum["AutomaticSize"]['X'],["Text"]=" HUB",["FontFace"]=
     m["Heavy"],["TextSize"]=40,["LayoutOrder"]=2,["Theme"]={["TextColor3"]="AccentText"}})})})local n=eb("TextLabel",
     {["Name"]="Time",["Size"]=UDim2.new(0,0,1,0),["AutomaticSize"]=Enum["AutomaticSize"]['X'],["Text"]=J(0),["FontFace"]=
     m["Mono"],["TextSize"]=22,["LayoutOrder"]=2,["Theme"]={["TextColor3"]="Text"}})eb("Frame",{["Name"]="Timer",
@@ -1791,10 +1791,10 @@ local function f(a,b)local c=L()for a,a in ipairs(c:GetChildren()) do
     else
          table.insert(B,eb("Frame",{["Name"]="Name",["Size"]=UDim2.new(0,0,1,0),["AutomaticSize"]=Enum["AutomaticSize"]['X'],
         ["BackgroundTransparency"]=1,["LayoutOrder"]=2},{gb(0,Enum["FillDirection"].Horizontal,Enum["HorizontalAlignment"].Left,
-        Enum["VerticalAlignment"].Center),o(eb("TextLabel",{["Name"]="Zap",["Size"]=UDim2.new(0,0,1,0),["AutomaticSize"]=
-        Enum["AutomaticSize"]['X'],["Text"]="Zap",["FontFace"]=m["Heavy"],["TextSize"]=28,["LayoutOrder"]=1,["Theme"]=
+        Enum["VerticalAlignment"].Center),o(eb("TextLabel",{["Name"]="Steph",["Size"]=UDim2.new(0,0,1,0),["AutomaticSize"]=
+        Enum["AutomaticSize"]['X'],["Text"]="Steph",["FontFace"]=m["Heavy"],["TextSize"]=28,["LayoutOrder"]=1,["Theme"]=
         {["TextColor3"]="Text"}}),"TextTransparency",0),o(eb("TextLabel",{["Name"]="Hub",["Size"]=UDim2.new(0,
-        0,1,0),["AutomaticSize"]=Enum["AutomaticSize"]['X'],["Text"]="Hub",["FontFace"]=m["Heavy"],["TextSize"]=
+        0,1,0),["AutomaticSize"]=Enum["AutomaticSize"]['X'],["Text"]=" HUB",["FontFace"]=m["Heavy"],["TextSize"]=
         28,["LayoutOrder"]=2,["Theme"]={["TextColor3"]="AccentText"}}),"TextTransparency",0)}))
     end
     ;
@@ -1891,7 +1891,7 @@ local function f(a,b)local c=L()for a,a in ipairs(c:GetChildren()) do
             end
             ;
             C("Key Valid")ab(m,"BackgroundColor3","Success")s("The key is valid. Loading...","Success")t:CreateNotification({["Title"]=
-            (a["Title"]or "ZapHub"),["Content"]="The key is valid. Loading...",["Duration"]=4,["Image"]=a["Logo"]})i(0.6)v(true )return
+            (a["Title"]or "Steph HUB"),["Content"]="The key is valid. Loading...",["Duration"]=4,["Image"]=a["Logo"]})i(0.6)v(true )return
          end
         ;
         C("Check Key")ab(m,"BackgroundColor3","Accent")s(d or "Unexpected error occurred. Please try again.",
@@ -1972,7 +1972,7 @@ t.CreateKeySystem=function(a,a)if t["Destroyed"]then
     end
     ;
     local function c(a)local a,b,c=pcall(b,a)if ( not a) then
-             warn("[ZapLib] Key System Error: ",b)return nil,"Unexpected error occurred. Please try again."
+             warn("[Steph HUB] Key System Error: ",b)return nil,"Unexpected error occurred. Please try again."
         end
         ;
         return b,c
@@ -1991,7 +1991,7 @@ t.CreateKeySystem=function(a,a)if t["Destroyed"]then
          end
         )if (e and(e~="")) then
              local c,d=c(e)if ( c) then
-                 t:CreateNotification({["Title"]=(a["Title"]or "ZapHub"),["Content"]="The saved key is valid. Loading...",
+                 t:CreateNotification({["Title"]=(a["Title"]or "Steph HUB"),["Content"]="The saved key is valid. Loading...",
                 ["Duration"]=4,["Image"]=a["Logo"]})return true,e
              end
             ;
@@ -2000,7 +2000,7 @@ t.CreateKeySystem=function(a,a)if t["Destroyed"]then
                  pcall(n.DeleteFile,b)
             end
             ;
-            t:CreateNotification({["Title"]=(a["Title"]or "ZapHub"),["Content"]=(((c==false)and "The saved key is invalid. Opening the key system...")or
+            t:CreateNotification({["Title"]=(a["Title"]or "Steph HUB"),["Content"]=(((c==false)and "The saved key is invalid. Opening the key system...")or
              d or "Unexpected error occurred. Please try again."),["Duration"]=5,["Image"]=a["Logo"]})
         end
      end
@@ -2012,7 +2012,7 @@ local function f(d)cb()local e=v.LoadFlags()local f=u["Gui"];
     local g=l["WindowWidth"];
     local j=l["WindowHeight"];
     local n={}local o={["Open"]=false,["Position"]=UDim2.new(0.5,0,0.5,0),["Closing"]=false,["PopupOpen"]=false,
-    ["Order"]=0,["LastTab"]=nil}local d=d["Name"]or"ZapLib | By 'zap_xyz' and '1dnt'";
+    ["Order"]=0,["LastTab"]=nil}local d=d["Name"]or"Steph HUB | PS99 v8.0";
     local p=eb("UIScale",{["Name"]="Scale"})local s=eb("UIScale",{["Name"]="Scale"})local function u(a,b,c,d)local b=
         eb("ImageLabel",{["Name"]="Icon",["AnchorPoint"]=Vector2.new(0.5,0.5),["Position"]=UDim2.new(0.5,0,0.5,
         0),["Size"]=UDim2.new(0,16,0,16),["Image"]=b,["Theme"]={["ImageColor3"]="TextMuted"}})local a=eb("TextButton",
@@ -2051,7 +2051,7 @@ local function f(d)cb()local e=v.LoadFlags()local f=u["Gui"];
     eb("Frame",{["Name"]="Bottom",["AnchorPoint"]=Vector2.new(0,1),["Position"]=UDim2.new(0,0,1,0),["Size"]=UDim2.new(1,
     0,0,56),["BackgroundTransparency"]=1,["Active"]=true},{H,I,J,eb("Frame",{["Name"]="Divider",["Size"]=UDim2.new(1,
     0,0,1),["Theme"]={["BackgroundColor3"]="Stroke"}})})local K=eb("TextLabel",{["Name"]="Title",["Size"]=UDim2.new(1,
-    0,0,22),["Loc"]="Close ZapHub?",["FontFace"]=m["Bold"],["TextSize"]=17,["TextXAlignment"]=Enum["TextXAlignment"]["Left"],
+    0,0,22),["Loc"]="Close Steph HUB?",["FontFace"]=m["Bold"],["TextSize"]=17,["TextXAlignment"]=Enum["TextXAlignment"]["Left"],
     ["LayoutOrder"]=1,["Theme"]={["TextColor3"]="Text"}})local L=eb("TextLabel",{["Name"]="Warning",["Size"]=
     UDim2.new(1,0,0,0),["AutomaticSize"]=Enum["AutomaticSize"]['Y'],["Loc"]="All running functions and loops will be stopped immediately. To reopen it, re-execute your script.",
     ["TextWrapped"]=true,["TextSize"]=13,["TextXAlignment"]=Enum["TextXAlignment"]["Left"],["TextYAlignment"]=
@@ -2147,7 +2147,7 @@ local function f(d)cb()local e=v.LoadFlags()local f=u["Gui"];
          end
         ;
         o["Closing"]=true;
-        g(false )t:CreateNotification({["Title"]="Closing ZapHub",["Content"]="ZapHub is closing. All running functions and loops will be stopped immediately. To reopen it, re-execute your script."})P(l.CloseDelay,
+        g(false )t:CreateNotification({["Title"]="Closing Steph HUB",["Content"]="Steph HUB is closing. All running functions and loops will be stopped immediately. To reopen it, re-execute your script."})P(l.CloseDelay,
         function()t:Destroy()
         end
         )
@@ -2329,7 +2329,7 @@ local function f(d)cb()local e=v.LoadFlags()local f=u["Gui"];
              k.SetClipboard(n:ExportConfig())t:CreateNotification({["Title"]="Configuration Manager",["Content"]=
             "Configuration copied to the clipboard."})
         else
-             t:CreateNotification({["Title"]="Configuration Manager",["Content"]="Your executor does not support the clipboard."})warn("[ZapLib] Configuration: "..
+             t:CreateNotification({["Title"]="Configuration Manager",["Content"]="Your executor does not support the clipboard."})warn("[Steph HUB] Configuration: "..
             n:ExportConfig())
         end
      end
@@ -2871,7 +2871,7 @@ function A(b)local d=b["Functions"];
             l()
         end
         )c.Set=function(a,a)if ((typeof(a)~="EnumItem")) then
-                 warn("[ZapLib] Tip: Please use Enum.KeyCode: From '"..tostring(c.Name).."' - ZapLib")
+                 warn("[Steph HUB] Tip: Please use Enum.KeyCode: From '"..tostring(c.Name).."' - Steph HUB")
             end
             ;
             local a=g(a)if a then
@@ -3371,30 +3371,30 @@ _G["ZapLib"]=t;
 -- ===========================================================================
 
 local win = t:CreateWindow({
-    Name = "ZapHub | by zap_xyz and 1dnt",
+    Name = "Steph HUB | PS99 v8.0",
     Theme = "Dark",
     AnimationMode = "Smooth",
 })
 
 local home = win:CreateTab("Home", "rbxassetid://16259403210")
 
-home:CreateSection("ZapLib 2.0.0")
+home:CreateSection("Steph HUB 8.0")
 home:CreateParagraph({
     Title = "Loaded",
     Content = "RightControl toggles the window. The settings tab carries theme, language, "
         .. "animation mode and interface scale; configuration is written to the executor "
-        .. "workspace under ZapLib/Settings.zaplib.",
+        .. "workspace under StephHUB/Settings.steph.",
 })
 
 home:CreateSection("Session")
 home:CreateButton({
-    Name = "Copy Discord Invite",
+    Name = "Copy Repo Link",
     Callback = function()
         if setclipboard then
-            pcall(setclipboard, "https://discord.gg/zaphub")
-            t:CreateNotification({ Title = "ZapHub", Content = "Invite copied to the clipboard." })
+            pcall(setclipboard, "https://github.com/miniwroldpro124-cyber/pet99bynhmt")
+            t:CreateNotification({ Title = "Steph HUB", Content = "Repo link copied to the clipboard." })
         else
-            t:CreateNotification({ Title = "ZapHub", Content = "discord.gg/zaphub" })
+            t:CreateNotification({ Title = "Steph HUB", Content = "github.com/miniwroldpro124-cyber/pet99bynhmt" })
         end
     end,
 })
@@ -3414,7 +3414,7 @@ home:CreateButton({
 })
 
 t:CreateNotification({
-    Title = "ZapHub",
+    Title = "Steph HUB",
     Content = "Loaded. RightControl toggles the window.",
     Duration = 4,
 })

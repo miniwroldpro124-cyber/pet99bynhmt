@@ -133,7 +133,7 @@ local CFG = {
     HeapRetryInterval = 5,
     HeapCap = 2000,
     TreeCap = 1000,
-    -- v2 / v3
+    -- v2 / v3 / v8 Steph HUB
     FarmBurst = 10,
     PetRouteRate = 0.4,
     TeleCenterWait = 2,
@@ -142,22 +142,56 @@ local CFG = {
     PetAll = true,
     HideEggFx = false,
     FlySpeed = 120,
+    EggSlotInterval = 6,
+    EggSlotBackoff = 12,
+    UpgradeInterval = 8,
+    ForeverPackInterval = 30,
+    EnchantInterval = 5,
+    TNTInterval = 10,
+    TNTCrateInterval = 15,
+    LowCpuFpsCap = 15,
+    SelectedFlag = "Any Flag",
+    SelectedMoveMode = "Teleport",
+    SelectedKeepRung = 4,
+    HuntMinTier = 0,
 }
 
 local enabled = {
-    petSpeed = false, tap = false, vacuum = false, farm = false, fastFarmBeta = false,
+    petSpeed = false, tap = false, legitTap = false, vacuum = false, farm = false, fastFarmBeta = false,
     zoneTele = false, zoneBuy = false, autoQuest = false, autoDoQuest = false,
     autoRank = false, autoRebirth = false, antiAfk = false, clickAura = false,
     autoEgg = false, auraVisual = false, optBreakables = false, optPets = false, worldTele = false,
     worldAdvance = false,
     hideEggFx = false, chestFirst = true, teleCenter = true, petAll = true,
     petBulkJoin = true, petTeleAfterAttack = true, drinkHighestTier = true,
-    serverHop = false, autoBuyPetSlots = false, jitter = false,
+    serverHop = false, autoBuyPetSlots = false, autoBuyEggSlots = false,
+    autoForeverPack = false, autoBuyUpgrades = false, autoEquipEnchant = false,
+    autoTNT = false, autoTNTCrate = false, whiteScreen = false, reduceCpuRam = false,
+    jitter = false,
     autoKeys = false, autoGiftBags = false, autoFruits = false, autoPotions = false,
     autoFreeGifts = false, autoUltimate = false, autoSprinkler = false, autoDaycare = false, autoFlags = false,
     autoSecretRooms = false, autoTreehouse = false, autoFuse = false, autoCards = false,
     autoRelics = false, autoMailClaim = false, autoDice = false,
     noclip = false, fly = false, unlockGamepasses = false, removeGates = false,
+    -- Pumpkin Tycoon Event
+    optPumpkinTycoon = false,
+    ptAutoTeleBestEgg = false,
+    ptAutoBuyEgg = false,
+    ptAutoBuyButtons = false,
+    ptAutoRebirth = false,
+    ptAutoKeepPumpkins = false,
+    ptAutoBreakPumpkins = false,
+    ptAutoBuyMerchant = false,
+    ptAutoPlantPumpkins = false,
+    ptAutoBuyUpgrades = false,
+    ptAutoBuyCocoa = false,
+    ptAutoUseBoosts = false,
+    ptAutoFlannelGifts = false,
+    ptAutoHuntWild = false,
+    ptAutoCatchWild = false,
+    ptAutoBuyNets = false,
+    ptAutoFightTurkey = false,
+    ptAutoCatchRare = false,
 }
 
 -- Per-item selections. Every "auto X" worker above only touches the ids the
@@ -199,13 +233,24 @@ local snap = {raw = nil, at = -math.huge, source = "waiting", cache = nil}
 local stats = {pending = nil, remote = nil, connection = nil}
 local nextAt = {
     heap = 0, save = 0, quest = {}, ensure = {}, doQuest = 0, coinJar = 0,
-    egg = 0, worldTele = 0, petSlot = 0,
+    egg = 0, worldTele = 0, petSlot = 0, eggSlot = 0, foreverPack = 0, upgrade = 0,
+    enchant = 0, tnt = 0, tntCrate = 0, pt = 0,
     key = 0, bag = 0, mail = 0,
     freeGift = 0, ultimate = 0, sprinkler = 0, daycare = 0, flag = 0,
     secret = 0, relic = 0, treehouse = 0, fuse = 0, card = 0, dice = 0,
     freeGiftCursor = 1, tree = 0, tap = 0, tele = 0, buy = 0, rank = 0, rebirth = 0,
 }
-local notes = {pet = "off", tap = "off", betaFarm = "off", vacuum = "off", tele = "off", buy = "off", quest = "off", doQuest = "off", rank = "off", rebirth = "off", antiAfk = "off", egg = "off", world = "off", advance = "off", optimize = "off", hop = "off", petSlot = "off", keys = "off", bags = "off", fruits = "off", potions = "off", freeGift = "off", ultimate = "off", sprinkler = "off", daycare = "off", flags = "off", secret = "off", relics = "off", treehouse = "off", fuse = "off", cards = "off", dice = "off", mailClaim = "off", cheat = "ready", heap = "idle; no startup scan", profile = "waiting for discovery"}
+local notes = {
+    pet = "off", tap = "off", betaFarm = "off", vacuum = "off", tele = "off", buy = "off",
+    quest = "off", doQuest = "off", rank = "off", rebirth = "off", antiAfk = "off", egg = "off",
+    world = "off", advance = "off", optimize = "off", hop = "off", petSlot = "off", eggSlot = "off",
+    foreverPack = "off", upgrade = "off", enchant = "off", tnt = "off", tntCrate = "off",
+    whiteScreen = "off", reduceCpu = "off", event = "off",
+    keys = "off", bags = "off", fruits = "off", potions = "off", freeGift = "off", ultimate = "off",
+    sprinkler = "off", daycare = "off", flags = "off", secret = "off", relics = "off", treehouse = "off",
+    fuse = "off", cards = "off", dice = "off", mailClaim = "off", cheat = "ready",
+    heap = "idle; no startup scan", profile = "waiting for discovery",
+}
 
 local petState = {
     previous = setmetatable({}, {__mode = "k"}),
@@ -320,11 +365,21 @@ local REMOTE_TYPES = {
     ["KX_Release"] = "RemoteFunction",
     ["Lootables_Open"] = "RemoteFunction",
     ["Spinny Wheel: Request Spin"] = "RemoteFunction",
+    ["Enchants_Equip"] = "RemoteEvent",
+    ["Enchants_ClearSlot"] = "RemoteEvent",
+    ["EggHatchSlotsMachine_RequestPurchase"] = "RemoteFunction",
+    ["ForeverPacks: Claim Free"] = "RemoteFunction",
+    ["TNT_Consume"] = "RemoteFunction",
+    ["TNT_Crate_Consume"] = "RemoteFunction",
+    ["Consumables_Consume"] = "RemoteFunction",
+    ["Plots_Invoke"] = "RemoteFunction",
+    ["Instancing_Enter"] = "RemoteFunction",
+    ["Instancing_Leave"] = "RemoteFunction",
 }
 
 local function stage(message)
     if not alive then return end
-    print("[PS99 CLEAN] " .. tostring(message))
+    print("[Steph HUB] " .. tostring(message))
 end
 
 local function connect(signal, callback)
@@ -449,6 +504,15 @@ function CFG.BootstrapModules()
     tryReq("gamepasses", "Gamepasses")
     tryReq("ultimates", "UltimateCmds")
     tryReq("sprinklers", "SprinklerCmds")
+    tryReq("flags", "FlexibleFlagCmds")
+    tryReq("enchants", "EnchantCmds")
+    tryReq("mastery", "MasteryCmds")
+    tryReq("foreverPack", "ForeverPackCmds")
+    tryReq("upgrades", "UpgradeCmds")
+    tryReq("zoneCmds", "ZoneCmds")
+    tryReq("instancing", "InstancingCmds")
+    tryReq("mapCmds", "MapCmds")
+    tryReq("pumpkinTycoon", "PumpkinTycoonCmds")
 end
 
 local function getSave()
@@ -925,11 +989,17 @@ local function needsNative()
     -- The live Save cache is authoritative: the current game's "Get Stats" remote
     -- can exist yet return nil, so always discover the Save module when a profile
     -- is needed, regardless of whether a stats remote was found by name.
-    if (enabled.zoneTele or enabled.zoneBuy or enabled.autoQuest or enabled.autoDoQuest or enabled.autoRank or enabled.autoRebirth or enabled.autoEgg or enabled.worldTele or enabled.autoBuyPetSlots or enabled.worldAdvance) and not save then return true end
+    if (enabled.zoneTele or enabled.zoneBuy or enabled.autoQuest or enabled.autoDoQuest or enabled.autoRank or enabled.autoRebirth or enabled.autoEgg or enabled.worldTele or enabled.autoBuyPetSlots or enabled.autoBuyEggSlots or enabled.autoForeverPack or enabled.autoBuyUpgrades or enabled.autoEquipEnchant or enabled.worldAdvance) and not save then return true end
     if not save and (enabled.autoKeys or enabled.autoGiftBags or enabled.autoFruits or enabled.autoPotions
         or enabled.autoFreeGifts or enabled.autoUltimate or enabled.autoDaycare or enabled.autoFlags
         or enabled.autoSecretRooms or enabled.autoRelics or enabled.autoTreehouse or enabled.autoFuse
-        or enabled.autoCards or enabled.autoMailClaim) then return true end
+        or enabled.autoCards or enabled.autoMailClaim or enabled.autoTNT or enabled.autoTNTCrate
+        or enabled.optPumpkinTycoon or enabled.ptAutoTeleBestEgg or enabled.ptAutoBuyEgg
+        or enabled.ptAutoBuyButtons or enabled.ptAutoRebirth or enabled.ptAutoKeepPumpkins
+        or enabled.ptAutoBreakPumpkins or enabled.ptAutoBuyMerchant or enabled.ptAutoPlantPumpkins
+        or enabled.ptAutoBuyUpgrades or enabled.ptAutoBuyCocoa or enabled.ptAutoUseBoosts
+        or enabled.ptAutoFlannelGifts or enabled.ptAutoHuntWild or enabled.ptAutoCatchWild
+        or enabled.ptAutoBuyNets or enabled.ptAutoFightTurkey or enabled.ptAutoCatchRare) then return true end
     if enabled.autoRebirth and save and not rebirths[save.Rebirths + 1] then return true end
     if (enabled.autoQuest or enabled.autoDoQuest) and save and type(save.NPCQuests) == "table" then
         for id, data in pairs(save.NPCQuests) do
@@ -1448,7 +1518,8 @@ end
 
 local function tapTick()
     local now = os.clock()
-    if enabled.jitter and now < nextAt.tap then return end
+    local isLegitOnly = enabled.legitTap and not enabled.farm and not enabled.clickAura
+    if (enabled.jitter or isLegitOnly) and now < nextAt.tap then return end
     local point = position()
     if not point then notes.tap = "waiting for character"; return end
     local zone = currentZone()
@@ -1502,7 +1573,9 @@ local function tapTick()
         notes.tap = "no eligible breakable in range"
         return
     end
-    if enabled.jitter then
+    if isLegitOnly then
+        nextAt.tap = now + 0.125 + math.random() * 0.035
+    elseif enabled.jitter then
         local interval = (1 / math.max(CFG.MaxTapRate, 1)) * (1 + math.random() * 0.5)
         if math.random() < 0.02 then interval += 0.25 end
         nextAt.tap = now + interval
@@ -1510,10 +1583,10 @@ local function tapTick()
     local primaryUid = petTargetUid or target.uid
     local primaryModel = petTargetModel or target.model
     local ok, message = fire("Breakables_PlayerDealDamage", primaryUid)
-    if target.uid and target.uid ~= primaryUid then
+    if target.uid and target.uid ~= primaryUid and not isLegitOnly then
         fire("Breakables_PlayerDealDamage", target.uid)
     end
-    if (enabled.farm or enabled.tap or enabled.clickAura) and (CFG.FarmBurst or 0) > 0 and #auraTargets > 1 then
+    if not isLegitOnly and (enabled.farm or enabled.tap or enabled.clickAura) and (CFG.FarmBurst or 0) > 0 and #auraTargets > 1 then
         local extras = 0
         for _ = 1, math.min(#auraTargets, (CFG.FarmBurst or 6) * 2) do
             if extras >= CFG.FarmBurst then break end
@@ -1587,10 +1660,17 @@ local function vacuumTick()
     notes.vacuum = ("%d/%d orbs magnetized"):format(flagged, total)
 end
 
--- Finds the zone folder in workspace.Map / Map2 / Map3 / Map4 for a zone id.
+-- Finds the zone folder in Directory cache or workspace.Map / Map2 / Map3 / Map4 (Zones 1-279+).
 local function findZoneFolder(id)
     local num = zoneNumbers[id]
+    local zoneEntry = num and zones[num]
+    local def = zoneEntry and zoneEntry.definition
+    if type(def) == "table" and typeof(def.ZoneFolder) == "Instance" and def.ZoneFolder.Parent then
+        return def.ZoneFolder
+    end
     local exactName = num and (tostring(num) .. " | " .. id) or nil
+    local altName = (num and type(def) == "table" and type(def.ZoneName) == "string")
+        and (tostring(num) .. " | " .. def.ZoneName) or nil
     local suffix = " | " .. id
     for w = 1, CFG.WorldCount do
         local map = workspace:FindFirstChild(w == 1 and "Map" or ("Map" .. w))
@@ -1599,10 +1679,15 @@ local function findZoneFolder(id)
                 local exact = map:FindFirstChild(exactName)
                 if exact then return exact end
             end
+            if altName and altName ~= exactName then
+                local alt = map:FindFirstChild(altName)
+                if alt then return alt end
+            end
             local ok, children = pcall(map.GetChildren, map)
             if ok then
                 for _, child in ipairs(children) do
-                    if child.Name == id or child.Name:sub(-#suffix) == suffix then
+                    if child.Name == id or child.Name:sub(-#suffix) == suffix
+                        or (num and tonumber(child.Name:match("^(%d+)%s*|")) == num) then
                         return child
                     end
                 end
@@ -1612,13 +1697,39 @@ local function findZoneFolder(id)
     return nil
 end
 
--- Resolves the exact middle of an island:
--- 1. INTERACT.BREAK_ZONES centroid (the dotted breakable box in the middle of the island)
--- 2. Live breakables centroid (AllByZoneAndClass)
--- 3. __FAKE_GROUND part center
--- 4. PERSISTENT.Teleport fallback (always loaded even when distant)
+local function zoneWorldNumber(id)
+    local num = zoneNumbers[id]
+    local def = num and zones[num] and zones[num].definition
+    if type(def) == "table" and type(def.WorldNumber) == "number" then
+        return def.WorldNumber
+    end
+    if num then
+        if num >= (CFG.WorldFirst[4] or 240) then return 4 end
+        if num >= (CFG.WorldFirst[3] or 200) then return 3 end
+        if num >= (CFG.WorldFirst[2] or 100) then return 2 end
+    end
+    return 1
+end
+
+local function detectActiveWorld()
+    for w = CFG.WorldCount, 2, -1 do
+        if workspace:FindFirstChild("Map" .. w) then return w end
+    end
+    if workspace:FindFirstChild("Map") then return 1 end
+    local pid = game.PlaceId
+    if pid == 140403681187145 then return 4 end
+    if pid == 17503543197 then return 3 end
+    if pid == 16498369169 then return 2 end
+    return 1
+end
+
+-- Resolves the exact middle of an island + whether INTERACT.BREAK_ZONES was loaded:
+-- 1. INTERACT.BREAK_ZONES / BREAKABLE_SPAWNS centroid (exact = true)
+-- 2. Live breakables centroid (exact = true)
+-- 3. __FAKE_GROUND part center (exact = false, triggers streaming)
+-- 4. PERSISTENT.Teleport fallback (exact = false, triggers streaming)
 local function zoneCenter(id)
-    if type(id) ~= "string" then return nil end
+    if type(id) ~= "string" then return nil, false end
     local folder = findZoneFolder(id)
     if folder then
         local interact = folder:FindFirstChild("INTERACT")
@@ -1631,7 +1742,7 @@ local function zoneCenter(id)
                     count += 1
                 end
             end
-            if count > 0 then return sum / count end
+            if count > 0 then return sum / count, true end
         end
     end
     local registry = modules.breakables
@@ -1652,30 +1763,30 @@ local function zoneCenter(id)
             end
             if count >= 400 then break end
         end
-        if count > 0 then return sum / count end
+        if count > 0 then return sum / count, true end
     end
     local ground = thingsFolder("__FAKE_GROUND")
     if ground then
         local targetPart = ground:FindFirstChild(id, true)
         if targetPart then
-            if targetPart:IsA("BasePart") then return targetPart.Position end
+            if targetPart:IsA("BasePart") then return targetPart.Position, false end
             local ok, box = pcall(function() return targetPart:GetBoundingBox() end)
-            if ok and box then return box.Position end
+            if ok and box then return box.Position, false end
             local ok2, pivot = pcall(function() return targetPart:GetPivot().Position end)
-            if ok2 and pivot then return pivot end
+            if ok2 and pivot then return pivot, false end
         end
     end
     if folder then
         local persistent = folder:FindFirstChild("PERSISTENT")
         local tele = persistent and persistent:FindFirstChild("Teleport")
         if tele then
-            if tele:IsA("BasePart") then return tele.Position end
-            if tele:IsA("CFrameValue") then return tele.Value.Position end
+            if tele:IsA("BasePart") then return tele.Position, false end
+            if tele:IsA("CFrameValue") then return tele.Value.Position, false end
             local ok, pos = pcall(function() return modelPosition(tele) end)
-            if ok and pos then return pos end
+            if ok and pos then return pos, false end
         end
     end
-    return nil
+    return nil, false
 end
 
 local function snapTo(point)
@@ -1694,19 +1805,35 @@ local function snapTo(point)
     return ok
 end
 
--- Direct CFrame island teleport (NEVER calls Teleports_RequestTeleport, so no
--- cannon cutscene, no pet unequip, and stands directly in the island middle).
+-- Direct CFrame island teleport (supports Zones 1-279 / World 1-4). Crosses worlds
+-- automatically if target zone belongs to another World (e.g. Zone 200+ in World 3/4),
+-- and runs streaming refinement until INTERACT.BREAK_ZONES middle is reached.
 local function teleportToIslandMiddle(id)
-    local centre = zoneCenter(id)
-    if not centre then return false, "island center not loaded: " .. tostring(id) end
+    if type(id) ~= "string" or #id == 0 then return false, "invalid zone id" end
+    local centre, exact = zoneCenter(id)
+    local hereW = detectActiveWorld()
+    local targetW = zoneWorldNumber(id)
+    if not centre or (targetW ~= hereW and targetW >= 1 and targetW <= CFG.WorldCount) then
+        if targetW ~= hereW then
+            local remoteName = "World" .. tostring(targetW) .. "Teleport"
+            local ok, message = invoke(remoteName)
+            return ok == true, ok == true and ("switching to World " .. targetW .. " for " .. id)
+                or tostring(message or ("invoke " .. remoteName .. " failed"))
+        end
+        return false, "island center not loaded: " .. tostring(id)
+    end
     local ok = snapTo(centre)
     if ok then
-        task.delay(0.25, function()
-            if alive and (enabled.teleCenter or enabled.zoneTele) then
-                local refined = zoneCenter(id)
-                if refined then snapTo(refined) end
-            end
-        end)
+        local delays = exact and { 0.25 } or { 0.25, 0.65, 1.25 }
+        for _, waitSec in ipairs(delays) do
+            task.delay(waitSec, function()
+                if not alive then return end
+                local refined, isExact = zoneCenter(id)
+                if refined and (isExact or enabled.teleCenter or enabled.zoneTele) then
+                    snapTo(refined)
+                end
+            end)
+        end
     end
     return ok, ok and ("teleported to middle of " .. id) or "character unavailable"
 end
@@ -1719,9 +1846,21 @@ local function teleTick()
     local best = maxOwned(save)
     if not best then notes.tele = "waiting for zone map"; return end
     local id = zones[best].id
+    local hereW = detectActiveWorld()
+    local targetW = zoneWorldNumber(id)
+    if targetW ~= hereW then
+        nextAt.tele = now + CFG.WorldBackoff
+        if enabled.worldAdvance or enabled.worldTele then
+            local ok, msg = teleportToIslandMiddle(id)
+            notes.tele = tostring(msg)
+            return
+        end
+        notes.tele = ("best zone %s is in World %d (you are in World %d)"):format(id, targetW, hereW)
+        return
+    end
     local centre = zoneCenter(id)
     if not centre then
-        notes.tele = "island " .. id .. " not in current world"
+        notes.tele = "island " .. id .. " not loaded yet"
         return
     end
     local pos = position()
@@ -2265,11 +2404,126 @@ local function petSlotTick()
     local purchased = type(save.PetSlotsPurchased) == "number" and save.PetSlotsPurchased or 0
     local slot = purchased + 1
     if slot > CFG.PetSlotMax then notes.petSlot = "slot cap reached (" .. CFG.PetSlotMax .. ")"; return end
+    local rankDef = ranks[save.Rank]
+    if type(rankDef) == "table" and type(rankDef.UnlockablePetSlots) == "number" and purchased >= rankDef.UnlockablePetSlots then
+        notes.petSlot = ("rank %s pet slot cap (%d)"):format(tostring(save.Rank), purchased)
+        nextAt.petSlot = now + CFG.PetSlotBackoff
+        return
+    end
     nextAt.petSlot = now + CFG.PetSlotBackoff
     local ok, message = invoke("EquipSlotsMachine_RequestPurchase", slot)
     if not alive or not enabled.autoBuyPetSlots then return end
-    notes.petSlot = ok == true and ("bought slot " .. slot) or tostring(message or "rejected")
+    notes.petSlot = ok == true and ("bought pet slot " .. slot) or tostring(message or "rejected")
     if ok == true then nextAt.petSlot = os.clock() + CFG.PetSlotInterval; nextAt.save = 0 end
+end
+
+CFG.EggSlotBundles = nil
+local function nextEggSlotEnd(purchased)
+    if not CFG.EggSlotBundles then
+        local bundles, cur, total = {}, 1, 83
+        while cur <= total do
+            local size = (cur <= 10 and 1) or (cur <= 30 and 2) or 3
+            local endSlot = math.min(cur + size - 1, total)
+            bundles[#bundles + 1] = { Start = cur, End = endSlot }
+            cur = endSlot + 1
+        end
+        CFG.EggSlotBundles = bundles
+    end
+    for _, b in ipairs(CFG.EggSlotBundles) do
+        if purchased < b.End then
+            return b.End
+        end
+    end
+    return nil
+end
+
+function CFG.EggSlotTick()
+    local now = os.clock()
+    if now < nextAt.eggSlot then return end
+    local save = getSave()
+    if not save then notes.eggSlot = "waiting for profile"; return end
+    local purchased = type(save.EggSlotsPurchased) == "number" and save.EggSlotsPurchased or 0
+    local targetEnd = nextEggSlotEnd(purchased)
+    if not targetEnd then notes.eggSlot = "max egg slots purchased"; nextAt.eggSlot = now + 30; return end
+    nextAt.eggSlot = now + CFG.EggSlotBackoff
+    local ok, message = invoke("EggHatchSlotsMachine_RequestPurchase", targetEnd)
+    if not alive or not enabled.autoBuyEggSlots then return end
+    notes.eggSlot = ok == true and ("bought egg bundle -> " .. targetEnd) or tostring(message or "rejected")
+    if ok == true then nextAt.eggSlot = os.clock() + CFG.EggSlotInterval; nextAt.save = 0 end
+end
+
+function CFG.ForeverPackTick()
+    local now = os.clock()
+    if now < nextAt.foreverPack then return end
+    local save = getSave()
+    if not save then notes.foreverPack = "waiting for profile"; return end
+    local fpCmds = modules.foreverPack
+    local state = nil
+    if fpCmds and type(fpCmds.GetState) == "function" then
+        local okSt, st = pcall(fpCmds.GetState, "Default")
+        if okSt and type(st) == "table" then state = st end
+    end
+    if not state and type(save.ForeverPacks) == "table" then
+        state = save.ForeverPacks.Default or save.ForeverPacks
+    end
+    if type(state) == "table" and type(state.Slots) == "table" then
+        local idx = (tonumber(state.Slot) or 0) + 1
+        local slot = state.Slots[idx]
+        if type(slot) == "table" and slot.Price and not slot.Free and not slot.Credit then
+            notes.foreverPack = "next slot costs Robux (paused)"
+            nextAt.foreverPack = now + CFG.ForeverPackInterval
+            return
+        end
+    end
+    nextAt.foreverPack = now + CFG.ForeverPackInterval
+    local ok, message = invoke("ForeverPacks: Claim Free", "Default")
+    if not alive or not enabled.autoForeverPack then return end
+    notes.foreverPack = ok == true and "claimed forever free pack" or tostring(message or "none available")
+    if ok == true then nextAt.foreverPack = os.clock() + 3; nextAt.save = 0 end
+end
+
+function CFG.UpgradeTick()
+    local now = os.clock()
+    if now < nextAt.upgrade then return end
+    local save = getSave()
+    if not save then notes.upgrade = "waiting for profile"; return end
+    local upCmds = modules.upgrades
+    if not upCmds or type(upCmds.All) ~= "function" then
+        if not CFG.BootstrapDone then CFG.BootstrapModules() end
+        upCmds = modules.upgrades
+    end
+    if not upCmds or type(upCmds.All) ~= "function" then
+        notes.upgrade = "waiting for UpgradeCmds"
+        nextAt.upgrade = now + CFG.UpgradeInterval
+        return
+    end
+    local okList, list = pcall(upCmds.All)
+    if not okList or type(list) ~= "table" then
+        notes.upgrade = "upgrade list unavailable"
+        nextAt.upgrade = now + CFG.UpgradeInterval
+        return
+    end
+    for _, up in ipairs(list) do
+        if not alive or not enabled.autoBuyUpgrades then return end
+        local uid, zid = up.UpgradeID, up.ZoneID
+        if uid and zid and save.UnlockedZones[zid] == true then
+            local already = type(upCmds.Owns) == "function" and upCmds.Owns(uid, zid) == true
+            if not already then
+                nextAt.upgrade = now + 1.5
+                local ok, message = invoke("Upgrades_Purchase", uid, zid)
+                if not alive or not enabled.autoBuyUpgrades then return end
+                if ok == true then
+                    notes.upgrade = ("bought %s (%s)"):format(uid, zid)
+                    nextAt.save = 0
+                    return
+                else
+                    notes.upgrade = ("%s (%s): %s"):format(uid, zid, tostring(message or "cannot afford"))
+                end
+            end
+        end
+    end
+    nextAt.upgrade = now + CFG.UpgradeInterval
+    notes.upgrade = "all unlocked player upgrades owned"
 end
 
 local function serverClock()
@@ -2880,9 +3134,55 @@ local function flagTick()
     if now < nextAt.flag then return end
     local save = getSave()
     if not save then notes.flags = "waiting for profile"; return end
+    local zone = currentZone()
+    if not zone then
+        local mapCmds = modules.mapCmds
+        local instInfo = mapCmds and type(mapCmds.GetCurrentInstanceInfo) == "function" and mapCmds.GetCurrentInstanceInfo()
+        if not instInfo then
+            notes.flags = "stand inside a zone"
+            nextAt.flag = now + 2
+            return
+        end
+    end
+    local chosenFlag = type(CFG.SelectedFlag) == "string" and CFG.SelectedFlag or "Any Flag"
+    local fCmds = modules.flags
+    if fCmds then
+        if type(fCmds.PlayerHasActiveFlag) == "function" and chosenFlag ~= "Any Flag" then
+            local okAct, act = pcall(fCmds.PlayerHasActiveFlag, chosenFlag)
+            if okAct and act == true then
+                notes.flags = ("active %s in zone"):format(chosenFlag)
+                nextAt.flag = now + 10
+                return
+            end
+        end
+        if type(fCmds.GetActiveFlag) == "function" and zone then
+            local okAct, active = pcall(fCmds.GetActiveFlag, 1, zone)
+            if okAct and type(active) == "table" and tonumber(active.EndTime) then
+                local left = active.EndTime - serverClock()
+                if left > 12 then
+                    notes.flags = ("active %s (%ds)"):format(tostring(active.FlagId or "flag"), math.floor(left))
+                    nextAt.flag = now + math.min(left - 8, CFG.FlagInterval)
+                    return
+                end
+            end
+        end
+    end
+    local flagsFolder = thingsFolder("Flags")
+    local pt = position()
+    if flagsFolder and pt then
+        for _, child in ipairs(flagsFolder:GetChildren()) do
+            local pos = modelPosition(child)
+            if pos and (pos - pt).Magnitude <= 140 then
+                notes.flags = "flag already nearby"
+                nextAt.flag = now + 12
+                return
+            end
+        end
+    end
     for _, item in ipairs(stackList(inventory(save, "Misc"))) do
         if not alive or not enabled.autoFlags then return end
-        if item.id:match(" Flag$") and allowAll(picked.flags, item.id) then
+        local matchChosen = (chosenFlag == "Any Flag" and allowAll(picked.flags, item.id)) or (item.id == chosenFlag)
+        if item.id:match(" Flag$") and matchChosen and item.amount > 0 then
             nextAt.flag = now + CFG.FlagInterval
             local ok, message = invoke("FlexibleFlags_Consume", item.id, item.uid, 1)
             if not alive or not enabled.autoFlags then return end
@@ -2891,7 +3191,7 @@ local function flagTick()
             return
         end
     end
-    notes.flags = "no selected flags in inventory"
+    notes.flags = "no " .. (chosenFlag == "Any Flag" and "selected flags" or chosenFlag) .. " in inventory"
 end
 
 local function secretRoomTick()
@@ -3355,23 +3655,45 @@ local function doQuestTick()
     notes.doQuest = ("working on %d quest goal(s) (type %s)"):format(#activeGoals, tostring(activeGoals[1].goal.Type))
 end
 
--- Auto Use Sprinkler: keeps a Breakable Sprinkler running in the current island
--- without wasting charges while one is already active (> 15s left).
+-- Auto Use Sprinkler: keeps a Breakable Sprinkler running in the current zone
+-- using SprinklerCmds.PlayerHasActiveSprinkler + GetActiveSprinkler + world check.
 function CFG.SprinklerTick()
     local now = os.clock()
     if now < nextAt.sprinkler then return end
     local save = getSave()
     if not save then notes.sprinkler = "waiting for profile"; return end
     local zone = currentZone()
-    if not zone then notes.sprinkler = "stand inside a zone"; return end
+    if not zone then notes.sprinkler = "stand inside a zone"; nextAt.sprinkler = now + 2; return end
     local spCmds = modules.sprinklers
-    if spCmds and type(spCmds.GetActiveSprinkler) == "function" then
-        local ok, active = pcall(spCmds.GetActiveSprinkler, zone)
-        if ok and type(active) == "table" and tonumber(active.EndTime) then
-            local left = active.EndTime - serverClock()
-            if left > 15 then
-                notes.sprinkler = ("active in %s (%ds left)"):format(zone, math.floor(left))
-                nextAt.sprinkler = now + math.min(left - 10, CFG.SprinklerInterval)
+    if spCmds then
+        if type(spCmds.GetActiveSprinkler) == "function" then
+            local ok, active = pcall(spCmds.GetActiveSprinkler, zone)
+            if ok and type(active) == "table" and tonumber(active.EndTime) then
+                local left = active.EndTime - serverClock()
+                if left > 15 then
+                    notes.sprinkler = ("active in %s (%ds left)"):format(zone, math.floor(left))
+                    nextAt.sprinkler = now + math.min(left - 10, CFG.SprinklerInterval)
+                    return
+                end
+            end
+        end
+        if type(spCmds.PlayerHasActiveSprinkler) == "function" then
+            local okHas, has = pcall(spCmds.PlayerHasActiveSprinkler, "Breakable Sprinkler")
+            if okHas and has == true then
+                notes.sprinkler = "active in " .. zone
+                nextAt.sprinkler = now + CFG.SprinklerInterval
+                return
+            end
+        end
+    end
+    local spFolder = thingsFolder("Sprinklers")
+    local pt = position()
+    if spFolder and pt then
+        for _, child in ipairs(spFolder:GetChildren()) do
+            local pos = modelPosition(child)
+            if pos and (pos - pt).Magnitude <= 140 then
+                notes.sprinkler = "sprinkler already nearby"
+                nextAt.sprinkler = now + CFG.SprinklerInterval
                 return
             end
         end
@@ -3388,6 +3710,280 @@ function CFG.SprinklerTick()
         end
     end
     notes.sprinkler = "no Breakable Sprinkler in inventory"
+end
+
+-- Auto Use TNT / TNT Crate: only consumes when standing inside an active zone.
+function CFG.TNTTick()
+    local now = os.clock()
+    if now < nextAt.tnt then return end
+    local save = getSave()
+    if not save then notes.tnt = "waiting for profile"; return end
+    local zone = currentZone()
+    if not zone then notes.tnt = "stand inside a zone"; nextAt.tnt = now + 2; return end
+    local hasTNT = false
+    for _, item in ipairs(stackList(inventory(save, "Misc"))) do
+        if item.id == "TNT" and item.amount > 0 then hasTNT = true; break end
+    end
+    if not hasTNT then notes.tnt = "no TNT in inventory"; nextAt.tnt = now + 5; return end
+    nextAt.tnt = now + CFG.TNTInterval
+    local ok, msg = invoke("TNT_Consume")
+    if not alive or not enabled.autoTNT then return end
+    notes.tnt = ok == true and ("used TNT in " .. zone) or tostring(msg or "cannot use here")
+    if ok == true then nextAt.save = 0 end
+end
+
+function CFG.TNTCrateTick()
+    local now = os.clock()
+    if now < nextAt.tntCrate then return end
+    local save = getSave()
+    if not save then notes.tntCrate = "waiting for profile"; return end
+    local zone = currentZone()
+    if not zone then notes.tntCrate = "stand inside a zone"; nextAt.tntCrate = now + 2; return end
+    local hasCrate = false
+    for _, item in ipairs(stackList(inventory(save, "Misc"))) do
+        if item.id == "TNT Crate" and item.amount > 0 then hasCrate = true; break end
+    end
+    if not hasCrate then notes.tntCrate = "no TNT Crate in inventory"; nextAt.tntCrate = now + 5; return end
+    nextAt.tntCrate = now + CFG.TNTCrateInterval
+    local ok, msg = invoke("TNT_Crate_Consume")
+    if not alive or not enabled.autoTNTCrate then return end
+    notes.tntCrate = ok == true and ("used TNT Crate in " .. zone) or tostring(msg or "cannot use here")
+    if ok == true then nextAt.save = 0 end
+end
+
+-- Auto Equip Enchant: Priority Coins -> Strong Pets -> Tap Power -> Lightning -> Other,
+-- strictly selecting the highest tier allowed by the player's Enchant Mastery.
+CFG.EnchantPriority = {
+    "Coins", "Strong Pets", "Tap Power", "Lightning",
+    "Super Lightning", "Criticals", "Diamonds", "Treasure Hunter",
+    "Lucky Eggs", "Chest Breaker", "Mega Chest Breaker", "Fortune",
+    "Explosive", "Tap Teamwork", "Fireworks", "Blast",
+    "Super Magnet", "Magnet", "Fruity", "Happy Pets", "Large Taps", "Swift Taps",
+}
+function CFG.CanUseEnchantTier(tier, save)
+    if tier <= 7 then return true end
+    local mCmds = modules.mastery
+    if mCmds and type(mCmds.CanUseEnchant) == "function" then
+        local ok, can = pcall(mCmds.CanUseEnchant, tier)
+        if ok and type(can) == "boolean" then return can end
+    end
+    local xp = save and type(save.Mastery) == "table" and tonumber(save.Mastery.Enchants) or 0
+    -- PS99 Enchant Mastery perk levels: Tier 8 = 60, Tier 9 = 80, Tier 10 = 90
+    if tier == 8 then return xp >= 195000 end
+    if tier == 9 then return xp >= 1100000 end
+    if tier >= 10 then return xp >= 2700000 end
+    return false
+end
+
+function CFG.AutoEquipEnchantTick()
+    local now = os.clock()
+    if now < nextAt.enchant then return end
+    local save = getSave()
+    if not save then notes.enchant = "waiting for profile"; return end
+    nextAt.enchant = now + CFG.EnchantInterval
+
+    local maxSlots = 1
+    local encCmds = modules.enchants
+    if encCmds and type(encCmds.GetMaxEquippedEnchants) == "function" then
+        local okMax, val = pcall(encCmds.GetMaxEquippedEnchants)
+        if okMax and type(val) == "number" and val > 0 then maxSlots = val end
+    elseif type(save.MaxEnchantsEquipped) == "number" then
+        maxSlots = save.MaxEnchantsEquipped
+    elseif ranks[save.Rank] and type(ranks[save.Rank].MaxEnchantsEquipped) == "number" then
+        maxSlots = ranks[save.Rank].MaxEnchantsEquipped
+    end
+
+    local owned = stackList(inventory(save, "Enchant"))
+    local usable = {}
+    for _, item in ipairs(owned) do
+        if CFG.CanUseEnchantTier(item.tier, save) then
+            usable[#usable + 1] = item
+        end
+    end
+    if #usable == 0 then notes.enchant = "no usable enchants"; return end
+
+    local prioMap = {}
+    for idx, name in ipairs(CFG.EnchantPriority) do
+        prioMap[name] = idx
+    end
+    table.sort(usable, function(a, b)
+        local pa = prioMap[a.id] or 999
+        local pb = prioMap[b.id] or 999
+        if pa ~= pb then return pa < pb end
+        if a.tier ~= b.tier then return a.tier > b.tier end
+        return tostring(a.uid) < tostring(b.uid)
+    end)
+
+    -- Pick highest usable tier per unique enchant first following priority order,
+    -- then fill remaining slots with best available enchants if needed.
+    local desired = {}
+    local usedUid = {}
+    local seenType = {}
+    for _, item in ipairs(usable) do
+        if #desired >= maxSlots then break end
+        if not seenType[item.id] then
+            seenType[item.id] = true
+            usedUid[item.uid] = true
+            desired[#desired + 1] = item
+        end
+    end
+    if #desired < maxSlots then
+        for _, item in ipairs(usable) do
+            if #desired >= maxSlots then break end
+            if not usedUid[item.uid] then
+                usedUid[item.uid] = true
+                desired[#desired + 1] = item
+            end
+        end
+    end
+
+    local equipped = type(save.EquippedEnchants) == "table" and save.EquippedEnchants or {}
+    local equippedSet = {}
+    for _, uid in pairs(equipped) do
+        if type(uid) == "string" then equippedSet[uid] = true end
+    end
+    local desiredSet = {}
+    for _, item in ipairs(desired) do
+        desiredSet[item.uid] = true
+    end
+
+    local changed = false
+    for slotIdx, uid in pairs(equipped) do
+        if type(uid) == "string" and not desiredSet[uid] then
+            pcall(fire, "Enchants_ClearSlot", tonumber(slotIdx) or slotIdx)
+            changed = true
+            task.wait(0.05)
+        end
+    end
+    for _, item in ipairs(desired) do
+        if not equippedSet[item.uid] then
+            pcall(fire, "Enchants_Equip", item.uid)
+            changed = true
+            task.wait(0.05)
+        end
+    end
+    if changed then nextAt.save = 0 end
+    local names = {}
+    for _, item in ipairs(desired) do names[#names + 1] = ("%s T%d"):format(item.id, item.tier) end
+    notes.enchant = ("equipped (%d/%d): %s"):format(#desired, maxSlots, table.concat(names, ", "))
+end
+
+-- White Screen + Reduce CPU / RAM
+CFG.PerfState = {
+    whiteGui = nil,
+    lightingSaved = {},
+    qualitySaved = nil,
+    fpsRestored = false,
+}
+
+function CFG.SyncWhiteScreen()
+    local st = CFG.PerfState
+    local active = alive and enabled.whiteScreen
+    local RunService = game:GetService("RunService")
+    pcall(function() RunService:Set3dRenderingEnabled(not active) end)
+    if active then
+        if not st.whiteGui or not st.whiteGui.Parent then
+            local parent = nil
+            pcall(function()
+                if type(gethui) == "function" then parent = gethui() end
+            end)
+            if not parent then
+                pcall(function() parent = game:GetService("CoreGui") end)
+            end
+            if not parent then
+                parent = LocalPlayer:FindFirstChild("PlayerGui")
+            end
+            if parent then
+                local gui = Instance.new("ScreenGui")
+                gui.Name = "StephHUB_WhiteScreen"
+                gui.ResetOnSpawn = false
+                gui.IgnoreGuiInset = true
+                gui.DisplayOrder = 100000
+                local bg = Instance.new("Frame")
+                bg.Size = UDim2.fromScale(1, 1)
+                bg.BackgroundColor3 = Color3.new(1, 1, 1)
+                bg.BorderSizePixel = 0
+                bg.Parent = gui
+                local lbl = Instance.new("TextLabel")
+                lbl.Size = UDim2.new(1, 0, 0, 40)
+                lbl.Position = UDim2.new(0, 0, 0.5, -20)
+                lbl.BackgroundTransparency = 1
+                lbl.Font = Enum.Font.GothamBold
+                lbl.Text = "Steph HUB  -  White Screen Active (3D Render Paused)"
+                lbl.TextColor3 = Color3.fromRGB(60, 65, 80)
+                lbl.TextSize = 18
+                lbl.Parent = bg
+                gui.Parent = parent
+                st.whiteGui = gui
+            end
+        end
+        notes.whiteScreen = "on (3D render disabled)"
+    else
+        if st.whiteGui then
+            pcall(function() st.whiteGui:Destroy() end)
+            st.whiteGui = nil
+        end
+        notes.whiteScreen = "off"
+    end
+end
+
+function CFG.SyncReduceCpuRam()
+    local st = CFG.PerfState
+    local active = alive and enabled.reduceCpuRam
+    local Lighting = game:GetService("Lighting")
+    local setfps = setfpscap or env.setfpscap
+    if active then
+        if st.qualitySaved == nil then
+            pcall(function() st.qualitySaved = settings().Rendering.QualityLevel end)
+            pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+        end
+        if type(setfps) == "function" then
+            pcall(setfps, math.clamp(tonumber(CFG.LowCpuFpsCap) or 15, 5, 60))
+            st.fpsRestored = false
+        end
+        if st.lightingSaved.GlobalShadows == nil then
+            st.lightingSaved.GlobalShadows = Lighting.GlobalShadows
+            pcall(function() Lighting.GlobalShadows = false end)
+        end
+        for _, child in ipairs(Lighting:GetChildren()) do
+            if child:IsA("PostEffect") and child.Enabled then
+                if st.lightingSaved[child] == nil then st.lightingSaved[child] = true end
+                pcall(function() child.Enabled = false end)
+            end
+        end
+        suppressEffects("Breakables", optBreakableEffects)
+        suppressEffects("Pets", optPetEffects)
+        local debris = workspace:FindFirstChild("__DEBRIS")
+        if debris then
+            for _, child in ipairs(debris:GetChildren()) do
+                pcall(function() child:Destroy() end)
+            end
+        end
+        pcall(collectgarbage, "step", 200)
+        notes.reduceCpu = ("on (%d fps cap)"):format(math.floor(tonumber(CFG.LowCpuFpsCap) or 15))
+    else
+        if st.qualitySaved ~= nil then
+            local savedQ = st.qualitySaved
+            st.qualitySaved = nil
+            pcall(function() settings().Rendering.QualityLevel = savedQ end)
+        end
+        if not st.fpsRestored and type(setfps) == "function" then
+            st.fpsRestored = true
+            pcall(setfps, 0)
+        end
+        if st.lightingSaved.GlobalShadows ~= nil then
+            local gs = st.lightingSaved.GlobalShadows
+            st.lightingSaved.GlobalShadows = nil
+            pcall(function() Lighting.GlobalShadows = gs end)
+        end
+        for fx, _ in pairs(st.lightingSaved) do
+            if typeof(fx) == "Instance" and fx.Parent then
+                pcall(function() fx.Enabled = true end)
+            end
+            st.lightingSaved[fx] = nil
+        end
+        notes.reduceCpu = "off"
+    end
 end
 
 -- Fast Farm [BETA]: Heartbeat-driven bypass that skips client tap throttle,
@@ -3438,8 +4034,19 @@ function CFG.SyncFastFarmBeta()
             notes.betaFarm = "waiting for breakables"
             return
         end
+        if #validList > 1 then
+            table.sort(validList, function(a, b)
+                local aChest = enabled.chestFirst and tostring(a.model:GetAttribute("BreakableID") or a.model.Name):lower():find("chest", 1, true) ~= nil
+                local bChest = enabled.chestFirst and tostring(b.model:GetAttribute("BreakableID") or b.model.Name):lower():find("chest", 1, true) ~= nil
+                if aChest ~= bChest then return aChest end
+                local ap, bp = modelPosition(a.model), modelPosition(b.model)
+                local ad = ap and (ap - point).Magnitude or math.huge
+                local bd = bp and (bp - point).Magnitude or math.huge
+                return ad < bd
+            end)
+        end
         -- 1. Multi-target tap damage burst (bypasses 8/s BreakableFrontend throttle)
-        local burstMax = math.min(#validList, math.max(CFG.FarmBurst or 12, 16))
+        local burstMax = math.min(#validList, math.max(CFG.FarmBurst or 12, 20))
         for i = 1, burstMax do
             fire("Breakables_PlayerDealDamage", validList[i].uid)
         end
@@ -3844,6 +4451,764 @@ local function hopTick()
     notes.hop = "no low-player server found"
 end
 
+-- =========================================================================
+-- Current Event: Pumpkin Tycoon (Part 1 + Part 2 Zones 1..8, Wild Pets, Turkey)
+-- =========================================================================
+CFG.EventOpts = {
+    moveMode = "Teleport", -- "Teleport" | "Legit Walk"
+    keepRung = 4,          -- 0=Off, 1=Basic..8=Secret
+    huntMinTier = 0,       -- 0=Any, 1=Uncommon, 2=Rare, 3=Epic, 4=Huge
+    huntVariant = false,
+    huntUltraHuge = true,
+    catchMinNet = "Auto",  -- "Auto" | "Pet Net" | "Ultra Pet Net"
+    merchantBands = { RarePlus = true, EpicPlus = true, LegendaryPlus = true, MythicalPlus = true, ExoticPlus = true },
+    upgradeTracks = { SpawnLuck = true, PumpkinCoins = true, PumpkinDamage = true, RespawnSpeed = true, StockSlots = true, AutoBreakRules = true, ChaseOdds = true, EggLuck = true, MerchantLuck = true },
+    cocoaBoosts = { PumpkinTycoonCoins1 = true, PumpkinTycoonDamage1 = true, PumpkinTycoonIslandLuck1 = true },
+    pumpkinBoosts = { ["Patch Coin Boost"] = true, ["Pumpkin Damage Boost"] = true, ["Island Luck Boost"] = true },
+}
+
+CFG.Event = {
+    ZONES = {
+        { Section = "CocoaCabin",  Name = "Cocoa Cabin",   Egg = "Cocoa Cabin Egg",   Part = 1 },
+        { Section = "AppleOrchard",Name = "Apple Orchard", Egg = "Apple Orchard Egg", Part = 1 },
+        { Section = "HayrideHill", Name = "Hayride Hill",  Egg = "Hayride Hill Egg",  Part = 1 },
+        { Section = "CiderMill",   Name = "Cider Mill",    Egg = "Cider Mill Egg",    Part = 1 },
+        { Section = "GoldenGrove", Name = "Golden Grove",  Egg = "Golden Grove Egg",  Part = 1 },
+        { Section = "Zone6",       Name = "Pine Woods",    Egg = "Pine Woods Egg",    Part = 2 },
+        { Section = "Zone7",       Name = "Maple Creek",   Egg = "Maple Creek Egg",   Part = 2 },
+        { Section = "Zone8",       Name = "Golden Ridge",  Egg = "Golden Ridge Egg",  Part = 2 },
+    },
+    LADDER = { "Basic", "Rare", "Epic", "Legendary", "Mythical", "Exotic", "Divine", "Secret" },
+    NET = {
+        Buy = "NZ_Commit", BuyBand = "FZ_Reserve", CocoaBuyTime = "VB_Extend",
+        SetAutoBreak = "QW_Policy", SetLock = "KT_Shelter", PlaceStock = "XC_Allocate",
+        SetAutoPlace = "JD_Prefer", SetAutoMerchant = "HM_Sustain", UpgradeBuy = "OQ_Advance",
+        GiftOpen = "YR_Hydrate", Complete = "BT_Settle", Complete2 = "MH_Conclude",
+        Rebirth = "EW_Renew", CatchWild = "RU_Ensnare", CatchSighting = "PV_Glimpse",
+        SetHunt = "LF_Pursue", Cannon = "TC_Launch", BuyNet = "ZK_Barter",
+        NetShelf = "QS_Survey", SetAutoNets = "GN_Restock",
+    },
+    next = {
+        opt = 0, tele = 0, egg = 0, btn = 0, rebirth = 0, keep = 0, breakP = 0,
+        merch = 0, plant = 0, upg = 0, cocoa = 0, boost = 0, gift = 0,
+        hunt = 0, wild = 0, net = 0, turkey = 0, rare = 0,
+    },
+    walkTarget = nil,
+}
+
+function CFG.Event.Cmds()
+    if modules.pumpkinTycoon then return modules.pumpkinTycoon end
+    local lib = RS:FindFirstChild("Library")
+    local cli = lib and lib:FindFirstChild("Client")
+    local pt = cli and cli:FindFirstChild("PumpkinTycoonCmds")
+    if pt then
+        local ok, mod = pcall(require, pt)
+        if ok and type(mod) == "table" then modules.pumpkinTycoon = mod; return mod end
+    end
+    return nil
+end
+
+function CFG.Event.Feature(name)
+    local cmds = CFG.Event.Cmds()
+    if cmds and type(cmds.Feature) == "function" then
+        local ok, f = pcall(cmds.Feature, name)
+        if ok and type(f) == "table" then return f end
+    end
+    return nil
+end
+
+function CFG.Event.Plot()
+    local island = CFG.Event.Feature("Island")
+    if island and type(island.Plot) == "function" then
+        local ok, p = pcall(island.Plot)
+        if ok and p then return p end
+    end
+    return nil
+end
+
+function CFG.Event.PlotInvoke(plot, verb, ...)
+    if not plot then return false, "no plot" end
+    if type(plot.Invoke) == "function" then
+        local ok, r1, r2, r3 = pcall(plot.Invoke, plot, verb, ...)
+        if ok then return r1, r2, r3 end
+    end
+    local pid = type(plot.GetId) == "function" and plot:GetId() or plot.Id
+    if pid then
+        return invoke("Plots_Invoke", pid, verb, ...)
+    end
+    return false, "plot id missing"
+end
+
+function CFG.Event.Currency(save, currId)
+    local c = inventory(save, "Currency")
+    if c then
+        for _, entry in pairs(c) do
+            if type(entry) == "table" and entry.id == currId then
+                return tonumber(entry._am) or 0
+            end
+        end
+    end
+    local lib = RS:FindFirstChild("Library")
+    local itemsMod = lib and lib:FindFirstChild("Items")
+    if itemsMod then
+        local ok, items = pcall(require, itemsMod)
+        if ok and type(items) == "table" and type(items.Currency) == "function" then
+            local ok2, obj = pcall(items.Currency, currId)
+            if ok2 and type(obj) == "table" and type(obj.CountAny) == "function" then
+                local ok3, val = pcall(obj.CountAny, obj)
+                if ok3 and type(val) == "number" then return val end
+            end
+        end
+    end
+    return 0
+end
+
+function CFG.Event.MoveTo(targetPos)
+    if typeof(targetPos) ~= "Vector3" then return false end
+    local ch = LocalPlayer.Character
+    local root = ch and (ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart)
+    if not root then return false end
+    local dist = (root.Position - targetPos).Magnitude
+    if dist <= 7 then return true end
+    if CFG.EventOpts.moveMode == "Legit Walk" and dist < 600 then
+        local hum = ch:FindFirstChildOfClass("Humanoid")
+        if hum then
+            pcall(function() hum:MoveTo(targetPos) end)
+            return true
+        end
+    end
+    return snapTo(targetPos)
+end
+
+function CFG.Event.InInstance()
+    local inst = modules.instancing
+    if inst and type(inst.Get) == "function" then
+        local ok, cur = pcall(inst.Get)
+        if ok and type(cur) == "table" and cur.instanceID == "PumpkinTycoon" then
+            return true
+        end
+    end
+    local things = thingsFolder("Instances")
+    if things and things:FindFirstChild("PumpkinTycoon") then
+        local p = CFG.Event.Plot()
+        if p then return true end
+    end
+    return false
+end
+
+function CFG.Event.Enter()
+    local inst = modules.instancing
+    if inst and type(inst.Get) == "function" then
+        local ok, cur = pcall(inst.Get)
+        if ok and type(cur) == "table" and cur.instanceID == "PumpkinTycoon" then
+            return true, "already inside Pumpkin Tycoon"
+        end
+        if type(inst.GetEnterPart) == "function" then
+            local okE, part = pcall(inst.GetEnterPart, "PumpkinTycoon")
+            if okE and typeof(part) == "Instance" and part:IsA("BasePart") then
+                snapTo(part.Position)
+                task.wait(0.25)
+            end
+        end
+    end
+    local ok, msg = invoke("Instancing_Enter", "PumpkinTycoon")
+    if ok == true then return true, "entered Pumpkin Tycoon" end
+    return false, tostring(msg or "find Pumpkin Tycoon portal")
+end
+
+function CFG.Event.OwnedZones(plot)
+    local btns = plot and type(plot.Save) == "function" and plot:Save("Buttons") or {}
+    local maxZ = 1
+    for i = 1, #CFG.Event.ZONES do
+        local z = CFG.Event.ZONES[i]
+        if btns and (btns[z.Section .. "_Zone"] ~= nil or btns[z.Section .. "_Egg"] ~= nil) then
+            maxZ = i
+        end
+    end
+    return maxZ, btns or {}
+end
+
+function CFG.Event.ZonePos(plot, zIdx)
+    if not plot then return nil end
+    local z = CFG.Event.ZONES[zIdx]
+    local model = type(plot.GetModel) == "function" and plot:GetModel() or nil
+    local island = CFG.Event.Feature("Island")
+    local decor = island and type(island.Decor) == "function" and island.Decor(plot) or nil
+    for _, container in ipairs({ decor, model }) do
+        if container and z then
+            local eggModel = container:FindFirstChild(z.Egg, true) or container:FindFirstChild(z.Section .. "_Egg", true)
+            if eggModel then
+                local p = modelPosition(eggModel)
+                if p then return p + Vector3.new(0, 2, 6), modelPosition(eggModel) end
+            end
+            local zonePart = container:FindFirstChild("WildArea_" .. zIdx, true) or container:FindFirstChild(z.Section, true)
+            if zonePart then
+                local p = modelPosition(zonePart)
+                if p then return p, p end
+            end
+        end
+    end
+    return model and modelPosition(model) or nil, nil
+end
+
+function CFG.Event.Optimize(now)
+    if now < CFG.Event.next.opt then return end
+    CFG.Event.next.opt = now + 1.5
+    local Lighting = game:GetService("Lighting")
+    for _, name in ipairs({ "PumpkinFxFlash", "PumpkinFxDim" }) do
+        local fx = Lighting:FindFirstChild(name)
+        if fx then pcall(function() fx:Destroy() end) end
+    end
+    local ptFX = CFG.Event.Feature("PumpkinFx")
+    if ptFX and type(ptFX.ClearAll) == "function" then pcall(ptFX.ClearAll) end
+    local instFolder = thingsFolder("Instances")
+    local ptInst = instFolder and instFolder:FindFirstChild("PumpkinTycoon")
+    if ptInst then
+        local shared = ptInst:FindFirstChild("PumpkinTycoonShared")
+        if shared then suppressEffects("Instances", optBreakableEffects) end
+        for _, child in ipairs(ptInst:GetDescendants()) do
+            if EFFECT_CLASSES[child.ClassName] then
+                if optBreakableEffects[child] == nil then optBreakableEffects[child] = child.Enabled end
+                pcall(function() child.Enabled = false end)
+            end
+        end
+    end
+    local islandsFolder = workspace:FindFirstChild("PumpkinTycoonIslands")
+    if islandsFolder then
+        for _, child in ipairs(islandsFolder:GetDescendants()) do
+            if EFFECT_CLASSES[child.ClassName] then
+                pcall(function() child.Enabled = false end)
+            end
+        end
+    end
+end
+
+function CFG.Event.TeleBestEgg(now, plot)
+    if now < CFG.Event.next.tele then return end
+    CFG.Event.next.tele = now + 2.0
+    local bestZ = CFG.Event.OwnedZones(plot)
+    local targetPos = CFG.Event.ZonePos(plot, bestZ)
+    if targetPos then
+        CFG.Event.MoveTo(targetPos)
+    end
+end
+
+function CFG.Event.BuyButtons(now, plot, save)
+    if now < CFG.Event.next.btn then return end
+    CFG.Event.next.btn = now + 0.6
+    local _, btnsSave = CFG.Event.OwnedZones(plot)
+    local ptButtonsUtil = nil
+    pcall(function() ptButtonsUtil = require(RS.Library.Util.PumpkinTycoonButtons) end)
+    local p2Built = CFG.Event.Cmds() and type(CFG.Event.Cmds().OwnPlotPart2) == "function" and CFG.Event.Cmds().OwnPlotPart2()
+    local coins = CFG.Event.Currency(save, "PumpkinTycoonCoins")
+
+    if ptButtonsUtil then
+        local c1 = type(ptButtonsUtil.Complete) == "function" and ptButtonsUtil.Complete(btnsSave, false)
+        if c1 and not ptButtonsUtil.Completed(btnsSave) then
+            CFG.Event.PlotInvoke(plot, CFG.Event.NET.Complete)
+        end
+        if p2Built then
+            local c2 = type(ptButtonsUtil.Complete) == "function" and ptButtonsUtil.Complete(btnsSave, true)
+            if c2 and not ptButtonsUtil.Completed2(btnsSave) then
+                CFG.Event.PlotInvoke(plot, CFG.Event.NET.Complete2)
+            end
+        end
+        local maxZones = p2Built and #CFG.Event.ZONES or 5
+        local btnCmds = CFG.Event.Feature("Buttons")
+        local pMult = btnCmds and type(btnCmds.PriceMult) == "function" and btnCmds.PriceMult() or nil
+        local avail = ptButtonsUtil.Available(btnsSave, maxZones, p2Built == true, pMult)
+        for _, b in ipairs(avail or {}) do
+            local cost = ptButtonsUtil.Price(b, pMult)
+            if coins >= cost then
+                local spot = nil
+                local model = type(plot.GetModel) == "function" and plot:GetModel() or nil
+                if model and type(ptButtonsUtil.ResolvedSpot) == "function" then
+                    local okS, cf = pcall(ptButtonsUtil.ResolvedSpot, model, b)
+                    if okS and typeof(cf) == "CFrame" then spot = cf.Position end
+                end
+                if spot and CFG.EventOpts.moveMode == "Legit Walk" then
+                    CFG.Event.MoveTo(spot)
+                end
+                local ok = CFG.Event.PlotInvoke(plot, CFG.Event.NET.Buy, b.Id)
+                if ok == true then
+                    nextAt.save = 0
+                    CFG.Event.next.btn = now + 0.35
+                end
+                return
+            end
+        end
+    end
+end
+
+function CFG.Event.Rebirth(now, plot)
+    if now < CFG.Event.next.rebirth then return end
+    CFG.Event.next.rebirth = now + 3.0
+    local _, btnsSave = CFG.Event.OwnedZones(plot)
+    local ptButtonsUtil = nil
+    pcall(function() ptButtonsUtil = require(RS.Library.Util.PumpkinTycoonButtons) end)
+    if ptButtonsUtil and type(ptButtonsUtil.Complete) == "function" then
+        local ready = ptButtonsUtil.Complete(btnsSave, true)
+        if ready then
+            local ok = CFG.Event.PlotInvoke(plot, CFG.Event.NET.Rebirth)
+            if ok == true then
+                nextAt.save = 0
+                CFG.Event.next.rebirth = now + 5.0
+            end
+        end
+    end
+end
+
+function CFG.Event.BuyNearestEgg(now, plot, save)
+    if now < CFG.Event.next.egg then return end
+    -- Intelligent coin saving: if Auto Buy Buttons is active and we have an affordable
+    -- (or cheaper than 3 hatches) unbought zone/progression button, let buttons buy first!
+    if enabled.ptAutoBuyButtons then
+        local okU, ptBtns = pcall(require, RS.Library.Util.PumpkinTycoonButtons)
+        if okU and ptBtns then
+            local _, btnsSave = CFG.Event.OwnedZones(plot)
+            local p2Built = CFG.Event.Cmds() and CFG.Event.Cmds().OwnPlotPart2 and CFG.Event.Cmds().OwnPlotPart2()
+            local avail = ptBtns.Available(btnsSave, p2Built and #CFG.Event.ZONES or 5, p2Built == true)
+            if type(avail) == "table" and avail[1] and avail[1].Subclass == nil then
+                local nextCost = ptBtns.Price(avail[1])
+                local coins = CFG.Event.Currency(save, "PumpkinTycoonCoins")
+                if coins < nextCost * 1.15 then
+                    CFG.Event.next.egg = now + 1.5
+                    return
+                end
+            end
+        end
+    end
+    local bestZ = CFG.Event.OwnedZones(plot)
+    local ptPos, eggPos = CFG.Event.ZonePos(plot, bestZ)
+    local zInfo = CFG.Event.ZONES[bestZ]
+    if zInfo and ptPos then
+        local myPos = position()
+        if myPos and (myPos - (eggPos or ptPos)).Magnitude > 14 then
+            CFG.Event.MoveTo(ptPos)
+            CFG.Event.next.egg = now + 0.5
+            return
+        end
+        CFG.Event.next.egg = now + CFG.EggInterval
+        local count = math.clamp(tonumber(save and save.EggHatchCount) or 1, 1, CFG.EggMaxHatch)
+        invoke("Eggs_RequestPurchase", zInfo.Egg, count)
+    end
+end
+
+function CFG.Event.KeepPumpkins(now, plot)
+    if now < CFG.Event.next.keep then return end
+    CFG.Event.next.keep = now + 2.5
+    local wantRung = math.clamp(math.floor(tonumber(CFG.EventOpts.keepRung) or 4), 0, #CFG.Event.LADDER)
+    local abSave = plot:Save("AutoBreak")
+    local curBelow = type(abSave) == "table" and tonumber(abSave.Below) or 0
+    if curBelow ~= wantRung then
+        CFG.Event.PlotInvoke(plot, CFG.Event.NET.SetAutoBreak, wantRung)
+    end
+    local pedSave = plot:Save("Pedestals")
+    if wantRung > 0 and type(pedSave) == "table" then
+        for idx = 1, 8 do
+            local ped = pedSave[idx]
+            if type(ped) == "table" and ped.Unlocked and type(ped.Standing) == "table" then
+                local rung = tonumber(ped.Standing.R or ped.Standing.Rung or 0) or 0
+                if rung >= wantRung and not ped.Locked then
+                    CFG.Event.PlotInvoke(plot, CFG.Event.NET.SetLock, idx, true)
+                end
+            end
+        end
+    end
+end
+
+function CFG.Event.BreakPumpkins(now, plot)
+    if now < CFG.Event.next.breakP then return end
+    CFG.Event.next.breakP = now + 0.12
+    local reg = modules.breakables
+    if not reg or type(reg.AllByInstanceAndClass) ~= "function" then return end
+    local okList, list = pcall(reg.AllByInstanceAndClass, "Chest")
+    if not okList or type(list) ~= "table" then return end
+
+    local pedSave = plot:Save("Pedestals") or {}
+    local wantRung = enabled.ptAutoKeepPumpkins and (tonumber(CFG.EventOpts.keepRung) or 0) or 0
+    local targets = {}
+    for uid, rec in pairs(list) do
+        local attrs = type(rec) == "table" and rec.clientAttributes
+        local model = type(rec) == "table" and rec.model
+        if type(attrs) == "table" and type(attrs.PumpkinPedestal) == "number" and model and model.Parent then
+            local owner = model:GetAttribute("OwnerUsername")
+            if owner == nil or owner == LocalPlayer.Name then
+                local pedIdx = attrs.PumpkinPedestal
+                local rung = tonumber(attrs.PumpkinRung or 0) or 0
+                local isLocked = type(pedSave[pedIdx]) == "table" and pedSave[pedIdx].Locked == true
+                local isKept = wantRung > 0 and rung >= wantRung
+                if not isLocked and not isKept then
+                    targets[#targets + 1] = { uid = rec.uid or uid, model = model, rung = rung }
+                end
+            end
+        end
+    end
+    if #targets == 0 then return end
+    table.sort(targets, function(a, b) return a.rung > b.rung end)
+
+    for _, t in ipairs(targets) do
+        fire("Breakables_PlayerDealDamage", t.uid)
+    end
+    local mod = modules.pet
+    local pets = mod and type(mod.GetByPlayer) == "function" and mod.GetByPlayer(LocalPlayer) or nil
+    if type(pets) == "table" then
+        local cqRoute, joinBulk, idx = {}, {}, 1
+        for _, p in pairs(pets) do
+            local t = targets[((idx - 1) % #targets) + 1]
+            idx += 1
+            if t and not p.destroyed then
+                pcall(function() p:SetAnchored(false); p:SetTarget(t.model) end)
+                local euid = rawget(p, "euid")
+                if euid ~= nil then
+                    cqRoute[euid] = { t = 2, v = t.uid }
+                    joinBulk[euid] = t.uid
+                end
+            end
+        end
+        if next(cqRoute) ~= nil then pcall(fire, "CQ_Route", cqRoute) end
+        if next(joinBulk) ~= nil then pcall(fire, "Breakables_JoinPetBulk", joinBulk) end
+    end
+end
+
+function CFG.Event.Merchant(now, plot, save)
+    if now < CFG.Event.next.merch then return end
+    CFG.Event.next.merch = now + 2.0
+    if plot:Save("MerchantAuto") ~= true then
+        CFG.Event.PlotInvoke(plot, CFG.Event.NET.SetAutoMerchant, true)
+    end
+    local mSave = plot:Save("Merchant")
+    if type(mSave) == "table" then
+        local bands = CFG.EventOpts.merchantBands or {}
+        for _, bandId in ipairs({ "ExoticPlus", "MythicalPlus", "LegendaryPlus", "EpicPlus", "RarePlus" }) do
+            if bands[bandId] and tonumber(mSave[bandId]) and tonumber(mSave[bandId]) > 0 then
+                CFG.Event.PlotInvoke(plot, CFG.Event.NET.BuyBand, bandId)
+                break
+            end
+        end
+    end
+end
+
+function CFG.Event.PlantPumpkins(now, plot)
+    if now < CFG.Event.next.plant then return end
+    CFG.Event.next.plant = now + 1.5
+    if plot:Save("StockAutoPlace") ~= true then
+        CFG.Event.PlotInvoke(plot, CFG.Event.NET.SetAutoPlace, true)
+    end
+    local stock = plot:Save("Stock")
+    local peds = plot:Save("Pedestals")
+    if type(stock) ~= "table" or type(peds) ~= "table" then return end
+    local emptyIdx = nil
+    for i = 1, 8 do
+        if type(peds[i]) == "table" and peds[i].Unlocked == true and type(peds[i].Standing) ~= "table" then
+            emptyIdx = i
+            break
+        end
+    end
+    if not emptyIdx then return end
+    local band = nil
+    if type(stock[1]) == "string" then band = stock[1]
+    else
+        for k, v in pairs(stock) do
+            if type(v) == "number" and v > 0 then band = k; break end
+            if type(v) == "string" then band = v; break end
+        end
+    end
+    if band then
+        CFG.Event.PlotInvoke(plot, CFG.Event.NET.PlaceStock, emptyIdx, band)
+    end
+end
+
+function CFG.Event.Upgrades(now, plot, save)
+    if now < CFG.Event.next.upg then return end
+    CFG.Event.next.upg = now + 2.0
+    local tokens = CFG.Event.Currency(save, "PumpkinTokens")
+    if tokens <= 0 then return end
+    local tracks = CFG.EventOpts.upgradeTracks or {}
+    local upgCmds = CFG.Event.Feature("Upgrades")
+    for trackId, active in pairs(tracks) do
+        if active then
+            if upgCmds and type(upgCmds.CanBuy) == "function" then
+                local okC, canBuy = pcall(upgCmds.CanBuy, trackId)
+                if okC and not canBuy then continue end
+            end
+            local ok = CFG.Event.PlotInvoke(plot, CFG.Event.NET.UpgradeBuy, trackId)
+            if ok == true then
+                nextAt.save = 0
+                return
+            end
+        end
+    end
+end
+
+function CFG.Event.Cocoa(now, plot, save)
+    if now < CFG.Event.next.cocoa then return end
+    CFG.Event.next.cocoa = now + 5.0
+    local coins = CFG.Event.Currency(save, "PumpkinTycoonCoins")
+    if coins <= 0 then return end
+    local boostCmds = nil
+    pcall(function() boostCmds = require(RS.Library.Client.BoostCmds) end)
+    local cocoaOpts = CFG.EventOpts.cocoaBoosts or {}
+    for offerKey, want in pairs(cocoaOpts) do
+        if want then
+            local rem = boostCmds and type(boostCmds.GetTimer) == "function" and (boostCmds.GetTimer(offerKey) or 0) or 0
+            if rem < 3600 then
+                local ok = CFG.Event.PlotInvoke(plot, CFG.Event.NET.CocoaBuyTime, offerKey, 10)
+                if ok == true then
+                    nextAt.save = 0
+                    return
+                end
+            end
+        end
+    end
+end
+
+function CFG.Event.UseBoosts(now, save)
+    if now < CFG.Event.next.boost then return end
+    CFG.Event.next.boost = now + 4.0
+    local ptBoostUtil = nil
+    pcall(function() ptBoostUtil = require(RS.Library.Util.PumpkinTycoonBoosts) end)
+    local boostsWanted = CFG.EventOpts.pumpkinBoosts or {}
+    local list = {}
+    for _, item in ipairs(stackList(inventory(save, "Consumable"))) do
+        if boostsWanted[item.id] then
+            local okAllow = true
+            if ptBoostUtil and type(ptBoostUtil.Allowed) == "function" then
+                local okA, res = pcall(ptBoostUtil.Allowed, LocalPlayer, item.tier)
+                if okA then okAllow = res == true end
+            end
+            if okAllow then list[#list + 1] = item end
+        end
+    end
+    if #list == 0 then return end
+    -- Tier III boosts first (Tier 3 -> Tier 2 -> Tier 1)
+    table.sort(list, function(a, b)
+        if a.tier ~= b.tier then return a.tier > b.tier end
+        return a.id < b.id
+    end)
+    local chosen = list[1]
+    local ok = invoke("Consumables_Consume", chosen.uid, 1)
+    if ok == true then nextAt.save = 0 end
+end
+
+function CFG.Event.OpenFlannelGifts(now, save)
+    if now < CFG.Event.next.gift then return end
+    CFG.Event.next.gift = now + 2.5
+    local loot = stackList(inventory(save, "Lootbox"))
+    for _, item in ipairs(loot) do
+        if item.id == "Flannel Gift" and item.amount > 0 then
+            local amt = math.min(item.amount, 8)
+            local ch = LocalPlayer.Character
+            local ring = {}
+            local pos = ch and ch:GetPivot().Position or Vector3.zero
+            for i = 1, amt do
+                local ang = (i / amt) * math.pi * 2
+                ring[i] = pos + Vector3.new(10 * math.cos(ang), -3, 10 * math.sin(ang))
+            end
+            local ok = invoke(CFG.Event.NET.GiftOpen, item.uid, amt, ring, true)
+            if ok ~= true then
+                ok = invoke("KX_Release", item.uid, amt, nil)
+            end
+            if ok == true then nextAt.save = 0 end
+            return
+        end
+    end
+end
+
+function CFG.Event.HuntWild(now, plot)
+    if now < CFG.Event.next.hunt then return end
+    CFG.Event.next.hunt = now + 4.0
+    local huntSave = plot:Save("Hunt")
+    local wantMin = tonumber(CFG.EventOpts.huntMinTier) or 0
+    local wantVar = CFG.EventOpts.huntVariant == true
+    local wantUltra = CFG.EventOpts.huntUltraHuge ~= false
+    if type(huntSave) ~= "table" or huntSave.On ~= true or huntSave.Min ~= wantMin
+        or (huntSave.Variant == true) ~= wantVar or (huntSave.UltraOnHuge == true) ~= wantUltra then
+        CFG.Event.PlotInvoke(plot, CFG.Event.NET.SetHunt, {
+            On = true, Min = wantMin, Variant = wantVar, UltraOnHuge = wantUltra,
+        })
+    end
+end
+
+function CFG.Event.BestNet(save, isHuge)
+    local hasNet, hasUltra = 0, 0
+    for _, item in ipairs(stackList(inventory(save, "Misc"))) do
+        if item.id == "Pet Net" then hasNet += item.amount
+        elseif item.id == "Ultra Pet Net" then hasUltra += item.amount end
+    end
+    if isHuge and hasUltra > 0 then return "Ultra Pet Net" end
+    if CFG.EventOpts.catchMinNet == "Ultra Pet Net" and hasUltra > 0 then return "Ultra Pet Net" end
+    if hasUltra > 0 and CFG.EventOpts.catchMinNet == "Auto" and isHuge then return "Ultra Pet Net" end
+    if hasNet > 0 then return "Pet Net" end
+    if hasUltra > 0 then return "Ultra Pet Net" end
+    return nil
+end
+
+function CFG.Event.CatchWild(now, plot, save)
+    if now < CFG.Event.next.wild then return end
+    CFG.Event.next.wild = now + 3.2
+    local wildSave = plot:Save("Wild")
+    if type(wildSave) ~= "table" then return end
+    local wildMod = CFG.Event.Feature("Wild")
+    local spawned = wildMod and type(wildMod.All) == "function" and wildMod.All() or nil
+    for slotKey, entry in pairs(wildSave) do
+        local slot = tonumber(slotKey)
+        if slot and type(entry) == "table" and type(entry.P) == "string" then
+            local isHuge = entry.P:find("Huge", 1, true) ~= nil or entry.P:find("Titanic", 1, true) ~= nil
+            local net = CFG.Event.BestNet(save, isHuge)
+            if not net then return end
+            if type(spawned) == "table" and spawned[slot] and spawned[slot].CustomPet and spawned[slot].CustomPet.primaryPart then
+                local pPos = spawned[slot].CustomPet.primaryPart.Position
+                if CFG.EventOpts.moveMode == "Legit Walk" then CFG.Event.MoveTo(pPos) end
+            end
+            local ok = CFG.Event.PlotInvoke(plot, CFG.Event.NET.CatchWild, slot, net)
+            if ok == true then
+                nextAt.save = 0
+                return
+            end
+        end
+    end
+end
+
+function CFG.Event.BuyNets(now, plot)
+    if now < CFG.Event.next.net then return end
+    CFG.Event.next.net = now + 4.0
+    if plot:Save("NetStoreAuto") ~= true then
+        CFG.Event.PlotInvoke(plot, CFG.Event.NET.SetAutoNets, true)
+    end
+    local store = CFG.Event.Feature("Store")
+    if store and type(store.Shelf) == "function" then
+        local okS, shelf = pcall(store.Shelf)
+        if okS and type(shelf) == "table" and type(shelf.offers) == "table" then
+            for _, offer in ipairs(shelf.offers) do
+                if (offer.item == "Ultra Pet Net" or offer.item == "Pet Net") and (offer.left or 0) > 0 then
+                    local ok = invoke("Merchant_RequestPurchase", "PetNetStore", offer.slot, false, shelf.seed)
+                    if ok ~= true then
+                        CFG.Event.PlotInvoke(plot, CFG.Event.NET.BuyNet, offer.slot)
+                    end
+                    return
+                end
+            end
+        end
+    end
+end
+
+function CFG.Event.FightTurkey(now, plot)
+    if now < CFG.Event.next.turkey then return end
+    CFG.Event.next.turkey = now + 0.15
+    local reg = modules.breakables
+    if not reg or type(reg.AllByInstanceAndClass) ~= "function" then return end
+    local okList, list = pcall(reg.AllByInstanceAndClass, "Chest")
+    if not okList or type(list) ~= "table" then return end
+    local turkeyUid, turkeyModel = nil, nil
+    for uid, rec in pairs(list) do
+        local attrs = type(rec) == "table" and rec.clientAttributes
+        if type(attrs) == "table" and attrs.PumpkinTurkey == true and rec.model and rec.model.Parent then
+            turkeyUid, turkeyModel = rec.uid or uid, rec.model
+            break
+        end
+    end
+    if not turkeyModel then
+        local instFolder = thingsFolder("Instances")
+        local ptShared = instFolder and instFolder:FindFirstChild("PumpkinTycoon")
+            and instFolder.PumpkinTycoon:FindFirstChild("PumpkinTycoonShared")
+        local arena = ptShared and ptShared:FindFirstChild("TurkeyArena", true)
+        if arena and arena:GetAttribute("TurkeyAlive") == true then
+            local spawnPart = arena:FindFirstChild("TurkeySpawn", true)
+            if spawnPart and spawnPart:IsA("BasePart") then
+                local pt = position()
+                if pt and (pt - spawnPart.Position).Magnitude > 90 then
+                    if CFG.EventOpts.moveMode == "Teleport" then
+                        CFG.Event.PlotInvoke(plot, CFG.Event.NET.Cannon)
+                        task.wait(0.2)
+                    end
+                    CFG.Event.MoveTo(spawnPart.Position + Vector3.new(0, 4, 8))
+                end
+            end
+        end
+        return
+    end
+    local tPos = modelPosition(turkeyModel)
+    local pt = position()
+    if tPos and pt and (pt - tPos).Magnitude > 110 then
+        CFG.Event.MoveTo(tPos + Vector3.new(0, 4, 10))
+    end
+    fire("Breakables_PlayerDealDamage", turkeyUid)
+    local mod = modules.pet
+    local pets = mod and type(mod.GetByPlayer) == "function" and mod.GetByPlayer(LocalPlayer) or nil
+    if type(pets) == "table" then
+        local cqRoute, joinBulk = {}, {}
+        for _, p in pairs(pets) do
+            if not p.destroyed then
+                pcall(function() p:SetAnchored(false); p:SetTarget(turkeyModel) end)
+                local euid = rawget(p, "euid")
+                if euid ~= nil then
+                    cqRoute[euid] = { t = 2, v = turkeyUid }
+                    joinBulk[euid] = turkeyUid
+                end
+            end
+        end
+        if next(cqRoute) ~= nil then pcall(fire, "CQ_Route", cqRoute) end
+        if next(joinBulk) ~= nil then pcall(fire, "Breakables_JoinPetBulk", joinBulk) end
+    end
+end
+
+function CFG.Event.CatchRare(now, plot, save)
+    if now < CFG.Event.next.rare then return end
+    CFG.Event.next.rare = now + 0.5
+    local bestNet = CFG.Event.BestNet(save, true)
+    if not bestNet then return end
+    local turkeyMod = CFG.Event.Feature("Turkey")
+    if turkeyMod and type(turkeyMod.Sighting) == "function" and type(turkeyMod.Throw) == "function" then
+        local okS, exp = pcall(turkeyMod.Sighting)
+        if okS and exp ~= nil then
+            local okT = pcall(turkeyMod.Throw, bestNet)
+            if okT then CFG.Event.next.rare = now + 3.2; return end
+        end
+    end
+    for _, desc in ipairs(workspace:GetDescendants()) do
+        if desc:IsA("BasePart") then
+            local sid = desc:GetAttribute("PumpkinSighting")
+            if type(sid) == "string" and #sid > 0 then
+                CFG.Event.MoveTo(desc.Position + Vector3.new(0, 2, 8))
+                local ok = CFG.Event.PlotInvoke(plot, CFG.Event.NET.CatchSighting, sid, bestNet)
+                if ok == true then
+                    CFG.Event.next.rare = now + 3.2
+                    nextAt.save = 0
+                end
+                return
+            end
+        end
+    end
+end
+
+function CFG.Event.Tick()
+    local now = os.clock()
+    if enabled.optPumpkinTycoon then pcall(CFG.Event.Optimize, now) end
+    local save = getSave()
+    if not save then notes.event = "waiting for profile"; return end
+    if enabled.ptAutoUseBoosts then pcall(CFG.Event.UseBoosts, now, save) end
+    if enabled.ptAutoFlannelGifts then pcall(CFG.Event.OpenFlannelGifts, now, save) end
+    local plot = CFG.Event.Plot()
+    if not plot then notes.event = "enter Pumpkin Tycoon to run"; return end
+    if enabled.ptAutoFightTurkey then pcall(CFG.Event.FightTurkey, now, plot) end
+    if enabled.ptAutoCatchRare then pcall(CFG.Event.CatchRare, now, plot, save) end
+    if enabled.ptAutoBreakPumpkins then pcall(CFG.Event.BreakPumpkins, now, plot) end
+    if enabled.ptAutoKeepPumpkins then pcall(CFG.Event.KeepPumpkins, now, plot) end
+    if enabled.ptAutoBuyButtons then pcall(CFG.Event.BuyButtons, now, plot, save) end
+    if enabled.ptAutoRebirth then pcall(CFG.Event.Rebirth, now, plot) end
+    if enabled.ptAutoBuyMerchant then pcall(CFG.Event.Merchant, now, plot, save) end
+    if enabled.ptAutoPlantPumpkins then pcall(CFG.Event.PlantPumpkins, now, plot) end
+    if enabled.ptAutoBuyUpgrades then pcall(CFG.Event.Upgrades, now, plot, save) end
+    if enabled.ptAutoBuyCocoa then pcall(CFG.Event.Cocoa, now, plot, save) end
+    if enabled.ptAutoHuntWild then pcall(CFG.Event.HuntWild, now, plot) end
+    if enabled.ptAutoCatchWild then pcall(CFG.Event.CatchWild, now, plot, save) end
+    if enabled.ptAutoBuyNets then pcall(CFG.Event.BuyNets, now, plot) end
+    if enabled.ptAutoTeleBestEgg then pcall(CFG.Event.TeleBestEgg, now, plot) end
+    if enabled.ptAutoBuyEgg then pcall(CFG.Event.BuyNearestEgg, now, plot, save) end
+    notes.event = ("Pumpkin Tycoon (%s)"):format(CFG.EventOpts.moveMode)
+end
+
 local function stopWorker(name)
     local worker = workers[name]
     if not worker then return end
@@ -3928,27 +5293,38 @@ syncWorkers = function()
     syncGamepasses()
     syncGates()
     CFG.SyncFastFarmBeta()
+    CFG.SyncWhiteScreen()
+    CFG.SyncReduceCpuRam()
+    local eventWanted = enabled.optPumpkinTycoon or enabled.ptAutoTeleBestEgg or enabled.ptAutoBuyEgg
+        or enabled.ptAutoBuyButtons or enabled.ptAutoRebirth or enabled.ptAutoKeepPumpkins
+        or enabled.ptAutoBreakPumpkins or enabled.ptAutoBuyMerchant or enabled.ptAutoPlantPumpkins
+        or enabled.ptAutoBuyUpgrades or enabled.ptAutoBuyCocoa or enabled.ptAutoUseBoosts
+        or enabled.ptAutoFlannelGifts or enabled.ptAutoHuntWild or enabled.ptAutoCatchWild
+        or enabled.ptAutoBuyNets or enabled.ptAutoFightTurkey or enabled.ptAutoCatchRare
     local profileWanted = enabled.zoneTele or enabled.zoneBuy or enabled.autoQuest or enabled.autoDoQuest
         or enabled.autoRank or enabled.autoRebirth or enabled.autoEgg or enabled.worldTele
-        or enabled.autoBuyPetSlots or enabled.worldAdvance or enabled.unlockGamepasses
+        or enabled.autoBuyPetSlots or enabled.autoBuyEggSlots or enabled.autoForeverPack
+        or enabled.autoBuyUpgrades or enabled.autoEquipEnchant or enabled.worldAdvance or enabled.unlockGamepasses
         or enabled.autoKeys or enabled.autoGiftBags or enabled.autoFruits or enabled.autoPotions
         or enabled.autoFreeGifts or enabled.autoUltimate or enabled.autoSprinkler or enabled.autoDaycare or enabled.autoFlags
         or enabled.autoSecretRooms or enabled.autoTreehouse or enabled.autoFuse or enabled.autoCards
-        or enabled.autoRelics or enabled.autoMailClaim or enabled.autoDice
+        or enabled.autoRelics or enabled.autoMailClaim or enabled.autoDice or enabled.autoTNT or enabled.autoTNTCrate
+        or eventWanted
     local discoveryWanted = profileWanted or enabled.petSpeed or enabled.farm or enabled.fastFarmBeta or enabled.vacuum or enabled.tap or enabled.clickAura
     ensureWorker("profile", profileWanted, CFG.ProfileInterval, profileTick)
     ensureWorker("discovery", discoveryWanted, CFG.DiscoveryInterval, discoveryTick)
     if not discoveryWanted then heapObjects, heapCursor, treeScan = nil, nil, nil end
-    local petWanted = enabled.petSpeed or enabled.farm or enabled.fastFarmBeta
+    local petWanted = enabled.petSpeed or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.ptAutoFightTurkey
     if not petWanted and petState.hook then restorePetSpeed() end
     ensureWorker("pet", petWanted, CFG.PetInterval, petTick, function() enabled.petSpeed = false; enabled.farm = false; enabled.fastFarmBeta = false; restorePetSpeed() end)
     local tapRate = enabled.clickAura and CFG.AuraRate or (enabled.farm and CFG.FarmTapRate or CFG.TapRate)
+    if enabled.legitTap and not enabled.farm and not enabled.clickAura then tapRate = 8 end
     ensureWorker("tap", enabled.tap or enabled.farm or enabled.clickAura, 1 / math.clamp(math.min(tapRate, CFG.MaxTapRate), 1, 120), tapTick, function() enabled.tap = false; enabled.farm = false; enabled.clickAura = false end)
-    if (enabled.vacuum or enabled.farm or enabled.fastFarmBeta) and not orbState.hook then
+    if (enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins) and not orbState.hook then
         if not orbBackfillNeeded then nextAt.heap = math.min(nextAt.heap, os.clock() + CFG.HeapRetryInterval) end
         orbBackfillNeeded = true
     end
-    ensureWorker("vacuum", enabled.vacuum or enabled.farm or enabled.fastFarmBeta, CFG.VacuumRate, vacuumTick, function() enabled.vacuum = false; enabled.farm = false end)
+    ensureWorker("vacuum", enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins, CFG.VacuumRate, vacuumTick, function() enabled.vacuum = false; enabled.farm = false end)
     ensureWorker("tele", enabled.zoneTele, 0.5, teleTick, function() enabled.zoneTele = false end)
     ensureWorker("buy", enabled.zoneBuy, 0.5, buyTick, function() enabled.zoneBuy = false end)
     ensureWorker("quest", enabled.autoQuest, CFG.QuestInterval, questTick, function() enabled.autoQuest = false end)
@@ -3959,6 +5335,12 @@ syncWorkers = function()
     ensureWorker("world", enabled.worldTele, 0.5, worldTeleTick, function() enabled.worldTele = false end)
     ensureWorker("advance", enabled.worldAdvance, 1, CFG.AdvanceTick, function() enabled.worldAdvance = false end)
     ensureWorker("petSlot", enabled.autoBuyPetSlots, 1, petSlotTick, function() enabled.autoBuyPetSlots = false end)
+    ensureWorker("eggSlot", enabled.autoBuyEggSlots, 1, CFG.EggSlotTick, function() enabled.autoBuyEggSlots = false end)
+    ensureWorker("foreverPack", enabled.autoForeverPack, 2, CFG.ForeverPackTick, function() enabled.autoForeverPack = false end)
+    ensureWorker("upgrade", enabled.autoBuyUpgrades, 1.5, CFG.UpgradeTick, function() enabled.autoBuyUpgrades = false end)
+    ensureWorker("enchant", enabled.autoEquipEnchant, 1.5, CFG.AutoEquipEnchantTick, function() enabled.autoEquipEnchant = false end)
+    ensureWorker("tnt", enabled.autoTNT, 1, CFG.TNTTick, function() enabled.autoTNT = false end)
+    ensureWorker("tntCrate", enabled.autoTNTCrate, 1, CFG.TNTCrateTick, function() enabled.autoTNTCrate = false end)
     ensureWorker("keys", enabled.autoKeys, 1, keyTick, function() enabled.autoKeys = false end)
     ensureWorker("bags", enabled.autoGiftBags, 1, bagTick, function() enabled.autoGiftBags = false end)
     ensureWorker("fruits", enabled.autoFruits, 1, fruitTick, function() enabled.autoFruits = false end)
@@ -3976,10 +5358,15 @@ syncWorkers = function()
     ensureWorker("relics", enabled.autoRelics, 1, relicTick, function() enabled.autoRelics = false end)
     ensureWorker("mailClaim", enabled.autoMailClaim, 1, mailClaimTick, function() enabled.autoMailClaim = false end)
     ensureWorker("hop", enabled.serverHop, CFG.HopInterval, hopTick, function() enabled.serverHop = false end)
-    if not enabled.optBreakables then restoreEffects(optBreakableEffects) end
-    if not enabled.optPets and not enabled.hideEggFx then restoreEffects(optPetEffects) end
-    if enabled.optBreakables or enabled.optPets or enabled.hideEggFx then
-        ensureWorker("optimize", true, CFG.OptimizeInterval, optimizeTick, function() enabled.optBreakables = false; enabled.optPets = false end)
+    ensureWorker("pumpkinEvent", eventWanted, (enabled.ptAutoBreakPumpkins or enabled.ptAutoFightTurkey) and 0.12 or 0.4, CFG.Event.Tick)
+    if not eventWanted then notes.event = "off" end
+    if not enabled.optBreakables and not enabled.reduceCpuRam and not enabled.optPumpkinTycoon then restoreEffects(optBreakableEffects) end
+    if not enabled.optPets and not enabled.hideEggFx and not enabled.reduceCpuRam then restoreEffects(optPetEffects) end
+    if enabled.optBreakables or enabled.optPets or enabled.hideEggFx or enabled.reduceCpuRam then
+        ensureWorker("optimize", true, CFG.OptimizeInterval, function()
+            optimizeTick()
+            if enabled.reduceCpuRam then CFG.SyncReduceCpuRam() end
+        end, function() enabled.optBreakables = false; enabled.optPets = false end)
     else
         stopWorker("optimize")
         notes.optimize = "off"
@@ -3996,7 +5383,7 @@ syncWorkers = function()
         table.clear(petState.joinedTarget)
         notes.tap = "off"
     end
-    if not enabled.vacuum and not enabled.farm and not enabled.fastFarmBeta and not enabled.autoDoQuest then restoreOrbCapture(); notes.vacuum = "off" end
+    if not enabled.vacuum and not enabled.farm and not enabled.fastFarmBeta and not enabled.autoDoQuest and not enabled.ptAutoBreakPumpkins then restoreOrbCapture(); notes.vacuum = "off" end
 end
 
 updateToggles = function() end
@@ -4060,6 +5447,8 @@ cleanup = function()
     syncGamepasses()
     syncGates()
     CFG.SyncFastFarmBeta()
+    CFG.SyncWhiteScreen()
+    CFG.SyncReduceCpuRam()
     for name in pairs(workers) do stopWorker(name) end
     heapObjects, heapCursor, treeScan, targetScan, stats.pending = nil, nil, nil, nil, nil
     for _, request in pairs(requests) do
@@ -4075,7 +5464,7 @@ cleanup = function()
     restoreEffects(optPetEffects)
     destroyAuraPart()
     unpublish()
-    print("[PS99 CLEAN] unloaded")
+    print("[Steph HUB] unloaded")
 end
 
 local controller = {
@@ -4084,6 +5473,21 @@ local controller = {
     AllOff = allOff,
     Stop = cleanup,
     TeleportIsland = teleportToIslandMiddle,
+    EnterPumpkinTycoon = function()
+        return CFG.Event.Enter()
+    end,
+    SetEventOpt = function(key, value, subKey)
+        if subKey ~= nil and type(CFG.EventOpts[key]) == "table" then
+            CFG.EventOpts[key][subKey] = value
+            return true, CFG.EventOpts[key]
+        end
+        if CFG.EventOpts[key] == nil then return false, "unknown event opt" end
+        CFG.EventOpts[key] = value
+        return true, value
+    end,
+    GetEventOpts = function()
+        return CFG.EventOpts
+    end,
     TeleportBestWorld = function()
         local save = getSave()
         local bestW = bestUnlockedWorld(save)
@@ -4113,7 +5517,13 @@ local controller = {
         return true, pickCount(store)
     end,
     SetConfig = function(key, value)
-        if CFG[key] == nil or type(CFG[key]) ~= "number" then return false, "unknown knob" end
+        if CFG[key] == nil then return false, "unknown knob" end
+        if type(CFG[key]) == "string" then
+            CFG[key] = tostring(value)
+            syncWorkers()
+            return true, CFG[key]
+        end
+        if type(CFG[key]) ~= "number" then return false, "unknown knob" end
         local number = tonumber(value)
         if not number then return false, "not a number" end
         CFG[key] = number

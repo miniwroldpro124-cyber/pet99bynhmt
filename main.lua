@@ -1,15 +1,15 @@
 --[[
-    ZAPX / PS99 - loader v7.5
-    -----------------------
+    Steph HUB / PS99 - loader v8.0
+    ------------------------------
     One file boots everything:
 
         1. loading screen with real per-stage progress
         2. headless farm engine (ps99_engine_v3) - no second window ever exists
-        3. ZapHub interface (ZapLib) - the menu you see
+        3. Steph HUB interface (Steph HUB UI) - the menu you see
         4. one module per tab, fetched from the repo
         5. Status tab driven live from the engine controller
 
-    RightControl  window (ZapLib's own bind)
+    RightControl  window toggle
     X             unload
 ]]
 
@@ -18,18 +18,18 @@ local UIS = game:GetService("UserInputService")
 local Tween = game:GetService("TweenService")
 
 local player = Players.LocalPlayer
-assert(player, "[ZAPX] run this on the client")
+assert(player, "[Steph HUB] run this on the client")
 
 local REPO = "https://github.com/miniwroldpro124-cyber/pet99bynhmt"
-local COMMIT = "369d7eb"
-local VERSION = "7.9"
+local COMMIT = "main"
+local VERSION = "8.0"
 local PINNED = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/" .. COMMIT .. "/"
 local MIRROR_PINNED = "https://cdn.jsdelivr.net/gh/miniwroldpro124-cyber/pet99bynhmt@" .. COMMIT .. "/"
 local BASE = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/"
 local MIRROR = "https://cdn.jsdelivr.net/gh/miniwroldpro124-cyber/pet99bynhmt@main/"
 
 local playerGui = player:WaitForChild("PlayerGui", 30)
-assert(playerGui, "[ZAPX] PlayerGui never appeared")
+assert(playerGui, "[Steph HUB] PlayerGui never appeared")
 
 ----------------------------------------------------------------- loader shell
 
@@ -43,7 +43,7 @@ local function make(class, props, parent)
 end
 
 local loading = make("ScreenGui", {
-    Name = "ZAPX_LOADING",
+    Name = "STEPHHUB_LOADING",
     ResetOnSpawn = false,
     IgnoreGuiInset = true,
     DisplayOrder = 600,
@@ -63,7 +63,7 @@ make("TextLabel", {
     Position = UDim2.fromOffset(14, 12),
     BackgroundTransparency = 1,
     Font = Enum.Font.GothamBold,
-    Text = "ZAPX  -  PS99  " .. VERSION,
+    Text = "Steph HUB  -  PS99  " .. VERSION,
     TextColor3 = Color3.fromRGB(226, 232, 240),
     TextSize = 16,
     TextXAlignment = Enum.TextXAlignment.Left,
@@ -165,14 +165,16 @@ end
 -- is what the pinned commit fallback is for: it is immutable and can serve a
 -- stale-but-working copy rather than nothing.
 local function stamp(body)
-    return body:match("^%-%-%[%[%s*ZAPX v([%w%.]+)")
+    return body:match("^%-%-%[%[%s*Steph HUB v([%w%.]+)")
+        or body:match("^%-%-%[%[%s*Steph HUB / PS99 %- loader v([%w%.]+)")
+        or body:match("^%-%-%[%[%s*ZAPX v([%w%.]+)")
         or body:match("VERSION%s*=%s*\"([%w%.]+)\"")
         or VERSION
 end
 
 local function httpGet(relative)
     if type(readfile) == "function" then
-        for _, candidate in ipairs({ relative, "zaphub-src/" .. relative, "pet99/" .. relative }) do
+        for _, candidate in ipairs({ relative, "stephhub-src/" .. relative, "zaphub-src/" .. relative, "pet99/" .. relative }) do
             local ok, content = pcall(readfile, candidate)
             if ok and type(content) == "string" and #content > 32 then
                 return content
@@ -200,7 +202,7 @@ end
 local function fetch(relative, label)
     local body = httpGet(relative)
     if not body then
-        error("[ZAPX] download failed: " .. tostring(label or relative), 0)
+        error("[Steph HUB] download failed: " .. tostring(label or relative), 0)
     end
     return body
 end
@@ -208,7 +210,7 @@ end
 local function compile(source, label)
     local chunk, err = loadstring(source, "=" .. label)
     if not chunk then
-        error("[ZAPX] " .. label .. ": " .. tostring(err), 0)
+        error("[Steph HUB] " .. label .. ": " .. tostring(err), 0)
     end
     return chunk
 end
@@ -221,7 +223,7 @@ local function runBell(source, label)
     local chunk = compile(source, label)
     local ok, result = pcall(chunk)
     if not ok then
-        error("[ZAPX] " .. label .. " boot: " .. tostring(result), 0)
+        error("[Steph HUB] " .. label .. " boot: " .. tostring(result), 0)
     end
     return result
 end
@@ -295,17 +297,17 @@ local function boot()
         end
     end
     if type(engine) ~= "table" or type(engine.GetStatus) ~= "function" then
-        error("[ZAPX] engine loaded but published no controller - see [PS99 CLEAN] lines above", 0)
+        error("[Steph HUB] engine loaded but published no controller - see [PS99 CLEAN] lines above", 0)
     end
 
     ------------------------------------------------------------- interface
 
-    setStage("downloading ZapHub interface", 0.30)
+    setStage("downloading Steph HUB interface", 0.30)
     local lib = hostGlobal("ZapLib")
     if type(lib) ~= "table" or type(lib.Window) ~= "table" then
-        local source = fetch("zaphub.lua", "zaphub")
-        setStage("booting ZapHub interface", 0.40)
-        local returned = runBell(source, "zaphub")
+        local source = fetch("zaphub.lua", "steph_ui")
+        setStage("booting Steph HUB interface", 0.40)
+        local returned = runBell(source, "steph_ui")
         lib = type(returned) == "table" and returned or hostGlobal("ZapLib")
         if type(lib) == "table" then
             publishGlobal("ZapLib", lib)
@@ -313,7 +315,7 @@ local function boot()
     end
     local win = type(lib) == "table" and lib.Window or nil
     if type(win) ~= "table" then
-        error("[ZAPX] ZapHub loaded but published no window", 0)
+        error("[Steph HUB] UI loaded but published no window", 0)
     end
 
     -------------------------------------------------------------- ui helper
@@ -321,7 +323,7 @@ local function boot()
     setStage("loading element factories", 0.46)
     local builder = compile(fetch("lib/ui.lua", "ui"), "lib/ui")()
     if type(builder) ~= "function" then
-        error("[ZAPX] lib/ui did not return a builder", 0)
+        error("[Steph HUB] lib/ui did not return a builder", 0)
     end
     local ui = builder(lib, engine)
 
@@ -330,7 +332,7 @@ local function boot()
     setStage("loading tab manifest", 0.50)
     local manifest = compile(fetch("manifest.lua", "manifest"), "manifest")()
     if type(manifest) ~= "table" then
-        error("[ZAPX] manifest is not a table", 0)
+        error("[Steph HUB] manifest is not a table", 0)
     end
 
     local loaded, failed = 0, {}
@@ -398,7 +400,7 @@ local function boot()
 
     statusTab:CreateParagraph({
         Title = "Build",
-        Content = ("ZAPX %s - %d/%d tabs loaded"):format(VERSION, loaded, #manifest),
+        Content = ("Steph HUB %s - %d/%d tabs loaded"):format(VERSION, loaded, #manifest),
     })
 
     if #failed > 0 then
@@ -487,7 +489,7 @@ local function boot()
     end
 
     pcall(lib.CreateNotification, lib, {
-        Title = "ZAPX | PS99 " .. VERSION,
+        Title = "Steph HUB | PS99 " .. VERSION,
         Content = ("%d/%d tabs. RightControl window, X unload."):format(loaded, #manifest),
         Duration = 6,
     })
@@ -510,7 +512,7 @@ if not ok then
     hintLabel.Text = message
     hintLabel.TextColor3 = Color3.fromRGB(238, 128, 128)
     percentLabel.Text = "--"
-    warn("[ZAPX] " .. message)
+    warn("[Steph HUB] " .. message)
     task.delay(10, function()
         if loading and loading.Parent then
             loading:Destroy()

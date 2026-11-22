@@ -63,7 +63,7 @@ return function(ctx)
         refresh()
     end)
     ui.button(tab, "Unload Everything", function()
-        ui.notify("ZAPX", "unloading")
+        ui.notify("Steph HUB", "unloading")
         ctx.unload()
     end)
 
@@ -82,7 +82,7 @@ return function(ctx)
         ui.notify("Source", text)
     end)
 
-    ui.paragraph(tab, "Keys", "X unload. The window key is ZapLib's own bind.")
+    ui.paragraph(tab, "Keys", "X unload. RightControl toggles the Steph HUB window.")
 
     refresh()
     task.spawn(function()

@@ -1,5 +1,5 @@
 -- modules/progress.lua
--- Compact Auto Rank / Quest tasks (Easy Coin Jar first, Gem Gift Bags only when needed), Ranks, Rebirth, Pet Slots.
+-- Auto Rank / Quest tasks, Ranks, Rebirth, Player Upgrades, Pet/Egg Slots, Forever Free Pack, Enchants.
 return function(ctx)
     local tab = ctx.win:CreateTab("Progress", "rbxassetid://15642579187")
     local ui = ctx.ui
@@ -12,7 +12,11 @@ return function(ctx)
     ui.toggle(tab, { name = "Auto Claim Quests (NPC & Daily)", key = "autoQuest", default = false })
     ui.toggle(tab, { name = "Auto Claim Rank Rewards", key = "autoRank", default = false })
 
-    ui.section(tab, "Progression")
+    ui.section(tab, "Progression & Slots")
     ui.toggle(tab, { name = "Auto Rebirth", key = "autoRebirth", default = false })
-    ui.toggle(tab, { name = "Auto Buy Pet Slots", key = "autoBuyPetSlots", default = false })
+    ui.toggle(tab, { name = "Auto Buy Player Upgrades", key = "autoBuyUpgrades", default = false })
+    ui.toggle(tab, { name = "Auto Buy Pet Equip Slots", key = "autoBuyPetSlots", default = false })
+    ui.toggle(tab, { name = "Auto Buy Egg Bundle Slots", key = "autoBuyEggSlots", default = false })
+    ui.toggle(tab, { name = "Auto Claim Forever Free Pack", key = "autoForeverPack", default = false })
+    ui.toggle(tab, { name = "Auto Equip Enchants (Mastery)", key = "autoEquipEnchant", default = false })
 end
