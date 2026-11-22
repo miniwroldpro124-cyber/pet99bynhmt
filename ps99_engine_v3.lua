@@ -295,6 +295,10 @@ local REMOTE_TYPES = {
     ["Sprinklers: Consume"] = "RemoteFunction",
     ["Orbs: Collect"] = "RemoteEvent",
     ["Teleports_RequestTeleport"] = "RemoteFunction",
+    ["Teleports_RequestInstanceTeleport"] = "RemoteFunction",
+    ["Instancing_PlayerEnterInstance"] = "RemoteFunction",
+    ["Instancing_PlayerLeaveInstance"] = "RemoteFunction",
+    ["RequestStreaming"] = "RemoteEvent",
     ["World1Teleport"] = "RemoteFunction",
     ["World2Teleport"] = "RemoteFunction",
     ["World3Teleport"] = "RemoteFunction",
@@ -1805,20 +1809,64 @@ local function snapTo(point)
     return ok
 end
 
+local WORLD_FALLBACK_SPAWN = {
+    [3] = Vector3.new(-10221.390625, -2.1, -7376.2900390625),
+    [4] = Vector3.new(-15916.173828125, 50.972, -387.6759948730469),
+}
+
 -- Direct CFrame island teleport (supports Zones 1-279 / World 1-4). Crosses worlds
 -- automatically if target zone belongs to another World (e.g. Zone 200+ in World 3/4),
 -- and runs streaming refinement until INTERACT.BREAK_ZONES middle is reached.
 local function teleportToIslandMiddle(id)
     if type(id) ~= "string" or #id == 0 then return false, "invalid zone id" end
-    local centre, exact = zoneCenter(id)
     local hereW = detectActiveWorld()
     local targetW = zoneWorldNumber(id)
-    if not centre or (targetW ~= hereW and targetW >= 1 and targetW <= CFG.WorldCount) then
-        if targetW ~= hereW then
-            local remoteName = "World" .. tostring(targetW) .. "Teleport"
-            local ok, message = invoke(remoteName)
-            return ok == true, ok == true and ("switching to World " .. targetW .. " for " .. id)
-                or tostring(message or ("invoke " .. remoteName .. " failed"))
+    if targetW ~= hereW and targetW >= 1 and targetW <= CFG.WorldCount then
+        local inst = modules.instancing
+        if inst and type(inst.Get) == "function" then
+            local okI, cur = pcall(inst.Get)
+            if okI and type(cur) == "table" and cur.instanceID then
+                pcall(invoke, "Instancing_PlayerLeaveInstance")
+                task.wait(0.25)
+            end
+        end
+        local remoteName = "World" .. tostring(targetW) .. "Teleport"
+        local ok, message = invoke(remoteName)
+        return ok == true, ok == true and ("switching to World " .. targetW .. " for " .. id)
+            or tostring(message or ("invoke " .. remoteName .. " failed"))
+    end
+    local centre, exact = zoneCenter(id)
+    if not centre then
+        -- Zone is streamed out (common for Zone 200+ across a large world): ask server teleport + streaming first.
+        local inst = modules.instancing
+        local inInst = false
+        if inst and type(inst.IsInInstance) == "function" then
+            local okI, resI = pcall(inst.IsInInstance)
+            inInst = okI and resI == true
+        end
+        local tpRemote = inInst and "Teleports_RequestInstanceTeleport" or "Teleports_RequestTeleport"
+        local okTp = invoke(tpRemote, id)
+        if okTp == true then
+            task.wait(0.35)
+            centre, exact = zoneCenter(id)
+            if not centre then
+                return true, "teleported to " .. id .. " (via server)"
+            end
+        end
+    end
+    if not centre then
+        local fallback = WORLD_FALLBACK_SPAWN[targetW]
+        if fallback and (id == "Void Spawn" or id == "Fantasy Spawn") then
+            pcall(fire, "RequestStreaming", fallback)
+            local okSnap = snapTo(fallback)
+            if okSnap then
+                task.delay(0.45, function()
+                    if not alive then return end
+                    local refined = zoneCenter(id)
+                    if refined then snapTo(refined) end
+                end)
+                return true, "teleported to " .. id .. " (fallback spawn)"
+            end
         end
         return false, "island center not loaded: " .. tostring(id)
     end
@@ -4462,7 +4510,7 @@ CFG.EventOpts = {
     huntUltraHuge = true,
     catchMinNet = "Auto",  -- "Auto" | "Pet Net" | "Ultra Pet Net"
     merchantBands = { RarePlus = true, EpicPlus = true, LegendaryPlus = true, MythicalPlus = true, ExoticPlus = true },
-    upgradeTracks = { SpawnLuck = true, PumpkinCoins = true, PumpkinDamage = true, RespawnSpeed = true, StockSlots = true, AutoBreakRules = true, ChaseOdds = true, EggLuck = true, MerchantLuck = true },
+    upgradeTracks = { SpawnLuck = true, PumpkinCoins = true, PumpkinDamage = true, RespawnSpeed = true, StockSlots = true, ChaseOdds = true, EggLuck = true, MerchantLuck = true },
     cocoaBoosts = { PumpkinTycoonCoins1 = true, PumpkinTycoonDamage1 = true, PumpkinTycoonIslandLuck1 = true },
     pumpkinBoosts = { ["Patch Coin Boost"] = true, ["Pumpkin Damage Boost"] = true, ["Island Luck Boost"] = true },
 }
@@ -4582,10 +4630,16 @@ end
 
 function CFG.Event.InInstance()
     local inst = modules.instancing
-    if inst and type(inst.Get) == "function" then
-        local ok, cur = pcall(inst.Get)
-        if ok and type(cur) == "table" and cur.instanceID == "PumpkinTycoon" then
-            return true
+    if inst then
+        if type(inst.IsInInstance) == "function" then
+            local okI, resI = pcall(inst.IsInInstance, "PumpkinTycoon")
+            if okI and resI == true then return true end
+        end
+        if type(inst.Get) == "function" then
+            local ok, cur = pcall(inst.Get)
+            if ok and type(cur) == "table" and cur.instanceID == "PumpkinTycoon" then
+                return true
+            end
         end
     end
     local things = thingsFolder("Instances")
@@ -4597,23 +4651,37 @@ function CFG.Event.InInstance()
 end
 
 function CFG.Event.Enter()
+    if CFG.Event.InInstance() then
+        return true, "already inside Pumpkin Tycoon"
+    end
     local inst = modules.instancing
-    if inst and type(inst.Get) == "function" then
-        local ok, cur = pcall(inst.Get)
-        if ok and type(cur) == "table" and cur.instanceID == "PumpkinTycoon" then
-            return true, "already inside Pumpkin Tycoon"
+    if inst then
+        if type(inst.Enter) == "function" then
+            local okE, resE, msgE = pcall(inst.Enter, "PumpkinTycoon")
+            if okE and resE ~= false then
+                return true, "entered Pumpkin Tycoon"
+            end
+            if msgE and type(msgE) == "string" then
+                -- fallback to direct remote below if Enter returned a transient error
+            end
         end
         if type(inst.GetEnterPart) == "function" then
-            local okE, part = pcall(inst.GetEnterPart, "PumpkinTycoon")
-            if okE and typeof(part) == "Instance" and part:IsA("BasePart") then
+            local okP, part = pcall(inst.GetEnterPart, "PumpkinTycoon")
+            if okP and typeof(part) == "Instance" and part:IsA("BasePart") then
                 snapTo(part.Position)
                 task.wait(0.25)
             end
         end
     end
-    local ok, msg = invoke("Instancing_Enter", "PumpkinTycoon")
-    if ok == true then return true, "entered Pumpkin Tycoon" end
-    return false, tostring(msg or "find Pumpkin Tycoon portal")
+    local ok, msg = invoke("Instancing_PlayerEnterInstance", "PumpkinTycoon")
+    if ok == true then
+        for _ = 1, 12 do
+            if CFG.Event.Plot() then break end
+            task.wait(0.2)
+        end
+        return true, "entered Pumpkin Tycoon"
+    end
+    return false, tostring(msg or "failed to enter Pumpkin Tycoon")
 end
 
 function CFG.Event.OwnedZones(plot)
@@ -4621,7 +4689,8 @@ function CFG.Event.OwnedZones(plot)
     local maxZ = 1
     for i = 1, #CFG.Event.ZONES do
         local z = CFG.Event.ZONES[i]
-        if btns and (btns[z.Section .. "_Zone"] ~= nil or btns[z.Section .. "_Egg"] ~= nil) then
+        if btns and ((btns[z.Section .. "_Zone"] ~= nil and btns[z.Section .. "_Zone"] ~= false)
+            or (btns[z.Section .. "_Egg"] ~= nil and btns[z.Section .. "_Egg"] ~= false)) then
             maxZ = i
         end
     end
@@ -4629,7 +4698,7 @@ function CFG.Event.OwnedZones(plot)
 end
 
 function CFG.Event.ZonePos(plot, zIdx)
-    if not plot then return nil end
+    if not plot then return nil, nil end
     local z = CFG.Event.ZONES[zIdx]
     local model = type(plot.GetModel) == "function" and plot:GetModel() or nil
     local island = CFG.Event.Feature("Island")
@@ -4639,7 +4708,7 @@ function CFG.Event.ZonePos(plot, zIdx)
             local eggModel = container:FindFirstChild(z.Egg, true) or container:FindFirstChild(z.Section .. "_Egg", true)
             if eggModel then
                 local p = modelPosition(eggModel)
-                if p then return p + Vector3.new(0, 2, 6), modelPosition(eggModel) end
+                if p then return p + Vector3.new(0, 2, 6), p end
             end
             local zonePart = container:FindFirstChild("WildArea_" .. zIdx, true) or container:FindFirstChild(z.Section, true)
             if zonePart then
@@ -4648,24 +4717,58 @@ function CFG.Event.ZonePos(plot, zIdx)
             end
         end
     end
+    if model then
+        local okU, ptBtns = pcall(require, RS.Library.Util.PumpkinTycoonButtons)
+        if okU and ptBtns and type(ptBtns.ZoneSlab) == "function" then
+            local okS, slab = pcall(ptBtns.ZoneSlab, model, zIdx)
+            if okS and slab then
+                local p = modelPosition(slab)
+                if p then return p + Vector3.new(0, 3, 0), p end
+            end
+        end
+    end
     return model and modelPosition(model) or nil, nil
 end
+
+local EVENT_DEBRIS_FX = {
+    TurkeyFlash = true, TurkeyBreakRing = true, TurkeyBeacon = true,
+    TurkeyCoin = true, TurkeyOrb = true, TurkeyMeteor = true,
+    PumpkinBeacon = true, PumpkinPillar = true, PumpkinBloom = true, PumpkinChunk = true,
+}
 
 function CFG.Event.Optimize(now)
     if now < CFG.Event.next.opt then return end
     CFG.Event.next.opt = now + 1.5
     local Lighting = game:GetService("Lighting")
-    for _, name in ipairs({ "PumpkinFxFlash", "PumpkinFxDim" }) do
+    for _, name in ipairs({ "PumpkinFxFlash", "PumpkinFxDim", "TurkeyFlash" }) do
         local fx = Lighting:FindFirstChild(name)
         if fx then pcall(function() fx:Destroy() end) end
     end
     local ptFX = CFG.Event.Feature("PumpkinFx")
     if ptFX and type(ptFX.ClearAll) == "function" then pcall(ptFX.ClearAll) end
+    local debris = workspace:FindFirstChild("__DEBRIS")
+    if debris then
+        for _, child in ipairs(debris:GetChildren()) do
+            if EVENT_DEBRIS_FX[child.Name] then
+                pcall(function() child:Destroy() end)
+            end
+        end
+    end
     local instFolder = thingsFolder("Instances")
     local ptInst = instFolder and instFolder:FindFirstChild("PumpkinTycoon")
     if ptInst then
         local shared = ptInst:FindFirstChild("PumpkinTycoonShared")
-        if shared then suppressEffects("Instances", optBreakableEffects) end
+        if shared then
+            suppressEffects("Instances", optBreakableEffects)
+            local arena = shared:FindFirstChild("TurkeyArena", true)
+            if arena then
+                for _, child in ipairs(arena:GetDescendants()) do
+                    if EFFECT_CLASSES[child.ClassName] then
+                        pcall(function() child.Enabled = false end)
+                    end
+                end
+            end
+        end
         for _, child in ipairs(ptInst:GetDescendants()) do
             if EFFECT_CLASSES[child.ClassName] then
                 if optBreakableEffects[child] == nil then optBreakableEffects[child] = child.Enabled end
@@ -4746,8 +4849,9 @@ function CFG.Event.Rebirth(now, plot)
     local _, btnsSave = CFG.Event.OwnedZones(plot)
     local ptButtonsUtil = nil
     pcall(function() ptButtonsUtil = require(RS.Library.Util.PumpkinTycoonButtons) end)
-    if ptButtonsUtil and type(ptButtonsUtil.Complete) == "function" then
-        local ready = ptButtonsUtil.Complete(btnsSave, true)
+    if ptButtonsUtil then
+        local ready = (type(ptButtonsUtil.RebirthReady) == "function" and ptButtonsUtil.RebirthReady(btnsSave))
+            or (type(ptButtonsUtil.Complete) == "function" and ptButtonsUtil.Complete(btnsSave, true))
         if ready then
             local ok = CFG.Event.PlotInvoke(plot, CFG.Event.NET.Rebirth)
             if ok == true then
@@ -4767,9 +4871,11 @@ function CFG.Event.BuyNearestEgg(now, plot, save)
         if okU and ptBtns then
             local _, btnsSave = CFG.Event.OwnedZones(plot)
             local p2Built = CFG.Event.Cmds() and CFG.Event.Cmds().OwnPlotPart2 and CFG.Event.Cmds().OwnPlotPart2()
-            local avail = ptBtns.Available(btnsSave, p2Built and #CFG.Event.ZONES or 5, p2Built == true)
+            local btnCmds = CFG.Event.Feature("Buttons")
+            local pMult = btnCmds and type(btnCmds.PriceMult) == "function" and btnCmds.PriceMult() or nil
+            local avail = ptBtns.Available(btnsSave, p2Built and #CFG.Event.ZONES or 5, p2Built == true, pMult)
             if type(avail) == "table" and avail[1] and avail[1].Subclass == nil then
-                local nextCost = ptBtns.Price(avail[1])
+                local nextCost = ptBtns.Price(avail[1], pMult)
                 local coins = CFG.Event.Currency(save, "PumpkinTycoonCoins")
                 if coins < nextCost * 1.15 then
                     CFG.Event.next.egg = now + 1.5
@@ -4797,7 +4903,13 @@ end
 function CFG.Event.KeepPumpkins(now, plot)
     if now < CFG.Event.next.keep then return end
     CFG.Event.next.keep = now + 2.5
-    local wantRung = math.clamp(math.floor(tonumber(CFG.EventOpts.keepRung) or 4), 0, #CFG.Event.LADDER)
+    local maxKeep = #CFG.Event.LADDER
+    local abMod = CFG.Event.Feature("AutoBreak")
+    if abMod and type(abMod.MaxBelow) == "function" then
+        local okM, m = pcall(abMod.MaxBelow)
+        if okM and type(m) == "number" and m >= 0 then maxKeep = m end
+    end
+    local wantRung = math.clamp(math.floor(tonumber(CFG.EventOpts.keepRung) or 4), 0, maxKeep)
     local abSave = plot:Save("AutoBreak")
     local curBelow = type(abSave) == "table" and tonumber(abSave.Below) or 0
     if curBelow ~= wantRung then
@@ -4921,16 +5033,23 @@ end
 
 function CFG.Event.Upgrades(now, plot, save)
     if now < CFG.Event.next.upg then return end
-    CFG.Event.next.upg = now + 2.0
+    CFG.Event.next.upg = now + 1.5
     local tokens = CFG.Event.Currency(save, "PumpkinTokens")
     if tokens <= 0 then return end
     local tracks = CFG.EventOpts.upgradeTracks or {}
     local upgCmds = CFG.Event.Feature("Upgrades")
-    for trackId, active in pairs(tracks) do
-        if active then
-            if upgCmds and type(upgCmds.CanBuy) == "function" then
-                local okC, canBuy = pcall(upgCmds.CanBuy, trackId)
-                if okC and not canBuy then continue end
+    for _, trackId in ipairs({ "SpawnLuck", "PumpkinCoins", "PumpkinDamage", "RespawnSpeed", "StockSlots", "ChaseOdds", "EggLuck", "MerchantLuck" }) do
+        if tracks[trackId] then
+            if upgCmds then
+                local tier = type(upgCmds.Tier) == "function" and select(2, pcall(upgCmds.Tier, trackId)) or nil
+                if type(upgCmds.Capped) == "function" and type(tier) == "number" then
+                    local okCap, capped = pcall(upgCmds.Capped, trackId, tier)
+                    if okCap and capped == true then continue end
+                end
+                if type(upgCmds.Cost) == "function" then
+                    local okCost, cost = pcall(upgCmds.Cost, trackId)
+                    if okCost and type(cost) == "number" and tokens < cost then continue end
+                end
             end
             local ok = CFG.Event.PlotInvoke(plot, CFG.Event.NET.UpgradeBuy, trackId)
             if ok == true then
@@ -5119,7 +5238,7 @@ function CFG.Event.FightTurkey(now, plot)
                 local pt = position()
                 if pt and (pt - spawnPart.Position).Magnitude > 90 then
                     if CFG.EventOpts.moveMode == "Teleport" then
-                        CFG.Event.PlotInvoke(plot, CFG.Event.NET.Cannon)
+                        CFG.Event.PlotInvoke(plot, CFG.Event.NET.Cannon, "centre")
                         task.wait(0.2)
                     end
                     CFG.Event.MoveTo(spawnPart.Position + Vector3.new(0, 4, 8))

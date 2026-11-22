@@ -95,7 +95,6 @@ return function(ctx)
         { "PumpkinDamage", "Upgrade: Pumpkin Damage" },
         { "RespawnSpeed", "Upgrade: Faster Spawns" },
         { "StockSlots", "Upgrade: Merchant Stock" },
-        { "AutoBreakRules", "Upgrade: Auto Break Rules" },
         { "ChaseOdds", "Upgrade: Chase Odds" },
         { "EggLuck", "Upgrade: Island Luck" },
         { "MerchantLuck", "Upgrade: Merchant Luck" },
