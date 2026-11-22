@@ -4,7 +4,7 @@ One file boots the menu (ZapHub / ZapLib 2.0.0), one file is the farm engine
 (`ps99_engine_v3`, headless — no second window), one file per tab.
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/main.lua?v=7"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/d684186/main.lua?v=7.4"))()
 ```
 
 `RightControl` window · `X` unload.

@@ -16,30 +16,32 @@ local function hostEnv()
     return nil
 end
 local env = hostEnv() or _G
+local function hostPut(target, key, value) target[key] = value end
+local function hostGet(target, key) return target[key] end
 local function publish()
-    env.__PS99CLEAN = controller
-    env.__PS99CLEAN_CLEANUP = cleanup
+    hostPut(env, "__PS99CLEAN", controller)
+    hostPut(env, "__PS99CLEAN_CLEANUP", cleanup)
     if env ~= _G then
-        _G.__PS99CLEAN = controller
-        _G.__PS99CLEAN_CLEANUP = cleanup
+        hostPut(_G, "__PS99CLEAN", controller)
+        hostPut(_G, "__PS99CLEAN_CLEANUP", cleanup)
     end
 end
 local function unpublish()
-    if env.__PS99CLEAN_CLEANUP == cleanup then
-        env.__PS99CLEAN = nil
-        env.__PS99CLEAN_CLEANUP = nil
+    if hostGet(env, "__PS99CLEAN_CLEANUP") == cleanup then
+        hostPut(env, "__PS99CLEAN", nil)
+        hostPut(env, "__PS99CLEAN_CLEANUP", nil)
     end
-    if _G.__PS99CLEAN_CLEANUP == cleanup then
-        _G.__PS99CLEAN = nil
-        _G.__PS99CLEAN_CLEANUP = nil
+    if hostGet(_G, "__PS99CLEAN_CLEANUP") == cleanup then
+        hostPut(_G, "__PS99CLEAN", nil)
+        hostPut(_G, "__PS99CLEAN_CLEANUP", nil)
     end
 end
-if type(env.__PS99CLEAN_CLEANUP) == "function" then
-    local ok, err = pcall(env.__PS99CLEAN_CLEANUP)
+if type(hostGet(env, "__PS99CLEAN_CLEANUP")) == "function" then
+    local ok, err = pcall(hostGet(env, "__PS99CLEAN_CLEANUP"))
     if not ok then warn("[PS99 CLEAN] previous cleanup: " .. tostring(err)) end
 end
-if env ~= _G and type(_G.__PS99CLEAN_CLEANUP) == "function" then
-    local ok, err = pcall(_G.__PS99CLEAN_CLEANUP)
+if env ~= _G and type(hostGet(_G, "__PS99CLEAN_CLEANUP")) == "function" then
+    local ok, err = pcall(hostGet(_G, "__PS99CLEAN_CLEANUP"))
     if not ok then warn("[PS99 CLEAN] previous cleanup: " .. tostring(err)) end
 end
 
