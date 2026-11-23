@@ -1803,7 +1803,7 @@ local function zoneCenter(id, preferEgg)
             if count > 0 then
                 local mid = Vector3.new(sum.X / count, maxY, sum.Z / count)
                 if preferEgg ~= false and enabled.teleNearEgg then
-                    local eggPos, eggDist = findZoneEggPos(id, mid, folder)
+                    local eggPos, eggDist = CFG.FindZoneEggPos(id, mid, folder)
                     if eggPos and eggDist <= 85 then
                         if eggDist <= 24 then
                             return mid, true
@@ -3098,7 +3098,9 @@ local SPINNY_WHEELS = {
     { id = "FantasyWheel", ticket = "Fantasy Spinny Wheel Ticket", zone = "Fantasy Spawn", rebirths = 4 },
 }
 
-local function clickGuiButton(btn)
+CFG.Spin = { total = 0 }
+
+function CFG.Spin.ClickButton(btn)
     if not btn or not btn:IsA("GuiButton") then return false end
     local fired = false
     if type(firesignal) == "function" then
@@ -3125,7 +3127,7 @@ local function clickGuiButton(btn)
     return fired
 end
 
-local function claimSpinMessagePopup()
+function CFG.Spin.ClaimPopup()
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     local msg = pg and pg:FindFirstChild("Message")
     if not msg or not msg.Enabled then return false end
@@ -3135,15 +3137,15 @@ local function claimSpinMessagePopup()
     local closeBtn = frame and frame:FindFirstChild("Close")
     local clicked = false
     if okBtn and okBtn.Visible then
-        clicked = clickGuiButton(okBtn) or clicked
+        clicked = CFG.Spin.ClickButton(okBtn) or clicked
     end
     if not clicked and closeBtn and closeBtn.Visible then
-        clicked = clickGuiButton(closeBtn) or clicked
+        clicked = CFG.Spin.ClickButton(closeBtn) or clicked
     end
     return clicked
 end
 
-local function bypassSpinAnimationAndReopen(wheelId)
+function CFG.Spin.BypassAndReopen(wheelId)
     local tabCtrl, swCmds = nil, nil
     pcall(function() tabCtrl = require(RS.Library.Client.TabController) end)
     pcall(function() swCmds = require(RS.Library.Client.SpinnyWheelCmds) end)
@@ -3161,7 +3163,7 @@ local function bypassSpinAnimationAndReopen(wheelId)
     end
     -- Auto-click the "You win!" / "Congratulations!" Claim (Ok) popup
     for _ = 1, 10 do
-        if claimSpinMessagePopup() then break end
+        if CFG.Spin.ClaimPopup() then break end
         task.wait(0.03)
     end
     -- Reopen wheel menu cleanly so the game's client state resets for the next spin
@@ -3175,7 +3177,7 @@ local function bypassSpinAnimationAndReopen(wheelId)
     end
 end
 
-local function collectAllTicketWheels()
+function CFG.Spin.CollectWheels()
     local list = {}
     local seen = {}
     for _, w in ipairs(SPINNY_WHEELS) do
@@ -3207,12 +3209,10 @@ local function collectAllTicketWheels()
     return list
 end
 
-local spinCountTotal = 0
 local function spinTick()
     local now = os.clock()
     if now < (nextAt.spin or 0) then return end
-    -- Always dismiss any lingering spin reward popup first
-    claimSpinMessagePopup()
+    CFG.Spin.ClaimPopup()
     local save = getSave()
     if not save then notes.spin = "waiting for profile"; return end
     local misc = stackList(inventory(save, "Misc"))
@@ -3223,7 +3223,7 @@ local function spinTick()
     local serverNow = workspace:GetServerTimeNow()
     local cooldowns = type(save.SpinnyWheelCooldowns) == "table" and save.SpinnyWheelCooldowns or {}
     local rebirths = tonumber(save.Rebirths) or 0
-    local wheels = collectAllTicketWheels()
+    local wheels = CFG.Spin.CollectWheels()
     for _, w in ipairs(wheels) do
         if not alive or not enabled.autoSpinTickets then return end
         local unlocked = true
@@ -3243,23 +3243,22 @@ local function spinTick()
                 local ok = invoke("Spinny Wheel: Request Spin", w.id)
                 if not alive or not enabled.autoSpinTickets then return end
                 if ok then
-                    spinCountTotal += 1
-                    notes.spin = ("spun %s (#%d, %d left)"):format(w.id, spinCountTotal, math.max(0, have - 1))
-                    bypassSpinAnimationAndReopen(w.id)
+                    CFG.Spin.total += 1
+                    notes.spin = ("spun %s (#%d, %d left)"):format(w.id, CFG.Spin.total, math.max(0, have - 1))
+                    CFG.Spin.BypassAndReopen(w.id)
                     nextAt.save = 0
                     return
                 end
             end
         end
     end
-    -- Close SpinnyWheel tab cleanly once all tickets are spent
     pcall(function()
         local tabCtrl = require(RS.Library.Client.TabController)
         if tabCtrl and type(tabCtrl.Get) == "function" and tabCtrl.Get() == "SpinnyWheel" then
             tabCtrl.CloseTab()
         end
     end)
-    notes.spin = spinCountTotal > 0 and ("all tickets spun (" .. spinCountTotal .. ")") or "no spinny wheel tickets"
+    notes.spin = CFG.Spin.total > 0 and ("all tickets spun (" .. CFG.Spin.total .. ")") or "no spinny wheel tickets"
 end
 
 local ALL_KEY_CHESTS = {
@@ -3846,17 +3845,28 @@ local function mailClaimTick()
     pendingMail = nil
 end
 
--- Best Egg resolver for Rank Quests (BEST_EGG=20, BEST_GOLD_PET=40, BEST_RAINBOW_PET=41, HATCH_RARE_PET=42).
--- Reads live EggCmds.GetHighestEggNumberAvailable / GetMaxHatch and Directory.Eggs[id].pets so we only
--- craft and hatch pets that actually belong to the player's current best egg.
-local WORLD_SPAWN_ZONE = {
-    [1] = "Spawn",
-    [2] = "Tech Spawn",
-    [3] = "Void Spawn",
-    [4] = "Fantasy Spawn",
+CFG.Quest = {
+    WORLD_SPAWN = {
+        [1] = "Spawn",
+        [2] = "Tech Spawn",
+        [3] = "Void Spawn",
+        [4] = "Fantasy Spawn",
+    },
+    PRIORITY = {
+        [6] = 1, [81] = 1,
+        [34] = 2, [74] = 2, [35] = 2, [33] = 2,
+        [12] = 2, [13] = 2, [57] = 2,
+        [10] = 2, [14] = 2, [11] = 2, [15] = 2, [65] = 2,
+        [18] = 2, [55] = 2, [56] = 2, [61] = 2, [80] = 2,
+        [4] = 3, [5] = 3, [40] = 3, [41] = 3, [19] = 3,
+        [31] = 4, [37] = 4, [68] = 4,
+        [32] = 4, [38] = 4, [69] = 4, [43] = 4, [66] = 4, [70] = 4, [44] = 4, [67] = 4, [71] = 4,
+        [2] = 5, [3] = 5, [20] = 5, [42] = 5, [83] = 5,
+        [7] = 6, [99] = 6, [100] = 6,
+    },
 }
 
-local function getBestEggInfo(save)
+function CFG.Quest.BestEggInfo(save)
     local maxEggNum = nil
     local maxHatch = nil
     pcall(function()
@@ -3910,14 +3920,13 @@ local function getBestEggInfo(save)
     return bestEggId, bestEggPets, petCount, maxEggNum, math.clamp(maxHatch, 1, CFG.EggMaxHatch)
 end
 
-local function hatchBestEggForQuest(save, desiredCount)
-    local bestEggId, _, _, _, maxHatch = getBestEggInfo(save)
+function CFG.Quest.HatchBestEgg(save, desiredCount)
+    local bestEggId, _, _, _, maxHatch = CFG.Quest.BestEggInfo(save)
     if not bestEggId then return false, "best egg unknown" end
     local count = math.clamp(tonumber(desiredCount) or maxHatch, 1, maxHatch)
-    -- Make sure the egg capsule is streamed in; if not found, teleport to current world's Spawn zone first.
     local _, _, eggPos = findEggModel(bestEggId, position())
     if not eggPos then
-        local spawnZone = WORLD_SPAWN_ZONE[detectActiveWorld()] or "Spawn"
+        local spawnZone = CFG.Quest.WORLD_SPAWN[detectActiveWorld()] or "Spawn"
         if currentZone() ~= spawnZone then
             teleportToIslandMiddle(spawnZone)
             task.wait(0.35)
@@ -3926,7 +3935,6 @@ local function hatchBestEggForQuest(save, desiredCount)
     end
     local ok, msg = hatchEggById(bestEggId, count, true)
     if not ok then
-        -- Try unlocking the best egg once if the server says it is locked
         local unlocked = invoke("Eggs_RequestUnlock", bestEggId)
         if unlocked == true then
             task.wait(0.15)
@@ -3937,7 +3945,7 @@ local function hatchBestEggForQuest(save, desiredCount)
     return ok, msg
 end
 
-local function findBestPetStacks(save, petFilter, wantPt)
+function CFG.Quest.FindBestPetStacks(save, petFilter, wantPt)
     local matches = {}
     for _, pet in ipairs(stackList(inventory(save, "Pet"))) do
         if pet.data._lk ~= true and pet.amount >= 10 then
@@ -3951,20 +3959,6 @@ local function findBestPetStacks(save, petFilter, wantPt)
     return matches
 end
 
--- Priority for Rank / Quest Goals: fast craft/consume/bundle/zone tasks first, then hatching, then passive farming.
-local GOAL_PRIORITY = {
-    [6] = 1, [81] = 1,                                     -- Unlock zone
-    [34] = 2, [74] = 2, [35] = 2, [33] = 2,                -- Use potion / fruit / flag
-    [12] = 2, [13] = 2, [57] = 2,                          -- Upgrade potion / enchant / fruit
-    [10] = 2, [14] = 2, [11] = 2, [15] = 2, [65] = 2,      -- Bundles (potion / enchant / fruit)
-    [18] = 2, [55] = 2, [56] = 2, [61] = 2, [80] = 2,      -- Free gift / keys / wheel / slots
-    [4] = 3, [5] = 3, [40] = 3, [41] = 3, [19] = 3,        -- Gold / Rainbow / Best Gold / Best Rainbow / Fuse
-    [31] = 4, [37] = 4, [68] = 4,                          -- Coin jars
-    [32] = 4, [38] = 4, [69] = 4, [43] = 4, [66] = 4, [70] = 4, [44] = 4, [67] = 4, [71] = 4, -- Comets / Pinatas / Lucky Blocks
-    [2] = 5, [3] = 5, [20] = 5, [42] = 5, [83] = 5,        -- Hatch eggs / pets
-    [7] = 6, [99] = 6, [100] = 6,                          -- Currency / diamonds
-}
-
 -- Item 6: Auto Do Quest Tasks. Inspects Rank Goals (save.Goals), ZoneGateQuest,
 -- ZoneQuests, and NPCQuests, and automatically performs the required action.
 local function collectActiveGoals(save)
@@ -3974,7 +3968,7 @@ local function collectActiveGoals(save)
             list[#list + 1] = {
                 goal = goal,
                 source = source,
-                prio = GOAL_PRIORITY[goal.Type] or 9,
+                prio = CFG.Quest.PRIORITY[goal.Type] or 9,
                 stars = tonumber(goal.Stars) or 0,
             }
         end
@@ -4048,13 +4042,13 @@ local function doQuestTick()
         elseif gtype == 2 or gtype == 3 or gtype == 20 or gtype == 42 or gtype == 83 then
             local ok, msg
             if goal.EggID then
-                local _, _, _, _, maxHatch = getBestEggInfo(save)
+                local _, _, _, _, maxHatch = CFG.Quest.BestEggInfo(save)
                 local count = math.clamp(math.min(rem, maxHatch), 1, maxHatch)
                 ok, msg = hatchEggById(goal.EggID, count, true)
                 if ok then nextAt.save = 0 end
             else
-                local _, _, _, _, maxHatch = getBestEggInfo(save)
-                ok, msg = hatchBestEggForQuest(save, math.min(rem, maxHatch))
+                local _, _, _, _, maxHatch = CFG.Quest.BestEggInfo(save)
+                ok, msg = CFG.Quest.HatchBestEgg(save, math.min(rem, maxHatch))
             end
             if ok then
                 notes.doQuest = "quest hatch: " .. tostring(msg)
@@ -4111,11 +4105,11 @@ local function doQuestTick()
             end
         -- 4 = GOLD_PET, 40 = BEST_GOLD_PET (auto crafts best-egg pets into Golden; auto hatches best egg when short)
         elseif gtype == 4 or gtype == 40 then
-            local bestEggId, bestEggPets, bestPetCount, _, maxHatch = getBestEggInfo(save)
+            local bestEggId, bestEggPets, bestPetCount, _, maxHatch = CFG.Quest.BestEggInfo(save)
             local filter = (gtype == 40 and bestPetCount > 0) and bestEggPets or nil
-            local stacks = findBestPetStacks(save, filter, nil)
+            local stacks = CFG.Quest.FindBestPetStacks(save, filter, nil)
             if #stacks == 0 and gtype == 4 then
-                stacks = findBestPetStacks(save, nil, nil)
+                stacks = CFG.Quest.FindBestPetStacks(save, nil, nil)
             end
             for _, pet in ipairs(stacks) do
                 local craftCount = math.max(1, math.min(rem, pet.amount // 10, 100))
@@ -4127,8 +4121,7 @@ local function doQuestTick()
                     return
                 end
             end
-            -- Not enough normal pets from the best egg -> hatch best egg automatically
-            local okH, msgH = hatchBestEggForQuest(save, maxHatch)
+            local okH, msgH = CFG.Quest.HatchBestEgg(save, maxHatch)
             if okH then
                 notes.doQuest = ("quest best gold: hatching %s (%s)"):format(tostring(bestEggId), tostring(msgH))
                 nextAt.doQuest = now + 0.55
@@ -4136,12 +4129,11 @@ local function doQuestTick()
             end
         -- 5 = RAINBOW_PET, 41 = BEST_RAINBOW_PET (crafts Golden -> Rainbow; crafts Normal -> Golden first; hatches best egg when short)
         elseif gtype == 5 or gtype == 41 then
-            local bestEggId, bestEggPets, bestPetCount, _, maxHatch = getBestEggInfo(save)
+            local bestEggId, bestEggPets, bestPetCount, _, maxHatch = CFG.Quest.BestEggInfo(save)
             local filter = (gtype == 41 and bestPetCount > 0) and bestEggPets or nil
-            -- Step 1: Craft Golden pets from best egg into Rainbow
-            local goldStacks = findBestPetStacks(save, filter, 1)
+            local goldStacks = CFG.Quest.FindBestPetStacks(save, filter, 1)
             if #goldStacks == 0 and gtype == 5 then
-                goldStacks = findBestPetStacks(save, nil, 1)
+                goldStacks = CFG.Quest.FindBestPetStacks(save, nil, 1)
             end
             for _, pet in ipairs(goldStacks) do
                 local craftCount = math.max(1, math.min(rem, pet.amount // 10, 100))
@@ -4153,10 +4145,9 @@ local function doQuestTick()
                     return
                 end
             end
-            -- Step 2: Craft Normal pets from best egg into Golden so we accumulate Golden for Rainbow
-            local normalStacks = findBestPetStacks(save, filter, nil)
+            local normalStacks = CFG.Quest.FindBestPetStacks(save, filter, nil)
             if #normalStacks == 0 and gtype == 5 then
-                normalStacks = findBestPetStacks(save, nil, nil)
+                normalStacks = CFG.Quest.FindBestPetStacks(save, nil, nil)
             end
             for _, pet in ipairs(normalStacks) do
                 local craftCount = math.max(1, math.min(rem * 10, pet.amount // 10, 100))
@@ -4168,8 +4159,7 @@ local function doQuestTick()
                     return
                 end
             end
-            -- Step 3: Not enough best-egg pets -> hatch best egg automatically
-            local okH, msgH = hatchBestEggForQuest(save, maxHatch)
+            local okH, msgH = CFG.Quest.HatchBestEgg(save, maxHatch)
             if okH then
                 notes.doQuest = ("quest best rainbow: hatching %s (%s)"):format(tostring(bestEggId), tostring(msgH))
                 nextAt.doQuest = now + 0.55
@@ -5114,7 +5104,7 @@ local function httpGet(url)
     return nil
 end
 
-local hopState = {
+CFG.Hop = {
     inProgress = false,
     startedAt = 0,
     targetJobId = nil,
@@ -5124,10 +5114,10 @@ local hopState = {
     conn = nil,
 }
 
-local function fetchHopCandidates(force)
+function CFG.Hop.FetchCandidates(force)
     local now = os.clock()
-    for jobId, exp in pairs(hopState.blacklist) do
-        if exp <= now then hopState.blacklist[jobId] = nil end
+    for jobId, exp in pairs(CFG.Hop.blacklist) do
+        if exp <= now then CFG.Hop.blacklist[jobId] = nil end
     end
     local httpSvc = game:GetService("HttpService")
     local candidates = {}
@@ -5144,7 +5134,7 @@ local function fetchHopCandidates(force)
         if not ok or type(data) ~= "table" or type(data.data) ~= "table" then break end
         for _, server in ipairs(data.data) do
             if type(server) == "table" and type(server.id) == "string" and #server.id > 0
-                and server.id ~= game.JobId and not hopState.blacklist[server.id]
+                and server.id ~= game.JobId and not CFG.Hop.blacklist[server.id]
                 and type(server.playing) == "number" and server.playing >= 1
                 and type(server.maxPlayers) == "number" and server.playing < server.maxPlayers then
                 if force or server.playing < CFG.HopMaxPlayers then
@@ -5164,23 +5154,23 @@ local function fetchHopCandidates(force)
 end
 
 local hopTick
-local function ensureHopListener()
-    if hopState.conn then return end
+function CFG.Hop.EnsureListener()
+    if CFG.Hop.conn then return end
     local tpSvc = game:GetService("TeleportService")
-    hopState.conn = connect(tpSvc.TeleportInitFailed, function(plr, tpResult, errMsg)
+    CFG.Hop.conn = connect(tpSvc.TeleportInitFailed, function(plr, tpResult, errMsg)
         if plr ~= LocalPlayer then return end
-        hopState.inProgress = false
-        hopState.failCount += 1
-        if hopState.targetJobId then
-            hopState.blacklist[hopState.targetJobId] = os.clock() + 180
+        CFG.Hop.inProgress = false
+        CFG.Hop.failCount += 1
+        if CFG.Hop.targetJobId then
+            CFG.Hop.blacklist[CFG.Hop.targetJobId] = os.clock() + 180
         end
         local code = tostring(tpResult and tpResult.Name or "Failed")
         notes.hop = ("teleport failed (%s): %s; retrying"):format(code, tostring(errMsg or "err"))
-        if alive and (enabled.serverHop or hopState.forceRetry) then
+        if alive and (enabled.serverHop or CFG.Hop.forceRetry) then
             task.delay(1.5, function()
                 if not alive then return end
-                if enabled.serverHop or hopState.forceRetry then
-                    hopTick(hopState.forceRetry)
+                if enabled.serverHop or CFG.Hop.forceRetry then
+                    hopTick(CFG.Hop.forceRetry)
                 end
             end)
         end
@@ -5188,9 +5178,9 @@ local function ensureHopListener()
 end
 
 hopTick = function(force)
-    ensureHopListener()
+    CFG.Hop.EnsureListener()
     local now = os.clock()
-    if hopState.inProgress and (now - hopState.startedAt) < 12 then
+    if CFG.Hop.inProgress and (now - CFG.Hop.startedAt) < 12 then
         notes.hop = "teleport already in progress..."
         return
     end
@@ -5199,35 +5189,33 @@ hopTick = function(force)
         notes.hop = ("server has %d players (limit %d)"):format(count, CFG.HopMaxPlayers)
         return
     end
-    hopState.forceRetry = force == true
+    CFG.Hop.forceRetry = force == true
     local tpSvc = game:GetService("TeleportService")
 
-    -- After 3 specific-instance failures (e.g. Error 256 / restricted / stale JobIds),
-    -- fall back to Teleport(game.PlaceId) so Roblox assigns a fresh valid server cleanly.
-    if hopState.failCount >= 3 then
-        hopState.failCount = 0
-        hopState.inProgress = true
-        hopState.startedAt = now
-        hopState.targetJobId = nil
+    if CFG.Hop.failCount >= 3 then
+        CFG.Hop.failCount = 0
+        CFG.Hop.inProgress = true
+        CFG.Hop.startedAt = now
+        CFG.Hop.targetJobId = nil
         notes.hop = "fallback random server hop (PlaceId " .. tostring(game.PlaceId) .. ")"
         local ok, err = pcall(function() tpSvc:Teleport(game.PlaceId, LocalPlayer) end)
         if not ok then
-            hopState.inProgress = false
+            CFG.Hop.inProgress = false
             notes.hop = "fallback hop error: " .. tostring(err)
         end
         return
     end
 
-    local candidates = fetchHopCandidates(force)
+    local candidates = CFG.Hop.FetchCandidates(force)
     if #candidates == 0 then
         if force then
-            hopState.inProgress = true
-            hopState.startedAt = now
-            hopState.targetJobId = nil
+            CFG.Hop.inProgress = true
+            CFG.Hop.startedAt = now
+            CFG.Hop.targetJobId = nil
             notes.hop = "no listed server; hopping to fresh server"
             local ok, err = pcall(function() tpSvc:Teleport(game.PlaceId, LocalPlayer) end)
             if not ok then
-                hopState.inProgress = false
+                CFG.Hop.inProgress = false
                 notes.hop = "hop error: " .. tostring(err)
             end
         else
@@ -5237,9 +5225,9 @@ hopTick = function(force)
     end
 
     for _, server in ipairs(candidates) do
-        hopState.inProgress = true
-        hopState.startedAt = os.clock()
-        hopState.targetJobId = server.id
+        CFG.Hop.inProgress = true
+        CFG.Hop.startedAt = os.clock()
+        CFG.Hop.targetJobId = server.id
         notes.hop = ("hopping to %d/%d player server"):format(server.playing, server.maxPlayers)
         local ok, err = pcall(function()
             tpSvc:TeleportToPlaceInstance(game.PlaceId, server.id, LocalPlayer)
@@ -5247,10 +5235,9 @@ hopTick = function(force)
         if ok then
             return
         end
-        -- Synchronous error (e.g. invalid instance / Error 256): blacklist and try next server
-        hopState.inProgress = false
-        hopState.blacklist[server.id] = os.clock() + 180
-        hopState.failCount += 1
+        CFG.Hop.inProgress = false
+        CFG.Hop.blacklist[server.id] = os.clock() + 180
+        CFG.Hop.failCount += 1
         notes.hop = "server rejected (" .. tostring(err) .. "); trying next"
     end
     notes.hop = "all candidate servers failed; retrying next tick"
@@ -6408,12 +6395,15 @@ local function ensureWorker(name, wanted, interval, tick, onFailure)
     end)
 end
 
-local antiAfkConnection
-local antiAfkThread
-local antiAfkDisabledConns = {}
-local antiAfkLast, antiAfkCount = -math.huge, 0
+CFG.AntiAfk = {
+    conn = nil,
+    thread = nil,
+    disabledConns = {},
+    last = -math.huge,
+    count = 0,
+}
 
-local function sendAntiAfkPulse()
+function CFG.AntiAfk.Pulse()
     local camera = workspace.CurrentCamera
     local ok = pcall(function()
         local virtualUser = game:GetService("VirtualUser")
@@ -6433,47 +6423,47 @@ local function sendAntiAfkPulse()
         end)
     end
     if ok then
-        antiAfkCount += 1
-        antiAfkLast = os.clock()
+        CFG.AntiAfk.count += 1
+        CFG.AntiAfk.last = os.clock()
     end
     return ok
 end
 
 local function syncAntiAfk()
+    local st = CFG.AntiAfk
     if not alive or not enabled.antiAfk then
-        if antiAfkConnection then antiAfkConnection:Disconnect(); antiAfkConnection = nil end
-        if antiAfkThread then pcall(task.cancel, antiAfkThread); antiAfkThread = nil end
-        for _, c in ipairs(antiAfkDisabledConns) do
+        if st.conn then st.conn:Disconnect(); st.conn = nil end
+        if st.thread then pcall(task.cancel, st.thread); st.thread = nil end
+        for _, c in ipairs(st.disabledConns) do
             pcall(function() if type(c.Enable) == "function" then c:Enable() end end)
         end
-        table.clear(antiAfkDisabledConns)
+        table.clear(st.disabledConns)
         notes.antiAfk = "off"
         return
     end
-    if antiAfkConnection then return end
-    -- Disable existing Roblox/game Idled kick connections if getconnections is supported
+    if st.conn then return end
     local disabledCount = 0
     if type(getconnections) == "function" then
         pcall(function()
             for _, c in ipairs(getconnections(LocalPlayer.Idled)) do
                 if type(c.Disable) == "function" then
                     pcall(c.Disable, c)
-                    antiAfkDisabledConns[#antiAfkDisabledConns + 1] = c
+                    st.disabledConns[#st.disabledConns + 1] = c
                     disabledCount += 1
                 end
             end
         end)
     end
-    antiAfkConnection = LocalPlayer.Idled:Connect(function()
+    st.conn = LocalPlayer.Idled:Connect(function()
         if not alive or not enabled.antiAfk then return end
-        if sendAntiAfkPulse() then
-            notes.antiAfk = ("active (%d idle blocked, %d pulses)"):format(disabledCount, antiAfkCount)
+        if CFG.AntiAfk.Pulse() then
+            notes.antiAfk = ("active (%d idle blocked, %d pulses)"):format(disabledCount, st.count)
         end
     end)
-    antiAfkThread = task.spawn(function()
+    st.thread = task.spawn(function()
         while alive and enabled.antiAfk do
-            sendAntiAfkPulse()
-            notes.antiAfk = ("active (%d idle blocked, %d pulses)"):format(disabledCount, antiAfkCount)
+            CFG.AntiAfk.Pulse()
+            notes.antiAfk = ("active (%d idle blocked, %d pulses)"):format(disabledCount, st.count)
             task.wait(math.max(30, CFG.AntiAfkCooldown or 60))
         end
     end)
