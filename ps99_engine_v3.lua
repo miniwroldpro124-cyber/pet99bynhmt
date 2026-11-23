@@ -2118,6 +2118,10 @@ local function teleportToIslandMiddle(id, modeOverride)
 end
 
 local function teleTick()
+    if CFG.TimeTrial and CFG.TimeTrial.BlocksOtherTele() then
+        notes.tele = "paused (Time Trial active)"
+        return
+    end
     local now = os.clock()
     if now < nextAt.tele then return end
     local save = getSave()
@@ -2383,6 +2387,10 @@ local function hatchEggById(eggId, count, snapNear)
 end
 
 local function eggTick()
+    if CFG.TimeTrial and CFG.TimeTrial.BlocksOtherTele() then
+        notes.egg = "paused (Time Trial active)"
+        return
+    end
     local now = os.clock()
     if now < nextAt.egg then return end
     local save = getSave()
@@ -2457,6 +2465,10 @@ local function teleportToWorldOrBestIsland(targetW)
 end
 
 local function worldTeleTick()
+    if CFG.TimeTrial and CFG.TimeTrial.BlocksOtherTele() then
+        notes.world = "paused (Time Trial active)"
+        return
+    end
     local now = os.clock()
     if now < nextAt.worldTele then return end
     local save = getSave()
@@ -2492,6 +2504,10 @@ local function worldTeleTick()
 end
 
 CFG.AdvanceTick = function()
+    if CFG.TimeTrial and CFG.TimeTrial.BlocksOtherTele() then
+        notes.advance = "paused (Time Trial active)"
+        return
+    end
     local now = os.clock()
     if now < (CFG.AdvanceNext or 0) then return end
     local save = getSave()
@@ -4204,6 +4220,10 @@ local function collectActiveGoals(save)
 end
 
 local function doQuestTick()
+    if CFG.TimeTrial and CFG.TimeTrial.BlocksOtherTele() then
+        notes.doQuest = "paused (Time Trial active)"
+        return
+    end
     local now = os.clock()
     if now < nextAt.doQuest then return end
     local save = getSave()
@@ -6768,6 +6788,10 @@ function CFG.Event.CatchRare(now, plot, save)
 end
 
 function CFG.Event.Tick()
+    if CFG.TimeTrial and CFG.TimeTrial.BlocksOtherTele() then
+        notes.event = "paused (Time Trial active)"
+        return
+    end
     local now = os.clock()
     if enabled.optPumpkinTycoon then pcall(CFG.Event.Optimize, now) end
     local save = getSave()
@@ -6920,12 +6944,47 @@ CFG.TimeTrial = {
     ZONE_NUMBER = 279,
     ZONE_NAME = "Hollow Veil Castle",
     WORLD_NUMBER = 4,
+    OUTSIDE_RELEASE_SEC = 30,
     nextEnterAt = 0,
     nextChestAt = 0,
     nextMoveAt = 0,
     emptySince = nil,
+    outsideSince = nil,
     visitedPads = {},
 }
+
+function CFG.TimeTrial.IsLimitReached()
+    local save = getSave()
+    local ttTypes = CFG.TimeTrial.Types()
+    local totalGoals = (ttTypes and tonumber(ttTypes.TotalGoals)) or 5
+    local dailyLimit = (ttTypes and tonumber(ttTypes.DailyRuns)) or 10
+    local st = save and type(save.TimeTrialStats) == "table" and save.TimeTrialStats or nil
+    local goalIndex = (st and tonumber(st.GoalIndex)) or 1
+    local dailyRuns = (st and tonumber(st.DailyRuns)) or 0
+    return (goalIndex > totalGoals) and (dailyRuns >= dailyLimit)
+end
+
+function CFG.TimeTrial.BlocksOtherTele()
+    if not alive or not enabled.autoTimeTrial then
+        CFG.TimeTrial.outsideSince = nil
+        return false
+    end
+    if CFG.TimeTrial.InInstance() then
+        CFG.TimeTrial.outsideSince = nil
+        return true
+    end
+    if CFG.TimeTrial.IsLimitReached() then
+        return false
+    end
+    local now = os.clock()
+    if not CFG.TimeTrial.outsideSince then
+        CFG.TimeTrial.outsideSince = now
+    end
+    if (now - CFG.TimeTrial.outsideSince) >= CFG.TimeTrial.OUTSIDE_RELEASE_SEC then
+        return false
+    end
+    return true
+end
 
 function CFG.TimeTrial.Types()
     local ok, mod = pcall(function()
@@ -7011,6 +7070,8 @@ function CFG.TimeTrial.GetStatus()
         points = points,
         totalRuns = totalRuns,
         streak = streak,
+        otherTeleBlocked = CFG.TimeTrial.BlocksOtherTele(),
+        outsideElapsed = CFG.TimeTrial.outsideSince and math.floor(os.clock() - CFG.TimeTrial.outsideSince) or 0,
         note = notes.timeTrial or "off",
     }
 end
@@ -7875,6 +7936,9 @@ setEnabled = function(key, value)
     if enabled[key] == nil or type(value) ~= "boolean" then return false, "invalid toggle" end
     if value and (key == "autoRankHud" or key == "autoDoQuest" or key == "autoRank") then
         CFG.RankHUD.userClosed = false
+    end
+    if key == "autoTimeTrial" then
+        CFG.TimeTrial.outsideSince = value and os.clock() or nil
     end
     enabled[key] = value
     syncWorkers()

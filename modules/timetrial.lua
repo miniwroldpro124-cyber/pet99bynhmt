@@ -67,7 +67,10 @@ return function(ctx)
                 local goalStr = st.pvpUnlocked
                     and ("Goals: Done (PVP Unlocked)")
                     or ("Goal: %d/%d"):format(st.goalIndex or 1, st.totalGoals or 5)
-                local line = ("World %s | %s | %s\nPoints: %s | Runs Left: %d/%d | Total: %d | Streak: %d\nState: %s")
+                local teleLock = st.otherTeleBlocked
+                    and "Other Tele: Paused (Time Trial active)"
+                    or "Other Tele: Active"
+                local line = ("World %s | %s | %s\nPoints: %s | Runs Left: %d/%d | Total: %d | Streak: %d\n%s | State: %s")
                     :format(
                         tostring(st.world or "?"),
                         st.inInstance and "Inside TimeTrial" or "Outside",
@@ -77,6 +80,7 @@ return function(ctx)
                         tonumber(st.dailyLimit) or 10,
                         tonumber(st.totalRuns) or 0,
                         tonumber(st.streak) or 0,
+                        teleLock,
                         tostring(st.note or "off")
                     )
                 pcall(function()
