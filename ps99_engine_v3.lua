@@ -163,8 +163,8 @@ local enabled = {
     autoRank = false, autoRebirth = false, antiAfk = false, clickAura = false,
     autoEgg = false, auraVisual = false, optBreakables = false, optPets = false, worldTele = false,
     worldAdvance = false,
-    hideEggFx = false, chestFirst = true, teleCenter = true, teleNearEgg = true, petAll = true,
-    petBulkJoin = true, petTeleAfterAttack = true, drinkHighestTier = true,
+    hideEggFx = false, chestFirst = false, teleCenter = false, teleNearEgg = false, petAll = false,
+    petBulkJoin = false, petTeleAfterAttack = false, drinkHighestTier = false,
     serverHop = false, autoBuyPetSlots = false, autoBuyEggSlots = false,
     autoForeverPack = false, autoBuyUpgrades = false, autoEquipEnchant = false,
     autoTNT = false, autoTNTCrate = false, whiteScreen = false, reduceCpuRam = false,
@@ -174,6 +174,7 @@ local enabled = {
     autoSecretRooms = false, autoTreehouse = false, autoFuse = false, autoCards = false,
     autoRelics = false, autoMailClaim = false, autoDice = false,
     autoSpinTickets = false, autoOpenChests = false,
+    autoSeasonPass = false, autoZoneGifts = false,
     noclip = false, fly = false, unlockGamepasses = false, removeGates = false,
     -- Pumpkin Tycoon Event
     optPumpkinTycoon = false,
@@ -214,6 +215,7 @@ local picked = {
     eggs = {},           -- Egg id
     huges = {},          -- Huge / Titanic / Gargantuan pet id
     items = {},          -- Misc / All items id
+    tickets = {},        -- Spinny Wheel / Raffle Ticket id
 }
 local function pickCount(store)
     local count = 0
@@ -2055,12 +2057,19 @@ local function teleportToIslandMiddle(id, modeOverride)
     end
 
     local centre, exact = zoneCenter(id)
-    if not centre then
-        -- Zone is streamed out (common for Zone 200+ across a large world): ask server teleport + streaming first.
+    local myPosNow = position()
+    local tooFarOrBig = (zoneNum and zoneNum >= 200)
+        and (not centre or not exact or (myPosNow and centre and (myPosNow - centre).Magnitude > 900))
+    if not centre or tooFarOrBig then
+        -- Big/streamed-out island (e.g. Zone 200+): force server teleport + streaming, then wait for exact farm area center
         if requestServerTele() then
             if zoneNum and zoneNum >= 200 then legitTeleDone[id] = true end
-            task.wait(0.35)
-            centre, exact = zoneCenter(id)
+            local deadline = os.clock() + 3.0
+            while alive and os.clock() < deadline do
+                centre, exact = zoneCenter(id)
+                if centre and exact then break end
+                task.wait(0.2)
+            end
             if not centre then
                 return true, "teleported to " .. id .. " (via server)"
             end
@@ -2988,7 +2997,7 @@ local PICK_CATEGORIES = {
     {"zones", "Zones"}, {"keys", "Keys"}, {"bags", "Bags"}, {"fruits", "Fruits"},
     {"potions", "Potions"}, {"flags", "Flags"}, {"dice", "Dice"},
     {"cards", "Cards"}, {"freeGifts", "Gifts"}, {"eggs", "Eggs"},
-    {"huges", "Huges"}, {"items", "Items"},
+    {"huges", "Huges"}, {"items", "Items"}, {"tickets", "Tickets"},
 }
 
 local function pickItems(category)
@@ -3018,6 +3027,14 @@ local function pickItems(category)
         for _, id in ipairs(cat.huges) do out[#out + 1] = id end
     elseif category == "items" then
         for _, id in ipairs(cat.items) do out[#out + 1] = id end
+    elseif category == "tickets" then
+        for _, name in ipairs({
+            "Spinny Wheel Ticket", "Tech Spinny Wheel Ticket", "Void Spinny Wheel Ticket",
+            "Fantasy Spinny Wheel Ticket", "Exclusive Raffle Ticket", "Tower Raffle Ticket",
+            "Arcade Ticket", "Golden Paw Ticket", "Millionaire Ticket", "Mystery Ticket",
+        }) do
+            out[#out + 1] = name
+        end
     elseif category == "cards" then
         local seen = {}
         for _, card in ipairs(stackList(inventory(getSave(), "Card"))) do
@@ -3272,7 +3289,7 @@ local function spinTick()
                 pcall(fire, "Spinny Wheel: Request Ticket", w.id)
             end
             local have = counts[w.ticket] or 0
-            if have > 0 then
+            if have > 0 and allowAll(picked.tickets, w.ticket) then
                 nextAt.spin = now + 0.15
                 local ok = invoke("Spinny Wheel: Request Spin", w.id)
                 if not alive or not enabled.autoSpinTickets then return end
@@ -3283,6 +3300,20 @@ local function spinTick()
                     nextAt.save = 0
                     return
                 end
+            end
+        end
+    end
+    -- Support Raffle tickets when owned & allowed by ticket picker
+    for _, raffleTicket in ipairs({ "Exclusive Raffle Ticket", "Tower Raffle Ticket" }) do
+        local have = counts[raffleTicket] or 0
+        if have > 0 and allowAll(picked.tickets, raffleTicket) then
+            nextAt.spin = now + 0.35
+            local ok = invoke("Raffle_Submit", math.min(have, 10))
+            if ok then
+                CFG.Spin.total += 1
+                notes.spin = ("submitted %s"):format(raffleTicket)
+                nextAt.save = 0
+                return
             end
         end
     end
@@ -4266,7 +4297,7 @@ local function doQuestTick()
                     teleportToIslandMiddle(zones[best].id)
                 end
                 local miscList = stackList(inventory(save, "Misc"))
-                local jarOrder = {"Basic Coin Jar", "Normal Coin Jar", "Coin Jar", "Magic Coin Jar", "Giant Coin Jar"}
+                local jarOrder = {"Basic Coin Jar"}
                 for _, jarName in ipairs(jarOrder) do
                     for _, item in ipairs(miscList) do
                         if item.id == jarName and item.amount > 0 then
@@ -4754,17 +4785,16 @@ function CFG.SyncFastFarmBeta()
     end
     if st.conn then return end
     if not CFG.BootstrapDone then CFG.BootstrapModules() end
-    notes.betaFarm = "running [BETA bypass]"
+    notes.betaFarm = "running [BETA no-limit bypass]"
     st.conn = game:GetService("RunService").Heartbeat:Connect(function()
         if not alive or not enabled.fastFarmBeta then return end
         local now = os.clock()
-        if now - st.lastStep < 0.03 then return end
         st.lastStep = now
         local point = position()
         if not point then return end
         local zone = currentZone()
         if pickCount(picked.zones) > 0 and zone and not picked.zones[zone] then return end
-        if #auraTargets == 0 or now - (target.at or 0) >= 0.08 then
+        if #auraTargets == 0 or now - (target.at or 0) >= 0.04 then
             target.model, target.uid = pickTarget(point, zone)
             target.at = now
         end
@@ -4774,12 +4804,14 @@ function CFG.SyncFastFarmBeta()
             seenM[target.model] = true
             validList[#validList + 1] = { model = target.model, uid = target.model:GetAttribute("BreakableUID") }
         end
-        for _, m in ipairs(auraTargets) do
-            if not seenM[m] and validTarget(m, point, nil) then
-                local u = m:GetAttribute("BreakableUID")
-                if u ~= nil then
-                    seenM[m] = true
-                    validList[#validList + 1] = { model = m, uid = u }
+        if type(auraTargets) == "table" then
+            for _, m in ipairs(auraTargets) do
+                if not seenM[m] and validTarget(m, point, nil) then
+                    local u = m:GetAttribute("BreakableUID")
+                    if u ~= nil then
+                        seenM[m] = true
+                        validList[#validList + 1] = { model = m, uid = u }
+                    end
                 end
             end
         end
@@ -4799,9 +4831,8 @@ function CFG.SyncFastFarmBeta()
                 return ad < bd
             end)
         end
-        -- 1. Multi-target tap damage burst (bypasses 8/s BreakableFrontend throttle)
-        local burstMax = math.min(#validList, math.max(CFG.FarmBurst or 12, 20))
-        for i = 1, burstMax do
+        -- 1. No-limit multi-target tap damage burst (hits EVERY valid breakable in zone every Heartbeat)
+        for i = 1, #validList do
             fire("Breakables_PlayerDealDamage", validList[i].uid)
         end
         petState.lastAttackAt = now
@@ -5897,6 +5928,7 @@ function CFG.Event.TeleNearestFarm(now, plot)
     CFG.Event.next.nearFarm = now + 1.0
     local myPos = position()
     if not myPos then return end
+    -- Force find the nearest breakable zone (preferring live breakable clusters) and snap to its middle
     local bestZ = CFG.Event.OwnedZones(plot)
     local nearestPos, nearestDist = nil, math.huge
     local bestPos = nil
@@ -5911,13 +5943,11 @@ function CFG.Event.TeleNearestFarm(now, plot)
             end
         end
     end
-    -- If far from every farm area (e.g. just spawned/entered), tele to the best unlocked farm area middle;
-    -- otherwise keep centered in the middle of the nearest unlocked farm area.
-    local targetPos = (nearestDist > 120 and bestPos) or nearestPos or bestPos
+    local targetPos = nearestPos or bestPos
     if targetPos then
         local d2 = (Vector3.new(myPos.X, 0, myPos.Z) - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude
-        if d2 > 10 then
-            CFG.Event.MoveTo(targetPos)
+        if d2 > 8 then
+            snapTo(targetPos)
         end
     end
 end
@@ -6641,7 +6671,123 @@ syncWorkers = function()
     ensureWorker("tntCrate", enabled.autoTNTCrate, 1, CFG.TNTCrateTick, function() enabled.autoTNTCrate = false end)
     ensureWorker("keys", enabled.autoKeys, 1, keyTick, function() enabled.autoKeys = false end)
     ensureWorker("bags", enabled.autoGiftBags, 1, bagTick, function() enabled.autoGiftBags = false end)
+-- Auto Season Pass (EventPass_Get + EventPass_Buy) & Auto Claim Free Zone Gifts (DailyRewards, Free Gifts, Free Vending, Forever Pack)
+function CFG.SeasonPassTick()
+    local now = os.clock()
+    if now < (nextAt.seasonPass or 0) then return end
+    nextAt.seasonPass = now + 5.0
+    local passName = nil
+    local epu = nil
+    pcall(function()
+        epu = require(RS.Library.Util.EventPassUtil)
+        if epu and type(epu.Current) == "function" then
+            passName = epu.Current()
+        end
+    end)
+    if type(passName) ~= "string" or #passName == 0 then
+        notes.seasonPass = "no active season pass"
+        return
+    end
+    local state = invoke("EventPass_Get", passName)
+    if type(state) ~= "table" or state.Buying == false then
+        notes.seasonPass = "season pass unavailable"
+        return
+    end
+    local stars = tonumber(state.Stars) or 0
+    local spent = tonumber(state.Spent) or 0
+    local owned = type(state.Owned) == "table" and state.Owned or {}
+    local tierUnlock = type(state.TierUnlock) == "table" and state.TierUnlock or {}
+    local claimed = 0
+    pcall(function()
+        local d = epu.Get(passName)
+        local ws = d and type(epu.WeekSet) == "function" and epu.WeekSet(d, tonumber(state.Week) or 1) or nil
+        local tiers = ws and (ws.Tiers or ws.Rewards) or nil
+        if type(tiers) == "table" then
+            for ti, tier in ipairs(tiers) do
+                local unlockReq = tonumber(tierUnlock[ti]) or 0
+                if spent >= unlockReq then
+                    local list = type(tier) == "table" and (tier.Rewards or tier) or {}
+                    for _, rw in ipairs(list) do
+                        if type(rw) == "table" and type(rw.Key) == "string" and not owned[rw.Key] then
+                            local cost = tonumber(rw.Cost) or 0
+                            local soon = type(epu.ComingSoon) == "function" and epu.ComingSoon(rw)
+                            local sold = type(epu.SoldOut) == "function" and epu.SoldOut(rw)
+                            if not soon and not sold and stars >= cost then
+                                local ok = invoke("EventPass_Buy", passName, rw.Key)
+                                if ok then
+                                    claimed += 1
+                                    stars -= cost
+                                    spent += cost
+                                    owned[rw.Key] = true
+                                    task.wait(0.2)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    notes.seasonPass = claimed > 0
+        and ("claimed %d reward(s) (%d tokens left)"):format(claimed, stars)
+        or ("%s: %d tokens (ready)"):format(passName, stars)
+end
+
+function CFG.ZoneGiftsTick()
+    local now = os.clock()
+    if now < (nextAt.zoneGifts or 0) then return end
+    nextAt.zoneGifts = now + 8.0
+    local claimed = 0
+    -- 1. Free Playtime Gifts (1..12)
+    local save = getSave()
+    local redeemed = save and type(save.FreeGiftsRedeemed) == "table" and save.FreeGiftsRedeemed or {}
+    for id = 1, 12 do
+        if not redeemed[id] and not redeemed[tostring(id)] then
+            local ok = invoke("Redeem Free Gift", id)
+            if ok == true then claimed += 1 end
+        end
+    end
+    -- 2. Free Forever Pack
+    local okFP = invoke("ForeverPacks: Claim Free")
+    if okFP == true then claimed += 1 end
+    -- 3. Free Zone Daily / Timed Rewards
+    local dirRoot = RS:FindFirstChild("__DIRECTORY")
+    local timedFolder = dirRoot and dirRoot:FindFirstChild("TimedRewards")
+    if timedFolder then
+        for _, child in ipairs(timedFolder:GetDescendants()) do
+            if child:IsA("ModuleScript") then
+                local okM, mod = pcall(require, child)
+                local rid = (okM and type(mod) == "table" and mod._id) or child.Name:gsub("^(.-)%s*|%s*", "")
+                if type(rid) == "string" and #rid > 0 then
+                    local okD = invoke("DailyRewards_Redeem", rid)
+                    if okD == true then claimed += 1; task.wait(0.1) end
+                end
+            end
+        end
+    end
+    -- 4. Free Zone Vending Machines (Price == 0)
+    local vmFolder = dirRoot and dirRoot:FindFirstChild("VendingMachines")
+    if vmFolder then
+        for _, child in ipairs(vmFolder:GetDescendants()) do
+            if child:IsA("ModuleScript") then
+                local okM, mod = pcall(require, child)
+                if okM and type(mod) == "table" and (mod.Price == nil or mod.Price == 0) then
+                    local vid = mod._id or child.Name:gsub("^(.-)%s*|%s*", "")
+                    if type(vid) == "string" and #vid > 0 then
+                        local okV = invoke("VendingMachines_Purchase", vid, 1)
+                        if okV == true then claimed += 1; task.wait(0.1) end
+                    end
+                end
+            end
+        end
+    end
+    if claimed > 0 then nextAt.save = 0 end
+    notes.zoneGifts = claimed > 0 and ("claimed " .. claimed .. " free zone gift(s)") or "checked free zone gifts"
+end
+
     ensureWorker("spin", enabled.autoSpinTickets, 0.15, spinTick, function() enabled.autoSpinTickets = false end)
+    ensureWorker("seasonPass", enabled.autoSeasonPass, 5.0, CFG.SeasonPassTick, function() enabled.autoSeasonPass = false end)
+    ensureWorker("zoneGifts", enabled.autoZoneGifts, 8.0, CFG.ZoneGiftsTick, function() enabled.autoZoneGifts = false end)
     ensureWorker("chests", enabled.autoOpenChests, 1, chestTick, function() enabled.autoOpenChests = false end)
     ensureWorker("fruits", enabled.autoFruits, 1, fruitTick, function() enabled.autoFruits = false end)
     ensureWorker("potions", enabled.autoPotions, 1, potionTick, function() enabled.autoPotions = false end)
@@ -6810,6 +6956,50 @@ local controller = {
     Cheat = runCheatAction,
     GetCatalog = function()
         return scanLiveDirectory()
+    end,
+    GetWorldCatalog = function()
+        local w = detectActiveWorld()
+        local wMin = (CFG.WorldFirst and CFG.WorldFirst[w]) or (w == 1 and 1 or (w == 2 and 100 or (w == 3 and 200 or 240)))
+        local wMax = (CFG.WorldFirst and CFG.WorldFirst[w + 1] and (CFG.WorldFirst[w + 1] - 1)) or (w == 1 and 99 or (w == 2 and 199 or (w == 3 and 239 or 999)))
+        local worldIslands = {}
+        for num = wMin, math.min(wMax, 350) do
+            if zones[num] then
+                worldIslands[#worldIslands + 1] = zones[num].id
+            end
+        end
+        local worldEggs = {}
+        local seenEgg = {}
+        pcall(function()
+            local dir = require(RS.Library.Directory)
+            local eggsDir = dir and dir.Eggs
+            if type(eggsDir) == "table" then
+                local ordered = {}
+                for id, data in pairs(eggsDir) do
+                    if type(data) == "table" and type(data.eggNumber) == "number" then
+                        local en = data.eggNumber
+                        if en >= wMin and en <= wMax then
+                            ordered[#ordered + 1] = { num = en, id = tostring(id) }
+                        end
+                    end
+                end
+                table.sort(ordered, function(a, b) return a.num < b.num end)
+                for _, e in ipairs(ordered) do
+                    if not seenEgg[e.id] then
+                        seenEgg[e.id] = true
+                        worldEggs[#worldEggs + 1] = e.id
+                    end
+                end
+            end
+        end)
+        if #worldEggs == 0 then
+            for num = wMin, math.min(wMax, 350) do
+                if eggByNumber[num] and not seenEgg[eggByNumber[num]] then
+                    seenEgg[eggByNumber[num]] = true
+                    worldEggs[#worldEggs + 1] = eggByNumber[num]
+                end
+            end
+        end
+        return { world = w, islands = worldIslands, eggs = worldEggs }
     end,
     ClearPicks = function(category)
         local store = picked[category]

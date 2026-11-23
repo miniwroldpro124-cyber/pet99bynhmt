@@ -6,7 +6,7 @@ return function(engine, ui)
     local DEFAULT_FILE = FOLDER .. "/config.json"
 
     local config = {
-        autoSave = false,
+        autoSave = true,
         _loading = false,
         elements = {}, -- key -> { { kind = "toggle"|"slider"|"dropdown", handle = element }, ... }
     }

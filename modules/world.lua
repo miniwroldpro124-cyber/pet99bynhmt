@@ -1,5 +1,5 @@
 -- modules/world.lua
--- Direct CFrame Island Teleport (Zones 1-279 incl. World 3 200+ & World 4 240+), Best World, and All Islands.
+-- Direct CFrame & Legit Island Teleport (filtered to current World 1-4), Best World, and Zone Filter.
 return function(ctx)
     local tab = ctx.win:CreateTab("World", "rbxassetid://16259403210")
     local ui = ctx.ui
@@ -21,10 +21,10 @@ return function(ctx)
         ui.notify("Tele To Farm", tostring(ok and (msg or res) or res))
     end)
     ui.toggle(tab, { name = "Auto Tele Best Island (Middle)", key = "zoneTele", default = false })
-    ui.toggle(tab, { name = "Stand In Island Middle", key = "teleCenter", default = true })
+    ui.toggle(tab, { name = "Stand In Island Middle", key = "teleCenter", default = false })
     ui.toggle(tab, {
-        name = "Middle + Near Egg Priority", key = "teleNearEgg", default = true,
-        note = "Stands in the farm island middle while staying within range to open the island egg when one is nearby.",
+        name = "Middle + Near Egg Priority", key = "teleNearEgg", default = false,
+        note = "Stands inside the farm breakables as close to the middle as possible while staying in range of the island egg.",
     })
     ui.toggle(tab, { name = "Auto Buy Next Island", key = "zoneBuy", default = false })
     ui.slider(tab, { name = "Tele Check Interval", key = "TeleInterval", range = { 0.2, 5 }, increment = 0.2, suffix = "s", value = 0.4 })
@@ -44,13 +44,20 @@ return function(ctx)
     end)
     ui.toggle(tab, { name = "Auto Advance Highest World", key = "worldAdvance", default = false })
 
-    local okCat, cat = pcall(engine.GetCatalog)
-    local islands = (okCat and type(cat) == "table" and type(cat.islands) == "table" and #cat.islands > 0)
-        and cat.islands or { "Spawn" }
+    local okW, wCat = pcall(engine.GetWorldCatalog)
+    local curWorld = (okW and type(wCat) == "table" and wCat.world) or 1
+    local islands = (okW and type(wCat) == "table" and type(wCat.islands) == "table" and #wCat.islands > 0)
+        and wCat.islands or nil
+    if not islands then
+        local okCat, cat = pcall(engine.GetCatalog)
+        islands = (okCat and type(cat) == "table" and type(cat.islands) == "table" and #cat.islands > 0)
+            and cat.islands or { "Spawn" }
+    end
     local selectedIsland = islands[1]
 
+    ui.section(tab, ("World %d Islands (%d)"):format(curWorld, #islands))
     ui.dropdown(tab, {
-        name = "Select Island (" .. tostring(#islands) .. ")",
+        name = ("Select World %d Island (%d)"):format(curWorld, #islands),
         options = islands,
         current = selectedIsland,
         callback = function(option) selectedIsland = tostring(option) end,
@@ -59,5 +66,15 @@ return function(ctx)
         if not selectedIsland then return end
         local ok, res, msg = pcall(engine.TeleportIsland, selectedIsland)
         ui.notify("Island", tostring(ok and (msg or res) or res))
+    end)
+    ui.button(tab, "Lock Farm To Selected Island", function()
+        if not selectedIsland then return end
+        pcall(engine.ClearPicks, "zones")
+        pcall(engine.SetPick, "zones", selectedIsland, true)
+        ui.notify("Zone Filter", "Locked farm to " .. selectedIsland)
+    end)
+    ui.button(tab, "Clear Island Filter (Allow All)", function()
+        pcall(engine.ClearPicks, "zones")
+        ui.notify("Zone Filter", "All islands allowed")
     end)
 end

@@ -1,16 +1,24 @@
 -- modules/progress.lua
--- Auto Rank / Quest tasks, Ranks, Rebirth, Player Upgrades, Pet/Egg Slots, Forever Free Pack, Enchants.
+-- Auto Rank / Quest tasks, Season Pass, Free Zone Gifts, Ranks, Rebirth, Slots & Enchants.
 return function(ctx)
     local tab = ctx.win:CreateTab("Progress", "rbxassetid://15642579187")
     local ui = ctx.ui
 
-    ui.section(tab, "Auto Rank & Quests")
+    ui.section(tab, "Auto Rank, Season Pass & Free Gifts")
     ui.toggle(tab, {
         name = "Auto Do Rank / Quest Tasks", key = "autoDoQuest", default = false,
-        note = "Priority-sorted Rank quests: auto hatches best egg & crafts Best Golden/Rainbow pets, Basic Coin Jar first, opens bundles/bags only when needed.",
+        note = "Priority-sorted Rank quests: auto hatches best egg & crafts Best Golden/Rainbow pets, Basic Coin Jar ONLY, opens bundles/bags only when needed.",
     })
     ui.toggle(tab, { name = "Auto Claim Quests (NPC & Daily)", key = "autoQuest", default = false })
     ui.toggle(tab, { name = "Auto Claim Rank Rewards", key = "autoRank", default = false })
+    ui.toggle(tab, {
+        name = "Auto Season Pass", key = "autoSeasonPass", default = false,
+        note = "Automatically claims/buys unlocked Season Pass rewards with your earned Season Tokens.",
+    })
+    ui.toggle(tab, {
+        name = "Auto Claim Free Zone Gifts", key = "autoZoneGifts", default = false,
+        note = "Claims Free Playtime Gifts, Forever Free Pack, Daily/Timed Zone Rewards, and Free Zone Vending Machines.",
+    })
 
     ui.section(tab, "Progression & Slots")
     ui.toggle(tab, { name = "Auto Rebirth", key = "autoRebirth", default = false })

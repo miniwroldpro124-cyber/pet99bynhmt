@@ -97,9 +97,13 @@ return function(ctx)
         ui.toggle(tab, { name = b[2], default = true, onChange = function(v) setOpt("merchantBands", v == true, b[1]) end })
     end
 
-    ui.section(tab, "Upgrades, Hot Cocoa, Boosts & Gifts")
+    ui.section(tab, "Upgrades, Season Pass, Hot Cocoa & Boosts")
+    ui.toggle(tab, {
+        name = "Auto Season Pass", key = "autoSeasonPass", default = false,
+        note = "Automatically claims/buys unlocked Season Pass rewards with your earned Season Tokens.",
+    })
     ui.toggle(tab, { name = "Auto Buy Selected Pumpkin Upgrades", key = "ptAutoBuyUpgrades", default = false })
-    for _, tr in ipairs({
+    local upgradeDefs = {
         { "SpawnLuck", "Upgrade: Spawn Luck" },
         { "PumpkinCoins", "Upgrade: Patch Coin Payout" },
         { "PumpkinDamage", "Upgrade: Pumpkin Damage" },
@@ -108,8 +112,31 @@ return function(ctx)
         { "ChaseOdds", "Upgrade: Chase Odds" },
         { "EggLuck", "Upgrade: Island Luck" },
         { "MerchantLuck", "Upgrade: Merchant Luck" },
-    }) do
-        ui.toggle(tab, { name = tr[2], default = true, onChange = function(v) setOpt("upgradeTracks", v == true, tr[1]) end })
+    }
+    local upgradeHandles = {}
+    ui.button(tab, "Choose All Upgrades", function()
+        for _, tr in ipairs(upgradeDefs) do
+            setOpt("upgradeTracks", true, tr[1])
+            local h = upgradeHandles[tr[1]]
+            if h and type(h.Set) == "function" then pcall(h.Set, true) end
+        end
+        ui.notify("Event Upgrades", "Selected all " .. #upgradeDefs .. " upgrades")
+    end)
+    ui.button(tab, "Clear All Upgrades", function()
+        for _, tr in ipairs(upgradeDefs) do
+            setOpt("upgradeTracks", false, tr[1])
+            local h = upgradeHandles[tr[1]]
+            if h and type(h.Set) == "function" then pcall(h.Set, false) end
+        end
+        ui.notify("Event Upgrades", "Cleared all upgrades")
+    end)
+    for _, tr in ipairs(upgradeDefs) do
+        setOpt("upgradeTracks", false, tr[1])
+        upgradeHandles[tr[1]] = ui.toggle(tab, {
+            name = tr[2],
+            default = false,
+            onChange = function(v) setOpt("upgradeTracks", v == true, tr[1]) end,
+        })
     end
 
     ui.toggle(tab, { name = "Auto Buy Selected Hot Cocoa Boosts", key = "ptAutoBuyCocoa", default = false })

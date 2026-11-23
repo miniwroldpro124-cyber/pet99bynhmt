@@ -14,7 +14,7 @@ return function(ctx)
     ui.toggle(tab, { name = "Fast Auto Farm (Main)", key = "farm", default = false })
     ui.toggle(tab, {
         name = "Auto Efficient Farm (Fast Farm v2_Beta)", key = "fastFarmBeta", default = false,
-        note = "Heartbeat bypass: chests/nearest sort, 1-pet-1-ore CQ_Route + JoinPetBulk + cpet.Arrived + 1e6 speed + 20-target burst.",
+        note = "No-limit Heartbeat bypass: hits ALL valid breakables every frame, 1-pet-1-ore CQ_Route + JoinPetBulk + cpet.Arrived + 1e6 speed.",
     })
     ui.toggle(tab, { name = "Auto Tap (Fast Click)", key = "tap", default = false })
     ui.toggle(tab, {
@@ -72,8 +72,8 @@ return function(ctx)
     ui.toggle(tab, { name = "Auto Claim Forever Free Pack", key = "autoForeverPack", default = false })
 
     ui.section(tab, "Targeting & Tuning")
-    ui.toggle(tab, { name = "Chests First", key = "chestFirst", default = true })
-    ui.toggle(tab, { name = "Pet Tele After Attack Only", key = "petTeleAfterAttack", default = true })
+    ui.toggle(tab, { name = "Chests First", key = "chestFirst", default = false })
+    ui.toggle(tab, { name = "Pet Tele After Attack Only", key = "petTeleAfterAttack", default = false })
     ui.toggle(tab, { name = "Jitter", key = "jitter", default = false })
     ui.toggle(tab, { name = "Aura Visual", key = "auraVisual", default = false })
     ui.slider(tab, { name = "Hit Rate", key = "MaxTapRate", range = { 1, 120 }, increment = 1, suffix = "/s", value = 90 })
