@@ -1772,14 +1772,33 @@ function CFG.FindZoneEggPos(id, breakCenter, folder)
     return bestPos, bestDist
 end
 
--- Resolves the optimal standing spot for a farm island + whether INTERACT.BREAK_ZONES was loaded:
--- Priority 1: Middle of INTERACT.BREAK_ZONES AND within egg-open range (<= 24 studs) when an egg borders the island.
--- Priority 2: Exact geometric middle of INTERACT.BREAK_ZONES / BREAKABLE_SPAWNS (exact = true).
--- Priority 3: Live breakables centroid (exact = true).
--- Priority 4: __FAKE_GROUND / PERSISTENT.Teleport fallback (exact = false, triggers streaming).
+-- Resolves the optimal standing spot for a farm island focused on MAIN FARM / BREAKABLE items:
+-- Priority 1: Live breakable items / INTERACT.BREAK_ZONES middle (strictly inside breakable bounds; shifts slightly toward an egg ONLY if still inside the breakables).
+-- Priority 2: Live breakables centroid (exact = true).
+-- Priority 3: __FAKE_GROUND / PERSISTENT.Teleport fallback (exact = false, triggers streaming).
 local function zoneCenter(id, preferEgg)
     if type(id) ~= "string" then return nil, false end
     local folder = findZoneFolder(id)
+    local liveSum, liveCount, liveMaxY = Vector3.zero, 0, -math.huge
+    local registry = modules.breakables
+    if registry and type(registry.AllByZoneAndClass) == "function" then
+        for _, class in ipairs({"Normal", "Chest", "Economy", "Event", "Pinata", "LuckyBlock", "Comet", "CoinJar"}) do
+            local ok, list = pcall(registry.AllByZoneAndClass, id, class)
+            if ok and type(list) == "table" then
+                for _, value in pairs(list) do
+                    local record = type(value) == "table" and value.model ~= nil and value or nil
+                    local at = record and record.position or (typeof(value) == "Instance" and modelPosition(value))
+                    if typeof(at) == "Vector3" then
+                        liveSum += at
+                        liveCount += 1
+                        if at.Y > liveMaxY then liveMaxY = at.Y end
+                    end
+                    if liveCount >= 400 then break end
+                end
+            end
+            if liveCount >= 400 then break end
+        end
+    end
     if folder then
         local interact = folder:FindFirstChild("INTERACT")
         local breakZones = interact and (interact:FindFirstChild("BREAK_ZONES") or interact:FindFirstChild("BREAKABLE_SPAWNS"))
@@ -1801,24 +1820,26 @@ local function zoneCenter(id, preferEgg)
                 end
             end
             if count > 0 then
-                local mid = Vector3.new(sum.X / count, maxY, sum.Z / count)
+                local topY = math.max(maxY, liveCount > 0 and liveMaxY or maxY)
+                local mid = liveCount >= 3
+                    and Vector3.new(math.clamp(liveSum.X / liveCount, minX + 2, maxX - 2), topY, math.clamp(liveSum.Z / liveCount, minZ + 2, maxZ - 2))
+                    or Vector3.new(sum.X / count, topY, sum.Z / count)
                 if preferEgg ~= false and enabled.teleNearEgg then
                     local eggPos, eggDist = CFG.FindZoneEggPos(id, mid, folder)
-                    if eggPos and eggDist <= 85 then
+                    if eggPos and eggDist <= 70 then
                         if eggDist <= 24 then
                             return mid, true
                         end
-                        -- Stand inside the farm area (as close to middle as possible) while staying within 20 studs of the egg
+                        -- Shift toward egg ONLY if the resulting spot stays strictly inside the breakable zone
                         local dir = Vector3.new(mid.X - eggPos.X, 0, mid.Z - eggPos.Z)
                         if dir.Magnitude > 0.01 then
                             dir = dir.Unit
-                            local nearEgg = Vector3.new(eggPos.X + dir.X * 18, mid.Y, eggPos.Z + dir.Z * 18)
+                            local nearEgg = Vector3.new(eggPos.X + dir.X * 18, topY, eggPos.Z + dir.Z * 18)
                             local clampedX = math.clamp(nearEgg.X, minX + 2, maxX - 2)
                             local clampedZ = math.clamp(nearEgg.Z, minZ + 2, maxZ - 2)
                             if (Vector3.new(clampedX, 0, clampedZ) - Vector3.new(eggPos.X, 0, eggPos.Z)).Magnitude <= 26 then
-                                return Vector3.new(clampedX, mid.Y, clampedZ), true
+                                return Vector3.new(clampedX, topY, clampedZ), true
                             end
-                            return nearEgg, true
                         end
                     end
                 end
@@ -1826,33 +1847,16 @@ local function zoneCenter(id, preferEgg)
             end
         end
     end
-    local registry = modules.breakables
-    if registry and type(registry.AllByZoneAndClass) == "function" then
-        local sum, count = Vector3.zero, 0
-        for _, class in ipairs({"Normal", "Chest"}) do
-            local ok, list = pcall(registry.AllByZoneAndClass, id, class)
-            if ok and type(list) == "table" then
-                for _, value in pairs(list) do
-                    local record = type(value) == "table" and value.model ~= nil and value or nil
-                    local at = record and record.position or (typeof(value) == "Instance" and modelPosition(value))
-                    if typeof(at) == "Vector3" then
-                        sum += at
-                        count += 1
-                    end
-                    if count >= 400 then break end
-                end
-            end
-            if count >= 400 then break end
-        end
-        if count > 0 then return sum / count, true end
+    if liveCount > 0 then
+        return Vector3.new(liveSum.X / liveCount, liveMaxY, liveSum.Z / liveCount), true
     end
     local ground = thingsFolder("__FAKE_GROUND")
     if ground then
         local targetPart = ground:FindFirstChild(id, true)
         if targetPart then
-            if targetPart:IsA("BasePart") then return targetPart.Position, false end
-            local ok, box = pcall(function() return targetPart:GetBoundingBox() end)
-            if ok and box then return box.Position, false end
+            if targetPart:IsA("BasePart") then return targetPart.Position + Vector3.new(0, targetPart.Size.Y * 0.5, 0), false end
+            local ok, box, sz = pcall(function() return targetPart:GetBoundingBox() end)
+            if ok and box then return box.Position + Vector3.new(0, sz and sz.Y * 0.5 or 0, 0), false end
             local ok2, pivot = pcall(function() return targetPart:GetPivot().Position end)
             if ok2 and pivot then return pivot, false end
         end
@@ -1861,7 +1865,7 @@ local function zoneCenter(id, preferEgg)
         local persistent = folder:FindFirstChild("PERSISTENT")
         local tele = persistent and persistent:FindFirstChild("Teleport")
         if tele then
-            if tele:IsA("BasePart") then return tele.Position, false end
+            if tele:IsA("BasePart") then return tele.Position + Vector3.new(0, tele.Size.Y * 0.5, 0), false end
             if tele:IsA("CFrameValue") then return tele.Value.Position, false end
             local ok, pos = pcall(function() return modelPosition(tele) end)
             if ok and pos then return pos, false end
@@ -1879,13 +1883,43 @@ local function snapTo(point)
     if hum and hum.Sit then
         pcall(function() hum.Sit = false end)
     end
+    -- Teleport higher (+12 studs) to avoid clipping under floors or falling into the void
+    local highPos = point + Vector3.new(0, 12, 0)
+    pcall(fire, "RequestStreaming", point)
     local ok = pcall(function()
         root.AssemblyLinearVelocity = Vector3.zero
         root.AssemblyAngularVelocity = Vector3.zero
-        character:PivotTo(CFrame.new(point + Vector3.new(0, 3.5, 0)))
+        character:PivotTo(CFrame.new(highPos))
     end)
     if not ok then
-        ok = pcall(function() root.CFrame = CFrame.new(point + Vector3.new(0, 3.5, 0)) end)
+        ok = pcall(function() root.CFrame = CFrame.new(highPos) end)
+    end
+    if ok then
+        -- Anti-void guard: if solid ground below hasn't streamed in yet, briefly anchor until ground loads
+        task.spawn(function()
+            local rp = RaycastParams.new()
+            rp.FilterType = Enum.RaycastFilterType.Exclude
+            rp.FilterDescendantsInstances = { character }
+            local hit = workspace:Raycast(highPos, Vector3.new(0, -65, 0), rp)
+            if not hit and root and root.Parent then
+                pcall(function() root.Anchored = true end)
+                local deadline = os.clock() + 1.2
+                while alive and root and root.Parent and os.clock() < deadline do
+                    hit = workspace:Raycast(highPos, Vector3.new(0, -65, 0), rp)
+                    if hit then break end
+                    task.wait(0.1)
+                end
+                if root and root.Parent then
+                    if hit then
+                        pcall(function()
+                            root.AssemblyLinearVelocity = Vector3.zero
+                            character:PivotTo(CFrame.new(hit.Position + Vector3.new(0, 6, 0)))
+                        end)
+                    end
+                    pcall(function() root.Anchored = false end)
+                end
+            end
+        end)
     end
     return ok
 end
@@ -4531,12 +4565,34 @@ function CFG.SyncWhiteScreen()
     local active = alive and enabled.whiteScreen
     local RunService = game:GetService("RunService")
     pcall(function() RunService:Set3dRenderingEnabled(not active) end)
+    local function findMenuGui()
+        local roots = {}
+        pcall(function() if type(gethui) == "function" then roots[#roots + 1] = gethui() end end)
+        pcall(function() roots[#roots + 1] = game:GetService("CoreGui") end)
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if pg then roots[#roots + 1] = pg end
+        for _, r in ipairs(roots) do
+            local m = r and r:FindFirstChild("StephHUB_UI")
+            if m then return m end
+        end
+        return nil
+    end
     if active then
-        if not st.whiteGui or not st.whiteGui.Parent then
-            local parent = nil
+        local menuGui = findMenuGui()
+        if menuGui then
+            -- Keep Steph HUB menu visible above White Screen so the user can toggle everything on/off
             pcall(function()
-                if type(gethui) == "function" then parent = gethui() end
+                menuGui.Enabled = true
+                if menuGui.DisplayOrder < 500 then menuGui.DisplayOrder = 500 end
+                local win = menuGui:FindFirstChild("MainWindow")
+                if win then win.Visible = true end
             end)
+        end
+        if not st.whiteGui or not st.whiteGui.Parent then
+            local parent = (menuGui and menuGui.Parent) or nil
+            if not parent then
+                pcall(function() if type(gethui) == "function" then parent = gethui() end end)
+            end
             if not parent then
                 pcall(function() parent = game:GetService("CoreGui") end)
             end
@@ -4548,7 +4604,7 @@ function CFG.SyncWhiteScreen()
                 gui.Name = "StephHUB_WhiteScreen"
                 gui.ResetOnSpawn = false
                 gui.IgnoreGuiInset = true
-                -- Stay below Steph HUB menu (DisplayOrder 500) so the user can always control toggles
+                -- Always below StephHUB_UI (DisplayOrder 500) in the same container
                 gui.DisplayOrder = 400
                 local bg = Instance.new("Frame")
                 bg.Size = UDim2.fromScale(1, 1)
@@ -4556,27 +4612,53 @@ function CFG.SyncWhiteScreen()
                 bg.BorderSizePixel = 0
                 bg.Parent = gui
                 local lbl = Instance.new("TextLabel")
-                lbl.Size = UDim2.new(1, 0, 0, 40)
-                lbl.Position = UDim2.new(0, 0, 0.5, -42)
+                lbl.Size = UDim2.new(1, 0, 0, 32)
+                lbl.Position = UDim2.new(0, 0, 0, 14)
                 lbl.BackgroundTransparency = 1
                 lbl.Font = Enum.Font.GothamBold
                 lbl.Text = "Steph HUB  -  White Screen Active (3D Render Paused)"
                 lbl.TextColor3 = Color3.fromRGB(60, 65, 80)
-                lbl.TextSize = 18
+                lbl.TextSize = 16
                 lbl.Parent = bg
+                local bar = Instance.new("Frame")
+                bar.Size = UDim2.fromOffset(420, 38)
+                bar.Position = UDim2.new(0.5, -210, 0, 50)
+                bar.BackgroundTransparency = 1
+                bar.Parent = bg
+                local menuBtn = Instance.new("TextButton")
+                menuBtn.Size = UDim2.fromOffset(200, 36)
+                menuBtn.Position = UDim2.fromOffset(0, 0)
+                menuBtn.BackgroundColor3 = Color3.fromRGB(38, 92, 168)
+                menuBtn.BorderSizePixel = 0
+                menuBtn.Font = Enum.Font.GothamBold
+                menuBtn.Text = "Show / Hide Menu"
+                menuBtn.TextColor3 = Color3.new(1, 1, 1)
+                menuBtn.TextSize = 14
+                menuBtn.Parent = bar
+                Instance.new("UICorner", menuBtn).CornerRadius = UDim.new(0, 8)
+                menuBtn.MouseButton1Click:Connect(function()
+                    local m = findMenuGui()
+                    if m then
+                        local win = m:FindFirstChild("MainWindow")
+                        if win then
+                            win.Visible = not win.Visible
+                            m.Enabled = true
+                        else
+                            m.Enabled = not m.Enabled
+                        end
+                    end
+                end)
                 local offBtn = Instance.new("TextButton")
-                offBtn.Size = UDim2.fromOffset(220, 38)
-                offBtn.Position = UDim2.new(0.5, -110, 0.5, 10)
+                offBtn.Size = UDim2.fromOffset(200, 36)
+                offBtn.Position = UDim2.fromOffset(220, 0)
                 offBtn.BackgroundColor3 = Color3.fromRGB(24, 28, 38)
                 offBtn.BorderSizePixel = 0
                 offBtn.Font = Enum.Font.GothamBold
-                offBtn.Text = "Disable White Screen"
+                offBtn.Text = "White Screen: OFF"
                 offBtn.TextColor3 = Color3.new(1, 1, 1)
                 offBtn.TextSize = 14
-                offBtn.Parent = bg
-                local corner = Instance.new("UICorner")
-                corner.CornerRadius = UDim.new(0, 8)
-                corner.Parent = offBtn
+                offBtn.Parent = bar
+                Instance.new("UICorner", offBtn).CornerRadius = UDim.new(0, 8)
                 offBtn.MouseButton1Click:Connect(function()
                     if type(setEnabled) == "function" then
                         pcall(setEnabled, "whiteScreen", false)
@@ -5719,7 +5801,36 @@ function CFG.Event.FarmCenter(plot, zIdx)
     local island = CFG.Event.Feature("Island")
     local decor = island and type(island.Decor) == "function" and island.Decor(plot) or nil
 
-    -- 1. Prefer explicit farm / breakable zone parts inside the zone section
+    -- 0. First priority: live breakable items on the player's event plot near this zone
+    local zoneHint = nil
+    for _, container in ipairs({ decor, model }) do
+        if container and z then
+            local sec = container:FindFirstChild(z.Section, true)
+            if sec then
+                zoneHint = modelPosition(sec)
+                if zoneHint then break end
+            end
+        end
+    end
+    local okB, liveBreakables = pcall(CFG.Event.CollectBreakables)
+    if okB and type(liveBreakables) == "table" then
+        local bSum, bCount, bMaxY = Vector3.zero, 0, -math.huge
+        for _, rec in pairs(liveBreakables) do
+            local pos = rec and (rec.position or (rec.model and modelPosition(rec.model)))
+            if typeof(pos) == "Vector3" then
+                if not zoneHint or (Vector3.new(pos.X, 0, pos.Z) - Vector3.new(zoneHint.X, 0, zoneHint.Z)).Magnitude <= 90 then
+                    bSum += pos
+                    bCount += 1
+                    if pos.Y > bMaxY then bMaxY = pos.Y end
+                end
+            end
+        end
+        if bCount >= 1 then
+            return Vector3.new(bSum.X / bCount, bMaxY + 2, bSum.Z / bCount)
+        end
+    end
+
+    -- 1. Explicit farm / breakable zone parts inside the zone section
     for _, container in ipairs({ decor, model }) do
         if container and z then
             local section = container:FindFirstChild(z.Section, true)
@@ -5735,7 +5846,7 @@ function CFG.Event.FarmCenter(plot, zIdx)
                                 if p:IsA("BasePart") then
                                     sum += p.Position
                                     n += 1
-                                    if p.Position.Y > maxY then maxY = p.Position.Y end
+                                    if p.Position.Y + p.Size.Y * 0.5 > maxY then maxY = p.Position.Y + p.Size.Y * 0.5 end
                                 end
                             end
                             if n > 0 then
@@ -5760,20 +5871,20 @@ function CFG.Event.FarmCenter(plot, zIdx)
                 if n >= 2 then
                     return Vector3.new(sum.X / n, maxY + 2, sum.Z / n)
                 end
-                -- 3. Section model bounding-box center
+                -- 3. Section model bounding-box upper center (never below floor)
                 if section:IsA("Model") then
-                    local okB, cf, size = pcall(function() return section:GetBoundingBox() end)
-                    if okB and cf and size then
-                        return Vector3.new(cf.Position.X, cf.Position.Y - size.Y * 0.25 + 2, cf.Position.Z)
+                    local okBox, cf, size = pcall(function() return section:GetBoundingBox() end)
+                    if okBox and cf and size then
+                        return Vector3.new(cf.Position.X, cf.Position.Y + size.Y * 0.15 + 2, cf.Position.Z)
                     end
                 end
                 local sp = modelPosition(section)
-                if sp then return sp + Vector3.new(0, 2, 0) end
+                if sp then return sp + Vector3.new(0, 4, 0) end
             end
             local wildArea = container:FindFirstChild("WildArea_" .. zIdx, true)
             if wildArea then
                 local wp = wildArea:IsA("BasePart") and wildArea.Position or modelPosition(wildArea)
-                if wp then return wp + Vector3.new(0, 2, 0) end
+                if wp then return wp + Vector3.new(0, 4, 0) end
             end
         end
     end
