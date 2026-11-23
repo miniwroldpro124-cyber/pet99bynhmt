@@ -6,6 +6,11 @@ return function(ctx)
     local engine = ctx.engine
 
     ui.section(tab, "Auto Farm")
+    ui.button(tab, "Tele To Farm (Middle of Farm Island)", function()
+        local fn = engine.TeleportToFarm or engine.TeleportBestWorld
+        local ok, res, msg = pcall(fn)
+        ui.notify("Tele To Farm", tostring(ok and (msg or res) or res))
+    end)
     ui.toggle(tab, { name = "Fast Auto Farm (Main)", key = "farm", default = false })
     ui.toggle(tab, {
         name = "Auto Efficient Farm (Fast Farm v2_Beta)", key = "fastFarmBeta", default = false,
@@ -31,10 +36,10 @@ return function(ctx)
     end
     ui.dropdown(tab, {
         name = "Choose Flag",
+        key = "SelectedFlag",
         options = flags,
         current = flags[1],
         callback = function(opt)
-            pcall(engine.SetConfig, "SelectedFlag", tostring(opt))
             ui.notify("Flag", "Selected: " .. tostring(opt))
         end,
     })

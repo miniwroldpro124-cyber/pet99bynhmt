@@ -163,7 +163,7 @@ local enabled = {
     autoRank = false, autoRebirth = false, antiAfk = false, clickAura = false,
     autoEgg = false, auraVisual = false, optBreakables = false, optPets = false, worldTele = false,
     worldAdvance = false,
-    hideEggFx = false, chestFirst = true, teleCenter = true, petAll = true,
+    hideEggFx = false, chestFirst = true, teleCenter = true, teleNearEgg = true, petAll = true,
     petBulkJoin = true, petTeleAfterAttack = true, drinkHighestTier = true,
     serverHop = false, autoBuyPetSlots = false, autoBuyEggSlots = false,
     autoForeverPack = false, autoBuyUpgrades = false, autoEquipEnchant = false,
@@ -1399,9 +1399,11 @@ end
 function petState.route(targetModel, point, explicitUid)
     local list = {}
     if targetModel and targetModel.Parent then list[#list + 1] = targetModel end
-    for _, cand in ipairs(auraTargets) do
-        if cand ~= targetModel and cand and cand.Parent then
-            list[#list + 1] = cand
+    if type(auraTargets) == "table" then
+        for _, cand in ipairs(auraTargets) do
+            if cand ~= targetModel and cand and cand.Parent then
+                list[#list + 1] = cand
+            end
         end
     end
     return petState.routeSpread(list, point)
@@ -1733,12 +1735,49 @@ local function detectActiveWorld()
     return 1
 end
 
--- Resolves the exact middle of an island + whether INTERACT.BREAK_ZONES was loaded:
--- 1. INTERACT.BREAK_ZONES / BREAKABLE_SPAWNS centroid (exact = true)
--- 2. Live breakables centroid (exact = true)
--- 3. __FAKE_GROUND part center (exact = false, triggers streaming)
--- 4. PERSISTENT.Teleport fallback (exact = false, triggers streaming)
-local function zoneCenter(id)
+-- Finds the closest egg model belonging to or bordering a farm zone.
+function CFG.FindZoneEggPos(id, breakCenter, folder)
+    local bestPos, bestDist = nil, 95
+    local function consider(inst)
+        if not inst then return end
+        local p = inst:IsA("BasePart") and inst.Position or (inst:IsA("Model") and modelPosition(inst))
+        if p and breakCenter then
+            local d = (Vector3.new(p.X, 0, p.Z) - Vector3.new(breakCenter.X, 0, breakCenter.Z)).Magnitude
+            if d < bestDist then
+                bestDist = d
+                bestPos = p
+            end
+        end
+    end
+    if folder then
+        for _, desc in ipairs(folder:GetDescendants()) do
+            local nm = desc.Name:lower()
+            if (desc:IsA("Model") or desc:IsA("BasePart")) and (nm:find("egg", 1, true) or nm:find("capsule", 1, true)) then
+                consider(desc)
+            end
+        end
+    end
+    local eggsRoot = thingsFolder("Eggs")
+    if eggsRoot and breakCenter then
+        for _, child in ipairs(eggsRoot:GetChildren()) do
+            if child:IsA("Folder") or child:IsA("Model") then
+                for _, egg in ipairs(child:GetChildren()) do
+                    if egg:IsA("Model") or egg:IsA("BasePart") then
+                        consider(egg)
+                    end
+                end
+            end
+        end
+    end
+    return bestPos, bestDist
+end
+
+-- Resolves the optimal standing spot for a farm island + whether INTERACT.BREAK_ZONES was loaded:
+-- Priority 1: Middle of INTERACT.BREAK_ZONES AND within egg-open range (<= 24 studs) when an egg borders the island.
+-- Priority 2: Exact geometric middle of INTERACT.BREAK_ZONES / BREAKABLE_SPAWNS (exact = true).
+-- Priority 3: Live breakables centroid (exact = true).
+-- Priority 4: __FAKE_GROUND / PERSISTENT.Teleport fallback (exact = false, triggers streaming).
+local function zoneCenter(id, preferEgg)
     if type(id) ~= "string" then return nil, false end
     local folder = findZoneFolder(id)
     if folder then
@@ -1746,13 +1785,45 @@ local function zoneCenter(id)
         local breakZones = interact and (interact:FindFirstChild("BREAK_ZONES") or interact:FindFirstChild("BREAKABLE_SPAWNS"))
         if breakZones then
             local sum, count = Vector3.zero, 0
+            local minX, maxX = math.huge, -math.huge
+            local minZ, maxZ = math.huge, -math.huge
+            local maxY = -math.huge
             for _, part in ipairs(breakZones:GetDescendants()) do
                 if part:IsA("BasePart") then
                     sum += part.Position
                     count += 1
+                    local hx, hz = part.Size.X * 0.5, part.Size.Z * 0.5
+                    minX = math.min(minX, part.Position.X - hx)
+                    maxX = math.max(maxX, part.Position.X + hx)
+                    minZ = math.min(minZ, part.Position.Z - hz)
+                    maxZ = math.max(maxZ, part.Position.Z + hz)
+                    maxY = math.max(maxY, part.Position.Y + part.Size.Y * 0.5)
                 end
             end
-            if count > 0 then return sum / count, true end
+            if count > 0 then
+                local mid = Vector3.new(sum.X / count, maxY, sum.Z / count)
+                if preferEgg ~= false and enabled.teleNearEgg then
+                    local eggPos, eggDist = findZoneEggPos(id, mid, folder)
+                    if eggPos and eggDist <= 85 then
+                        if eggDist <= 24 then
+                            return mid, true
+                        end
+                        -- Stand inside the farm area (as close to middle as possible) while staying within 20 studs of the egg
+                        local dir = Vector3.new(mid.X - eggPos.X, 0, mid.Z - eggPos.Z)
+                        if dir.Magnitude > 0.01 then
+                            dir = dir.Unit
+                            local nearEgg = Vector3.new(eggPos.X + dir.X * 18, mid.Y, eggPos.Z + dir.Z * 18)
+                            local clampedX = math.clamp(nearEgg.X, minX + 2, maxX - 2)
+                            local clampedZ = math.clamp(nearEgg.Z, minZ + 2, maxZ - 2)
+                            if (Vector3.new(clampedX, 0, clampedZ) - Vector3.new(eggPos.X, 0, eggPos.Z)).Magnitude <= 26 then
+                                return Vector3.new(clampedX, mid.Y, clampedZ), true
+                            end
+                            return nearEgg, true
+                        end
+                    end
+                end
+                return mid, true
+            end
         end
     end
     local registry = modules.breakables
@@ -1804,6 +1875,10 @@ local function snapTo(point)
     local character = LocalPlayer.Character
     local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
     if not root then return false end
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    if hum and hum.Sit then
+        pcall(function() hum.Sit = false end)
+    end
     local ok = pcall(function()
         root.AssemblyLinearVelocity = Vector3.zero
         root.AssemblyAngularVelocity = Vector3.zero
@@ -1879,7 +1954,8 @@ local function teleportToIslandMiddle(id, modeOverride)
             inInst = okI and resI == true
         end
         local tpRemote = inInst and "Teleports_RequestInstanceTeleport" or "Teleports_RequestTeleport"
-        return invoke(tpRemote, id) == true
+        local okTp = invoke(tpRemote, id)
+        return okTp ~= nil and okTp ~= false
     end
 
     local function moveMiddleLegit(targetPos)
@@ -1903,7 +1979,7 @@ local function teleportToIslandMiddle(id, modeOverride)
         return snapTo(targetPos)
     end
 
-    if isLegit or isFirstLegit200 then
+    if isLegit then
         local alreadyInZone = currentZone() == id
         if not alreadyInZone then
             local okTp = requestServerTele()
@@ -2313,7 +2389,7 @@ local function teleportToWorldOrBestIsland(targetW)
         desiredWorld = hereWorld
     end
     worldTarget = desiredWorld
-    if hereWorld ~= desiredWorld and desiredWorld > 1 then
+    if hereWorld ~= desiredWorld and desiredWorld >= 1 and desiredWorld <= CFG.WorldCount then
         local remoteName = "World" .. tostring(desiredWorld) .. "Teleport"
         local ok, message = invoke(remoteName)
         return ok == true, ok == true and ("switching to World " .. desiredWorld) or tostring(message or ("invoke " .. remoteName .. " failed"))
@@ -5297,16 +5373,38 @@ function CFG.Event.MoveTo(targetPos)
     local ch = LocalPlayer.Character
     local root = ch and (ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart)
     if not root then return false end
-    local dist = (root.Position - targetPos).Magnitude
-    if dist <= 7 then return true end
-    if CFG.EventOpts.moveMode == "Legit Walk" and dist < 600 then
-        local hum = ch:FindFirstChildOfClass("Humanoid")
-        if hum then
-            pcall(function() hum:MoveTo(targetPos) end)
-            return true
-        end
+    local hum = ch:FindFirstChildOfClass("Humanoid")
+    if hum and hum.Sit then
+        pcall(function() hum.Sit = false end)
+    end
+    local dist = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude
+    if dist <= 6 then return true end
+    if CFG.EventOpts.moveMode == "Legit Walk" and dist < 250 and hum then
+        pcall(function() hum:MoveTo(targetPos) end)
+        return true
     end
     return snapTo(targetPos)
+end
+
+function CFG.Event.TeleToFarm()
+    if not CFG.Event.InInstance() then
+        local okE, msgE = CFG.Event.Enter()
+        if not okE then return false, tostring(msgE or "failed to enter event") end
+        task.wait(0.6)
+    end
+    local plot = nil
+    for _ = 1, 15 do
+        plot = CFG.Event.Plot()
+        if plot then break end
+        task.wait(0.2)
+    end
+    if not plot then return false, "event plot not loaded yet" end
+    local bestZ = CFG.Event.OwnedZones(plot)
+    local targetPos = CFG.Event.FarmCenter(plot, bestZ)
+    if not targetPos then return false, "event farm center unavailable" end
+    local okM = CFG.Event.MoveTo(targetPos)
+    local zName = (CFG.Event.ZONES[bestZ] and CFG.Event.ZONES[bestZ].Name) or ("Zone " .. tostring(bestZ))
+    return okM, okM and ("teleported to middle of event farm: " .. zName) or "character unavailable"
 end
 
 function CFG.Event.InInstance()
@@ -6415,15 +6513,15 @@ syncWorkers = function()
     if not discoveryWanted then heapObjects, heapCursor, treeScan = nil, nil, nil end
     local petWanted = enabled.petSpeed or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.ptAutoFightTurkey
     if not petWanted and petState.hook then restorePetSpeed() end
-    ensureWorker("pet", petWanted, CFG.PetInterval, petTick, function() enabled.petSpeed = false; enabled.farm = false; enabled.fastFarmBeta = false; restorePetSpeed() end)
+    ensureWorker("pet", petWanted, CFG.PetInterval, petTick)
     local tapRate = enabled.clickAura and CFG.AuraRate or (enabled.farm and CFG.FarmTapRate or CFG.TapRate)
     if enabled.legitTap and not enabled.farm and not enabled.clickAura then tapRate = 8 end
-    ensureWorker("tap", enabled.tap or enabled.farm or enabled.clickAura, 1 / math.clamp(math.min(tapRate, CFG.MaxTapRate), 1, 120), tapTick, function() enabled.tap = false; enabled.farm = false; enabled.clickAura = false end)
+    ensureWorker("tap", enabled.tap or enabled.farm or enabled.clickAura, 1 / math.clamp(math.min(tapRate, CFG.MaxTapRate), 1, 120), tapTick)
     if (enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins) and not orbState.hook then
         if not orbBackfillNeeded then nextAt.heap = math.min(nextAt.heap, os.clock() + CFG.HeapRetryInterval) end
         orbBackfillNeeded = true
     end
-    ensureWorker("vacuum", enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins, CFG.VacuumRate, vacuumTick, function() enabled.vacuum = false; enabled.farm = false end)
+    ensureWorker("vacuum", enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins, CFG.VacuumRate, vacuumTick)
     ensureWorker("tele", enabled.zoneTele, 0.5, teleTick, function() enabled.zoneTele = false end)
     ensureWorker("buy", enabled.zoneBuy, 0.5, buyTick, function() enabled.zoneBuy = false end)
     ensureWorker("quest", enabled.autoQuest, CFG.QuestInterval, questTick, function() enabled.autoQuest = false end)
@@ -6594,6 +6692,16 @@ local controller = {
         local save = getSave()
         local bestW = bestUnlockedWorld(save)
         return teleportToWorldOrBestIsland(bestW)
+    end,
+    TeleportToFarm = function()
+        local save = getSave()
+        if not save then return false, "waiting for profile" end
+        local best = maxOwned(save)
+        if not best or not zones[best] then return false, "waiting for zone map" end
+        return teleportToIslandMiddle(zones[best].id)
+    end,
+    TeleportEventFarm = function()
+        return CFG.Event.TeleToFarm()
     end,
     HatchEgg = function(eggId, count)
         return hatchEggById(eggId, count, true)

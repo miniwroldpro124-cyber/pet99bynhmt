@@ -8,15 +8,24 @@ return function(ctx)
     ui.section(tab, "Auto Island Teleport")
     ui.dropdown(tab, {
         name = "Teleport Mode",
+        key = "TeleMode",
         options = { "Instant", "Legit" },
         current = "Instant",
         callback = function(option)
-            pcall(engine.SetConfig, "TeleMode", tostring(option))
             ui.notify("Teleport Mode", tostring(option) .. " (Middle)")
         end,
     })
+    ui.button(tab, "Tele To Farm (Middle + Egg)", function()
+        local fn = engine.TeleportToFarm or engine.TeleportBestWorld
+        local ok, res, msg = pcall(fn)
+        ui.notify("Tele To Farm", tostring(ok and (msg or res) or res))
+    end)
     ui.toggle(tab, { name = "Auto Tele Best Island (Middle)", key = "zoneTele", default = false })
     ui.toggle(tab, { name = "Stand In Island Middle", key = "teleCenter", default = true })
+    ui.toggle(tab, {
+        name = "Middle + Near Egg Priority", key = "teleNearEgg", default = true,
+        note = "Stands in the farm island middle while staying within range to open the island egg when one is nearby.",
+    })
     ui.toggle(tab, { name = "Auto Buy Next Island", key = "zoneBuy", default = false })
     ui.slider(tab, { name = "Tele Check Interval", key = "TeleInterval", range = { 0.2, 5 }, increment = 0.2, suffix = "s", value = 0.4 })
 

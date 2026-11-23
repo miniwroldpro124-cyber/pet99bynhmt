@@ -7,7 +7,8 @@ return function(engine, ui)
 
     local config = {
         autoSave = false,
-        elements = {}, -- key -> { kind = "toggle"|"slider", handle = element }
+        _loading = false,
+        elements = {}, -- key -> { { kind = "toggle"|"slider"|"dropdown", handle = element }, ... }
     }
 
     local function ensureFolder()
@@ -21,7 +22,22 @@ return function(engine, ui)
 
     function config.register(kind, key, handle)
         if type(key) ~= "string" or type(handle) ~= "table" then return end
-        config.elements[key] = { kind = kind, handle = handle }
+        local bucket = config.elements[key]
+        if type(bucket) ~= "table" then
+            bucket = {}
+            config.elements[key] = bucket
+        end
+        bucket[#bucket + 1] = { kind = kind, handle = handle }
+    end
+
+    local function applyUiElements(key, kind, value)
+        local bucket = config.elements[key]
+        if type(bucket) ~= "table" then return end
+        for _, reg in ipairs(bucket) do
+            if reg.kind == kind and type(reg.handle) == "table" and type(reg.handle.Set) == "function" then
+                pcall(reg.handle.Set, value)
+            end
+        end
     end
 
     function config.collect()
@@ -92,79 +108,89 @@ return function(engine, ui)
             return false, "invalid config JSON"
         end
 
-        if type(data.autoSave) == "boolean" then
-            config.autoSave = data.autoSave
-        end
-
-        if type(data.knobs) == "table" then
-            for k, v in pairs(data.knobs) do
-                pcall(engine.SetConfig, k, v)
-                local reg = config.elements[k]
-                if reg and reg.kind == "slider" and type(reg.handle.Set) == "function" then
-                    pcall(reg.handle.Set, v)
-                end
-            end
-        end
-
-        if type(data.eventOpts) == "table" and type(engine.SetEventOpt) == "function" then
-            for k, v in pairs(data.eventOpts) do
-                if type(v) == "table" then
-                    for subK, subV in pairs(v) do
-                        pcall(engine.SetEventOpt, k, subV, subK)
+        config._loading = true
+        local okApply, errApply = pcall(function()
+            if type(data.knobs) == "table" then
+                for k, v in pairs(data.knobs) do
+                    pcall(engine.SetConfig, k, v)
+                    if type(v) == "number" then
+                        applyUiElements(k, "slider", v)
+                    elseif type(v) == "string" then
+                        applyUiElements(k, "dropdown", v)
                     end
-                else
-                    pcall(engine.SetEventOpt, k, v)
                 end
             end
-        end
 
-        if type(data.picks) == "table" and type(engine.ClearPicks) == "function" and type(engine.SetPick) == "function" then
-            for category, store in pairs(data.picks) do
-                if type(store) == "table" then
-                    pcall(engine.ClearPicks, category)
-                    for id, flag in pairs(store) do
-                        if flag == true then
-                            pcall(engine.SetPick, category, id, true)
+            if type(data.eventOpts) == "table" and type(engine.SetEventOpt) == "function" then
+                for k, v in pairs(data.eventOpts) do
+                    if type(v) == "table" then
+                        for subK, subV in pairs(v) do
+                            pcall(engine.SetEventOpt, k, subV, subK)
+                        end
+                    else
+                        pcall(engine.SetEventOpt, k, v)
+                    end
+                end
+            end
+
+            if type(data.picks) == "table" and type(engine.ClearPicks) == "function" and type(engine.SetPick) == "function" then
+                for category, store in pairs(data.picks) do
+                    if type(store) == "table" then
+                        pcall(engine.ClearPicks, category)
+                        for id, flag in pairs(store) do
+                            if flag == true then
+                                pcall(engine.SetPick, category, id, true)
+                            end
                         end
                     end
                 end
             end
-        end
 
-        if type(data.enabled) == "table" then
-            for k, v in pairs(data.enabled) do
-                if type(v) == "boolean" then
-                    pcall(engine.SetEnabled, k, v)
-                    local reg = config.elements[k]
-                    if reg and reg.kind == "toggle" and type(reg.handle.Set) == "function" then
-                        pcall(reg.handle.Set, v)
+            if type(data.enabled) == "table" then
+                for k, v in pairs(data.enabled) do
+                    if type(v) == "boolean" then
+                        pcall(engine.SetEnabled, k, v)
+                        applyUiElements(k, "toggle", v)
                     end
                 end
             end
+        end)
+        if type(data.autoSave) == "boolean" then
+            config.autoSave = data.autoSave
+        end
+        config._loading = false
+        if not okApply then
+            return false, "load error: " .. tostring(errApply)
         end
 
         return true, "loaded " .. target
     end
 
     function config.reset()
+        config._loading = true
         if type(engine.AllOff) == "function" then
             pcall(engine.AllOff)
         end
-        for _, reg in pairs(config.elements) do
-            if reg.kind == "toggle" and type(reg.handle.Set) == "function" then
-                pcall(reg.handle.Set, false)
+        for _, bucket in pairs(config.elements) do
+            if type(bucket) == "table" then
+                for _, reg in ipairs(bucket) do
+                    if reg.kind == "toggle" and type(reg.handle.Set) == "function" then
+                        pcall(reg.handle.Set, false)
+                    end
+                end
             end
         end
+        config._loading = false
         return true, "reset all toggles"
     end
 
     local savePending = false
     function config.onChanged()
-        if not config.autoSave or savePending then return end
+        if config._loading or not config.autoSave or savePending then return end
         savePending = true
         task.delay(0.4, function()
             savePending = false
-            if config.autoSave then
+            if not config._loading and config.autoSave then
                 pcall(config.save)
             end
         end)

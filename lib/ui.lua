@@ -131,15 +131,24 @@ return function(lib, engine)
                     priming = false
                     return
                 end
+                if spec.key then
+                    pcall(engine.SetConfig, spec.key, tostring(option))
+                end
                 if spec.callback then
                     local ran, err = pcall(spec.callback, option)
                     if not ran then
                         ui.notify("UI", tostring(err))
                     end
                 end
+                if configRef then
+                    configRef.onChanged()
+                end
             end,
         })
         priming = false
+        if spec.key and configRef then
+            configRef.register("dropdown", spec.key, dropdown)
+        end
         return dropdown
     end
 

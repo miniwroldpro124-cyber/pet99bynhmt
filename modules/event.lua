@@ -18,6 +18,12 @@ return function(ctx)
             ui.notify("Pumpkin Tycoon", tostring(ok and (msg or res) or res))
         end
     end)
+    ui.button(tab, "Tele To Event World Farm (Middle)", function()
+        if type(engine.TeleportEventFarm) == "function" then
+            local ok, res, msg = pcall(engine.TeleportEventFarm)
+            ui.notify("Event Farm", tostring(ok and (msg or res) or res))
+        end
+    end)
     ui.dropdown(tab, {
         name = "Select Movement Mode",
         options = { "Teleport", "Legit Walk" },
