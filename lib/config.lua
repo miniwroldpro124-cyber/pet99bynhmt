@@ -171,6 +171,11 @@ return function(engine, ui)
         if type(engine.AllOff) == "function" then
             pcall(engine.AllOff)
         end
+        if type(engine.ClearPicks) == "function" then
+            for _, cat in ipairs({ "zones", "fruits", "potions", "bags", "flags", "freeGifts", "dice", "cards", "keys", "eggs", "huges", "items", "tickets" }) do
+                pcall(engine.ClearPicks, cat)
+            end
+        end
         for _, bucket in pairs(config.elements) do
             if type(bucket) == "table" then
                 for _, reg in ipairs(bucket) do
@@ -180,8 +185,16 @@ return function(engine, ui)
                 end
             end
         end
+        if type(delfile) == "function" and type(isfile) == "function" then
+            local okEx, exists = pcall(isfile, DEFAULT_FILE)
+            if okEx and exists then
+                pcall(delfile, DEFAULT_FILE)
+            end
+        elseif type(writefile) == "function" then
+            pcall(config.save, DEFAULT_FILE)
+        end
         config._loading = false
-        return true, "reset all toggles"
+        return true, "reset all toggles & deleted saved config"
     end
 
     local savePending = false

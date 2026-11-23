@@ -22,7 +22,7 @@ assert(player, "[Steph HUB] run this on the client")
 
 local REPO = "https://github.com/miniwroldpro124-cyber/pet99bynhmt"
 local COMMIT = "main"
-local VERSION = "9.0"
+local VERSION = "9.1"
 local PINNED = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/" .. COMMIT .. "/"
 local MIRROR_PINNED = "https://cdn.jsdelivr.net/gh/miniwroldpro124-cyber/pet99bynhmt@" .. COMMIT .. "/"
 local BASE = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/"
@@ -172,17 +172,11 @@ local function stamp(body)
         or VERSION
 end
 
+local SESSION_BUST = tostring(os.time())
+
 local function httpGet(relative)
-    if type(readfile) == "function" then
-        for _, candidate in ipairs({ relative, "stephhub-src/" .. relative, "zaphub-src/" .. relative, "pet99/" .. relative }) do
-            local ok, content = pcall(readfile, candidate)
-            if ok and type(content) == "string" and #content > 32 then
-                return content
-            end
-        end
-    end
     local query = relative:find("?", 1, true) and "&" or "?"
-    local bust = query .. "v=" .. VERSION
+    local bust = query .. "v=" .. VERSION .. "&t=" .. SESSION_BUST
     local best, bestVersion = nil, nil
     for _, root in ipairs({ BASE, MIRROR, PINNED, MIRROR_PINNED }) do
         local body = getOnce(root .. relative .. bust)
@@ -196,7 +190,17 @@ local function httpGet(relative)
             end
         end
     end
-    return best
+    if best then return best end
+    -- Offline fallback only: use local workspace copy if GitHub is unreachable
+    if type(readfile) == "function" then
+        for _, candidate in ipairs({ relative, "stephhub-src/" .. relative, "zaphub-src/" .. relative, "pet99/" .. relative }) do
+            local ok, content = pcall(readfile, candidate)
+            if ok and type(content) == "string" and #content > 32 then
+                return content
+            end
+        end
+    end
+    return nil
 end
 
 local function fetch(relative, label)
@@ -277,25 +281,20 @@ end
 local function boot()
     ---------------------------------------------------------------- engine
 
-    -- A controller already in memory is reused only when it is fully formed;
-    -- a half-initialised one is torn down and the engine is fetched again.
+    -- Always tear down any previous engine in memory so a fresh loader run boots the latest build.
     local engine = hostGlobal("__PS99CLEAN")
-    if type(engine) ~= "table" or type(engine.SetEnabled) ~= "function"
-        or type(engine.GetStatus) ~= "function"
-        or (type(engine.IsRunning) == "function" and not engine.IsRunning()) then
-        if type(engine) == "table" and type(engine.Stop) == "function" then
-            pcall(engine.Stop)
-            engine = nil
-        end
-        setStage("downloading farm engine", 0.08)
-        local source = fetch("ps99_engine_v3.lua", "engine")
+    if type(engine) == "table" and type(engine.Stop) == "function" then
+        pcall(engine.Stop)
+    end
+    engine = nil
+    setStage("downloading farm engine", 0.08)
+    local source = fetch("ps99_engine_v3.lua", "engine")
 
-        setStage("booting farm engine", 0.20)
-        local returned = runBell(source, "ps99_engine")
-        engine = type(returned) == "table" and returned or hostGlobal("__PS99CLEAN")
-        if type(engine) == "table" then
-            publishGlobal("__PS99CLEAN", engine)
-        end
+    setStage("booting farm engine", 0.20)
+    local returned = runBell(source, "ps99_engine")
+    engine = type(returned) == "table" and returned or hostGlobal("__PS99CLEAN")
+    if type(engine) == "table" then
+        publishGlobal("__PS99CLEAN", engine)
     end
     if type(engine) ~= "table" or type(engine.GetStatus) ~= "function" then
         error("[Steph HUB] engine loaded but published no controller - see [PS99 CLEAN] lines above", 0)
