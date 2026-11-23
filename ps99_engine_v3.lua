@@ -371,8 +371,9 @@ local REMOTE_TYPES = {
     ["Upgrades_Purchase"] = "RemoteFunction",
     ["CoinJar_Spawn"] = "RemoteFunction",
     ["Comet_Spawn"] = "RemoteFunction",
-    ["Pinata_Spawn"] = "RemoteFunction",
-    ["LuckyBlock_Spawn"] = "RemoteFunction",
+    ["CometShower_Activate"] = "RemoteFunction",
+    ["MiniPinata_Consume"] = "RemoteFunction",
+    ["MiniLuckyBlock_Consume"] = "RemoteFunction",
     ["CardCombinationMachine_ActivateBulk"] = "RemoteFunction",
     ["Relics_Request"] = "RemoteFunction",
     ["Relic_Found"] = "RemoteFunction",
@@ -3947,6 +3948,7 @@ CFG.Quest = {
     logs = {},
     lastLogMsg = nil,
     lastLogAt = 0,
+    currentDoing = "Idle",
     PRIORITY = {
         [6] = 1, [81] = 1,
         [34] = 2, [74] = 2, [35] = 2, [33] = 2,
@@ -3979,13 +3981,76 @@ function CFG.Quest.Log(msg)
     end
 end
 
+function CFG.Quest.GoalTitle(goal)
+    if type(goal) ~= "table" then return "Unknown goal" end
+    local okT, title = pcall(function()
+        local qc = require(RS.Library.Client.QuestCmds)
+        if type(qc) == "table" and type(qc.MakeTitle) == "function" then
+            return qc.MakeTitle(goal)
+        end
+        return nil
+    end)
+    if okT and type(title) == "string" and #title > 0 then
+        return title
+    end
+    local gt = tonumber(goal.Type) or -1
+    local rem = math.max(1, (tonumber(goal.Amount) or 1) - (tonumber(goal.Progress) or 0))
+    local gname = CFG.Quest.TYPE_NAMES[gt] or ("Quest T" .. tostring(gt))
+    return ("%s x%d"):format(gname, math.floor(rem))
+end
+
+function CFG.Quest.PetsPerGold()
+    local red = 0
+    pcall(function()
+        local mc = require(RS.Library.Client.MasteryCmds)
+        if type(mc) == "table" and type(mc.HasPerk) == "function" and mc.HasPerk("Pets", "GoldReduction") then
+            red = tonumber(mc.GetPerkPower("Pets", "GoldReduction")) or 0
+        end
+    end)
+    return math.max(1, 10 - red)
+end
+
+function CFG.Quest.PetsPerRainbow()
+    local red = 0
+    pcall(function()
+        local mc = require(RS.Library.Client.MasteryCmds)
+        if type(mc) == "table" and type(mc.HasPerk) == "function" and mc.HasPerk("Pets", "RainbowReduction") then
+            red = tonumber(mc.GetPerkPower("Pets", "RainbowReduction")) or 0
+        end
+    end)
+    return math.max(1, 10 - red)
+end
+
+function CFG.Quest.CanUsePotionTier(tier)
+    local allowed = true
+    pcall(function()
+        local mc = require(RS.Library.Client.MasteryCmds)
+        if type(mc) == "table" and type(mc.CanUsePotion) == "function" then
+            local okC = mc.CanUsePotion(tier)
+            if okC == false then allowed = false end
+        end
+    end)
+    return allowed
+end
+
+function CFG.Quest.HasPotionBulk()
+    local bulk = false
+    pcall(function()
+        local mc = require(RS.Library.Client.MasteryCmds)
+        if type(mc) == "table" and type(mc.HasPerk) == "function" and mc.HasPerk("Potions", "BulkConsume") then
+            bulk = true
+        end
+    end)
+    return bulk
+end
+
 function CFG.Quest.BestEggInfo(save)
-    local maxEggNum = nil
+    local maxEggNum = tonumber(save and save.MaximumAvailableEgg) or nil
     local maxHatch = nil
     pcall(function()
         local eggCmds = require(RS.Library.Client.EggCmds)
         if type(eggCmds) == "table" then
-            if type(eggCmds.GetHighestEggNumberAvailable) == "function" then
+            if not maxEggNum and type(eggCmds.GetHighestEggNumberAvailable) == "function" then
                 local ok, num = pcall(eggCmds.GetHighestEggNumberAvailable)
                 if ok and type(num) == "number" and num > 0 then maxEggNum = num end
             end
@@ -3995,41 +4060,61 @@ function CFG.Quest.BestEggInfo(save)
             end
         end
     end)
-    if not maxEggNum then
-        maxEggNum = tonumber(save and save.MaximumAvailableEgg) or 1
-    end
+    if not maxEggNum then maxEggNum = 1 end
     if not maxHatch then
         maxHatch = tonumber(save and save.EggHatchCount) or 1
     end
     local bestEggId = eggByNumber[maxEggNum]
     local bestEggPets = {}
     local petCount = 0
+    -- Primary: exact game lookup via EggsUtil.GetByNumber(save.MaximumAvailableEgg)
     pcall(function()
-        local dir = require(RS.Library.Directory)
-        local eggs = dir and dir.Eggs
-        if type(eggs) == "table" then
-            local entry = bestEggId and eggs[bestEggId] or nil
-            if type(entry) ~= "table" then
-                for id, data in pairs(eggs) do
-                    if type(data) == "table" and data.eggNumber == maxEggNum then
-                        bestEggId = tostring(id)
-                        entry = data
-                        break
-                    end
-                end
-            end
-            if type(entry) == "table" and type(entry.pets) == "table" then
-                for _, p in ipairs(entry.pets) do
-                    local pid = type(p) == "table" and p[1] or (type(p) == "string" and p or nil)
-                    if type(pid) == "string" and #pid > 0 then
-                        bestEggPets[pid] = true
-                        petCount += 1
+        local eggsUtil = require(RS.Library.Util.EggsUtil)
+        if type(eggsUtil) == "table" and type(eggsUtil.GetByNumber) == "function" then
+            local entry = eggsUtil.GetByNumber(maxEggNum)
+            if type(entry) == "table" then
+                bestEggId = tostring(entry._id or entry.name or bestEggId or "")
+                if type(entry.pets) == "table" then
+                    for _, p in pairs(entry.pets) do
+                        local pid = type(p) == "table" and p[1] or (type(p) == "string" and p or nil)
+                        if type(pid) == "string" and #pid > 0 and not bestEggPets[pid] then
+                            bestEggPets[pid] = true
+                            petCount += 1
+                        end
                     end
                 end
             end
         end
     end)
-    if not bestEggId then bestEggId = eggByNumber[1] end
+    -- Fallback: Directory.Eggs scan
+    if petCount == 0 or not bestEggId or #bestEggId == 0 then
+        pcall(function()
+            local dir = require(RS.Library.Directory)
+            local eggs = dir and dir.Eggs
+            if type(eggs) == "table" then
+                local entry = (bestEggId and #bestEggId > 0) and eggs[bestEggId] or nil
+                if type(entry) ~= "table" then
+                    for id, data in pairs(eggs) do
+                        if type(data) == "table" and data.eggNumber == maxEggNum then
+                            bestEggId = tostring(id)
+                            entry = data
+                            break
+                        end
+                    end
+                end
+                if type(entry) == "table" and type(entry.pets) == "table" then
+                    for _, p in pairs(entry.pets) do
+                        local pid = type(p) == "table" and p[1] or (type(p) == "string" and p or nil)
+                        if type(pid) == "string" and #pid > 0 and not bestEggPets[pid] then
+                            bestEggPets[pid] = true
+                            petCount += 1
+                        end
+                    end
+                end
+            end
+        end)
+    end
+    if not bestEggId or #bestEggId == 0 then bestEggId = eggByNumber[1] end
     return bestEggId, bestEggPets, petCount, maxEggNum, math.clamp(maxHatch, 1, CFG.EggMaxHatch)
 end
 
@@ -4058,10 +4143,13 @@ function CFG.Quest.HatchBestEgg(save, desiredCount)
     return ok, msg
 end
 
-function CFG.Quest.FindBestPetStacks(save, petFilter, wantPt)
+function CFG.Quest.FindBestPetStacks(save, petFilter, wantPt, minAmount)
+    local need = math.max(1, tonumber(minAmount) or 10)
     local matches = {}
     for _, pet in ipairs(stackList(inventory(save, "Pet"))) do
-        if pet.data._lk ~= true and pet.amount >= 10 then
+        local lid = tostring(pet.id or ""):lower()
+        local isSpecial = lid:find("huge ", 1, true) ~= nil or lid:find("titanic ", 1, true) ~= nil or lid:find("gargantuan ", 1, true) ~= nil
+        if not isSpecial and pet.data._lk ~= true and pet.amount >= need then
             local ptOk = (wantPt == nil and not pet.data.pt) or (wantPt ~= nil and pet.data.pt == wantPt)
             if ptOk and (not petFilter or petFilter[pet.id] == true) then
                 matches[#matches + 1] = pet
@@ -4175,28 +4263,63 @@ local function doQuestTick()
         elseif gtype == 34 or gtype == 74 then
             local bucketName = gtype == 74 and "XPPotion" or "Potion"
             local reqId = goal.PotionID
-            local reqTier = tonumber(goal.PotionTier)
+            local reqTier = tonumber(goal.PotionTier) or 1
+            local goalTitle = CFG.Quest.GoalTitle(goal)
+            CFG.Quest.currentDoing = goalTitle
+            local candidates = {}
             for _, item in ipairs(stackList(inventory(save, bucketName))) do
-                if (not reqId or item.id == reqId) and (not reqTier or item.tier >= reqTier) then
-                    local take = math.max(1, math.min(rem, item.amount, CFG.PotionMaxConsume))
-                    local rName = gtype == 74 and "XPPotions: Consume" or "Potions: Consume"
-                    local ok = fire(rName, item.uid, take)
-                    if ok then
-                        notes.doQuest = ("quest potion: %s (T%d) x%d"):format(item.id, item.tier, take)
-                        nextAt.save = 0
-                        nextAt.doQuest = now + 0.35
-                        return
+                if (not reqId or item.id == reqId)
+                    and item.tier >= reqTier
+                    and item.amount > 0
+                    and (gtype == 74 or CFG.Quest.CanUsePotionTier(item.tier)) then
+                    candidates[#candidates + 1] = item
+                end
+            end
+            table.sort(candidates, function(a, b)
+                if a.tier ~= b.tier then return a.tier < b.tier end
+                return a.amount > b.amount
+            end)
+            local canBulk = (gtype == 74) or CFG.Quest.HasPotionBulk()
+            for _, item in ipairs(candidates) do
+                local take = canBulk and math.max(1, math.min(rem, item.amount, CFG.PotionMaxConsume)) or 1
+                local rName = gtype == 74 and "XPPotions: Consume" or "Potions: Consume"
+                local ok = fire(rName, item.uid, take)
+                if ok then
+                    notes.doQuest = ("drink %s T%d x%d"):format(item.id, item.tier, take)
+                    CFG.Quest.currentDoing = ("Drink %d Tier %d Potion (%s)"):format(rem, item.tier, item.id)
+                    CFG.Quest.Log("Potion -> " .. notes.doQuest)
+                    nextAt.save = 0
+                    nextAt.doQuest = now + 0.4
+                    return
+                end
+            end
+            -- If short on reqTier, try upgrading reqTier - 1 potions at the machine
+            if gtype == 34 and reqTier > 1 then
+                for _, item in ipairs(stackList(inventory(save, "Potion"))) do
+                    if (not reqId or item.id == reqId) and item.tier == reqTier - 1 and item.amount >= 5 then
+                        local craftCount = math.max(1, math.min(rem, item.amount // 5))
+                        if invoke("UpgradePotionsMachine_Activate", item.uid, craftCount) == true then
+                            notes.doQuest = ("upgraded %s T%d -> T%d x%d"):format(item.id, item.tier, reqTier, craftCount)
+                            CFG.Quest.currentDoing = ("Upgrade Potion to Tier %d"):format(reqTier)
+                            CFG.Quest.Log("Potion upgrade -> " .. notes.doQuest)
+                            nextAt.save = 0
+                            nextAt.doQuest = now + 0.45
+                            return
+                        end
                     end
                 end
             end
+            CFG.Quest.Log(("Potion [T%d] no usable Tier >= %d potion"):format(gtype, reqTier))
         -- 35 = USE_FRUIT
         elseif gtype == 35 then
             local reqId = goal.FruitID
+            CFG.Quest.currentDoing = CFG.Quest.GoalTitle(goal)
             for _, item in ipairs(stackList(inventory(save, "Fruit"))) do
                 if not reqId or item.id == reqId then
                     local take = math.max(1, math.min(rem, item.amount, CFG.FruitQueueLimit))
                     if fire("Fruits: Consume", item.uid, take) then
                         notes.doQuest = ("quest fruit: %s x%d"):format(item.id, take)
+                        CFG.Quest.Log("Fruit -> " .. notes.doQuest)
                         nextAt.save = 0
                         nextAt.doQuest = now + 0.35
                         return
@@ -4205,6 +4328,7 @@ local function doQuestTick()
             end
         -- 33 = USE_FLAG
         elseif gtype == 33 then
+            CFG.Quest.currentDoing = CFG.Quest.GoalTitle(goal)
             local best = maxOwned(save)
             if best and zones[best] and currentZone() ~= zones[best].id then
                 teleportToIslandMiddle(zones[best].id)
@@ -4213,73 +4337,97 @@ local function doQuestTick()
                 if item.id:match(" Flag$") then
                     if invoke("FlexibleFlags_Consume", item.id, item.uid, 1) == true then
                         notes.doQuest = "quest flag: " .. item.id
+                        CFG.Quest.Log("Flag -> " .. item.id)
                         nextAt.save = 0
                         nextAt.doQuest = now + 0.4
                         return
                     end
                 end
             end
-        -- 4 = GOLD_PET, 40 = BEST_GOLD_PET (auto crafts best-egg pets into Golden; auto hatches best egg when short)
+        -- 4 = GOLD_PET, 40 = BEST_GOLD_PET (auto crafts best-egg pets into Golden with Mastery reduction; hatches best egg when short)
         elseif gtype == 4 or gtype == 40 then
+            local perGold = CFG.Quest.PetsPerGold()
             local bestEggId, bestEggPets, bestPetCount, _, maxHatch = CFG.Quest.BestEggInfo(save)
             local filter = (gtype == 40 and bestPetCount > 0) and bestEggPets or nil
-            local stacks = CFG.Quest.FindBestPetStacks(save, filter, nil)
+            CFG.Quest.currentDoing = ("Combine %d %s (%s)"):format(rem, gtype == 40 and "Best Gold Pet" or "Gold Pet", tostring(bestEggId))
+            local stacks = CFG.Quest.FindBestPetStacks(save, filter, nil, perGold)
             if #stacks == 0 and gtype == 4 then
-                stacks = CFG.Quest.FindBestPetStacks(save, nil, nil)
+                stacks = CFG.Quest.FindBestPetStacks(save, nil, nil, perGold)
             end
             for _, pet in ipairs(stacks) do
-                local craftCount = math.max(1, math.min(rem, pet.amount // 10, 100))
-                local ok = invoke("GoldMachine_Activate", pet.uid, craftCount)
+                local craftCount = math.max(1, math.min(rem, math.floor(pet.amount / perGold), 100))
+                local ok, errM = invoke("GoldMachine_Activate", pet.uid, craftCount)
                 if ok then
-                    notes.doQuest = ("quest best gold: %s x%d"):format(pet.id, craftCount)
+                    notes.doQuest = ("gold craft: %s x%d (need %d/pet)"):format(pet.id, craftCount, perGold)
+                    CFG.Quest.Log("Gold -> " .. notes.doQuest)
                     nextAt.save = 0
-                    nextAt.doQuest = now + 0.35
+                    nextAt.doQuest = now + 0.4
                     return
+                else
+                    CFG.Quest.Log(("Gold failed (%s): %s"):format(tostring(pet.id), tostring(errM or "rejected")))
                 end
             end
             local okH, msgH = CFG.Quest.HatchBestEgg(save, maxHatch)
             if okH then
-                notes.doQuest = ("quest best gold: hatching %s (%s)"):format(tostring(bestEggId), tostring(msgH))
+                notes.doQuest = ("gold prep: hatching %s (%s)"):format(tostring(bestEggId), tostring(msgH))
+                CFG.Quest.currentDoing = ("Hatch %s for Gold Pet (%d left)"):format(tostring(bestEggId), rem)
+                CFG.Quest.Log("Gold hatch -> " .. tostring(bestEggId))
                 nextAt.doQuest = now + 0.55
                 return
+            else
+                CFG.Quest.Log("Gold hatch skipped: " .. tostring(msgH or "failed"))
             end
         -- 5 = RAINBOW_PET, 41 = BEST_RAINBOW_PET (crafts Golden -> Rainbow; crafts Normal -> Golden first; hatches best egg when short)
         elseif gtype == 5 or gtype == 41 then
+            local perGold = CFG.Quest.PetsPerGold()
+            local perRainbow = CFG.Quest.PetsPerRainbow()
             local bestEggId, bestEggPets, bestPetCount, _, maxHatch = CFG.Quest.BestEggInfo(save)
             local filter = (gtype == 41 and bestPetCount > 0) and bestEggPets or nil
-            local goldStacks = CFG.Quest.FindBestPetStacks(save, filter, 1)
+            CFG.Quest.currentDoing = ("Combine %d %s (%s)"):format(rem, gtype == 41 and "Best Rainbow Pet" or "Rainbow Pet", tostring(bestEggId))
+            local goldStacks = CFG.Quest.FindBestPetStacks(save, filter, 1, perRainbow)
             if #goldStacks == 0 and gtype == 5 then
-                goldStacks = CFG.Quest.FindBestPetStacks(save, nil, 1)
+                goldStacks = CFG.Quest.FindBestPetStacks(save, nil, 1, perRainbow)
             end
             for _, pet in ipairs(goldStacks) do
-                local craftCount = math.max(1, math.min(rem, pet.amount // 10, 100))
-                local ok = invoke("RainbowMachine_Activate", pet.uid, craftCount)
+                local craftCount = math.max(1, math.min(rem, math.floor(pet.amount / perRainbow), 100))
+                local ok, errM = invoke("RainbowMachine_Activate", pet.uid, craftCount)
                 if ok then
-                    notes.doQuest = ("quest best rainbow: %s x%d"):format(pet.id, craftCount)
+                    notes.doQuest = ("rainbow craft: %s x%d (need %d/pet)"):format(pet.id, craftCount, perRainbow)
+                    CFG.Quest.Log("Rainbow -> " .. notes.doQuest)
                     nextAt.save = 0
-                    nextAt.doQuest = now + 0.35
+                    nextAt.doQuest = now + 0.4
                     return
+                else
+                    CFG.Quest.Log(("Rainbow failed (%s): %s"):format(tostring(pet.id), tostring(errM or "rejected")))
                 end
             end
-            local normalStacks = CFG.Quest.FindBestPetStacks(save, filter, nil)
+            local normalStacks = CFG.Quest.FindBestPetStacks(save, filter, nil, perGold)
             if #normalStacks == 0 and gtype == 5 then
-                normalStacks = CFG.Quest.FindBestPetStacks(save, nil, nil)
+                normalStacks = CFG.Quest.FindBestPetStacks(save, nil, nil, perGold)
             end
             for _, pet in ipairs(normalStacks) do
-                local craftCount = math.max(1, math.min(rem * 10, pet.amount // 10, 100))
-                local ok = invoke("GoldMachine_Activate", pet.uid, craftCount)
+                local craftCount = math.max(1, math.min(rem * perRainbow, math.floor(pet.amount / perGold), 100))
+                local ok, errM = invoke("GoldMachine_Activate", pet.uid, craftCount)
                 if ok then
-                    notes.doQuest = ("quest best rainbow (prep gold): %s x%d"):format(pet.id, craftCount)
+                    notes.doQuest = ("rainbow prep gold: %s x%d"):format(pet.id, craftCount)
+                    CFG.Quest.currentDoing = ("Combine Gold -> Rainbow (%d left)"):format(rem)
+                    CFG.Quest.Log("Rainbow prep gold -> " .. notes.doQuest)
                     nextAt.save = 0
-                    nextAt.doQuest = now + 0.35
+                    nextAt.doQuest = now + 0.4
                     return
+                else
+                    CFG.Quest.Log(("Rainbow prep gold failed (%s): %s"):format(tostring(pet.id), tostring(errM or "rejected")))
                 end
             end
             local okH, msgH = CFG.Quest.HatchBestEgg(save, maxHatch)
             if okH then
-                notes.doQuest = ("quest best rainbow: hatching %s (%s)"):format(tostring(bestEggId), tostring(msgH))
+                notes.doQuest = ("rainbow prep: hatching %s (%s)"):format(tostring(bestEggId), tostring(msgH))
+                CFG.Quest.currentDoing = ("Hatch %s for Rainbow Pet (%d left)"):format(tostring(bestEggId), rem)
+                CFG.Quest.Log("Rainbow hatch -> " .. tostring(bestEggId))
                 nextAt.doQuest = now + 0.55
                 return
+            else
+                CFG.Quest.Log("Rainbow hatch skipped: " .. tostring(msgH or "failed"))
             end
         -- 19 = FUSE_PETS
         elseif gtype == 19 then
@@ -4362,22 +4510,122 @@ local function doQuestTick()
                     end
                 end
             end
-        -- 32/38/69 = COMET, 43/66/70 = PINATA, 44/67/71 = LUCKYBLOCK
+        -- 32/38/69 = COMET (Comet_Spawn + CometShower_Activate), 43/66/70 = PINATA (MiniPinata_Consume), 44/67/71 = LUCKYBLOCK (MiniLuckyBlock_Consume)
         elseif gtype == 32 or gtype == 38 or gtype == 69
             or gtype == 43 or gtype == 66 or gtype == 70 or gtype == 44 or gtype == 67 or gtype == 71 then
+            local isComet = (gtype == 32 or gtype == 38 or gtype == 69)
+            local isPinata = (gtype == 43 or gtype == 66 or gtype == 70)
+            local goalTitle = CFG.Quest.GoalTitle(goal)
+            CFG.Quest.currentDoing = goalTitle
+            -- Leave any instance and stand inside the best unlocked zone's breakables dotted box (required by Comet/Pinata/LuckyBlock)
+            leaveActiveInstance()
             local best = maxOwned(save)
-            if best and zones[best] and currentZone() ~= zones[best].id then
-                teleportToIslandMiddle(zones[best].id)
+            if best and zones[best] then
+                local inBox = false
+                pcall(function()
+                    local mc = require(RS.Library.Client.MapCmds)
+                    if type(mc) == "table" and type(mc.IsInDottedBox) == "function" then
+                        inBox = mc.IsInDottedBox() == true
+                    end
+                end)
+                if currentZone() ~= zones[best].id or not inBox then
+                    teleportToIslandMiddle(zones[best].id)
+                    task.wait(0.25)
+                end
             end
-            local wantName, remoteName
-            if gtype == 32 or gtype == 38 or gtype == 69 then wantName, remoteName = "Comet", "Comet_Spawn"
-            elseif gtype == 43 or gtype == 66 or gtype == 70 then wantName, remoteName = "Pinata", "Pinata_Spawn"
-            else wantName, remoteName = "Lucky Block", "LuckyBlock_Spawn" end
-            for _, item in ipairs(stackList(inventory(save, "Misc"))) do
-                if item.id:find(wantName, 1, true) then
-                    if invoke(remoteName, item.uid) == true then
-                        notes.doQuest = "quest spawned " .. item.id
+            if isComet then
+                -- 1. Try Comet Shower machine if off daily cooldown
+                local showerTs = tonumber(save.CometShowerTimestamp) or 0
+                if now >= (nextAt.cometShower or 0) and (showerTs == 0 or serverClock() >= showerTs) then
+                    nextAt.cometShower = now + 20
+                    local okSh, msgSh = invoke("CometShower_Activate")
+                    if okSh == true then
+                        notes.doQuest = "activated Comet Shower!"
+                        CFG.Quest.currentDoing = ("Break %d Comet (Comet Shower active)"):format(rem)
+                        CFG.Quest.Log("CometShower_Activate -> started!")
+                        nextAt.save = 0
+                        pcall(petTick); pcall(tapTick); pcall(vacuumTick)
                         return
+                    else
+                        CFG.Quest.Log("CometShower_Activate -> " .. tostring(msgSh or "cooldown/unavailable"))
+                    end
+                end
+                -- 2. Spawn Comet item from Misc inventory
+                if now >= (nextAt.comet or 0) then
+                    local foundComet = false
+                    for _, item in ipairs(stackList(inventory(save, "Misc"))) do
+                        if item.id == "Comet" or item.id:find("Comet", 1, true) then
+                            foundComet = true
+                            local okC, msgC = invoke("Comet_Spawn", item.uid)
+                            if okC == true then
+                                nextAt.comet = now + 10
+                                notes.doQuest = "spawned " .. item.id
+                                CFG.Quest.currentDoing = ("Break %d Comet (spawned)"):format(rem)
+                                CFG.Quest.Log("Comet_Spawn -> " .. item.id)
+                                nextAt.save = 0
+                                pcall(petTick); pcall(tapTick); pcall(vacuumTick)
+                                return
+                            else
+                                nextAt.comet = now + 3
+                                CFG.Quest.Log("Comet_Spawn rejected: " .. tostring(msgC or "cannot spawn here"))
+                                break
+                            end
+                        end
+                    end
+                    if not foundComet then
+                        CFG.Quest.Log("Comet: no Comet item in inventory")
+                    end
+                end
+            elseif isPinata then
+                if now >= (nextAt.pinata or 0) then
+                    local foundPinata = false
+                    for _, item in ipairs(stackList(inventory(save, "Misc"))) do
+                        if item.id == "Mini Pinata" or item.id:find("Pinata", 1, true) then
+                            foundPinata = true
+                            local okP, msgP = invoke("MiniPinata_Consume", item.uid)
+                            if okP == true then
+                                nextAt.pinata = now + 12
+                                notes.doQuest = "spawned " .. item.id
+                                CFG.Quest.currentDoing = ("Break %d Pinata (spawned)"):format(rem)
+                                CFG.Quest.Log("MiniPinata_Consume -> " .. item.id)
+                                nextAt.save = 0
+                                pcall(petTick); pcall(tapTick); pcall(vacuumTick)
+                                return
+                            else
+                                nextAt.pinata = now + 3
+                                CFG.Quest.Log("MiniPinata_Consume rejected: " .. tostring(msgP or "cannot spawn here"))
+                                break
+                            end
+                        end
+                    end
+                    if not foundPinata then
+                        CFG.Quest.Log("Pinata: no Mini Pinata in inventory")
+                    end
+                end
+            else
+                if now >= (nextAt.luckyBlock or 0) then
+                    local foundLB = false
+                    for _, item in ipairs(stackList(inventory(save, "Misc"))) do
+                        if item.id == "Mini Lucky Block" or item.id:find("Lucky Block", 1, true) then
+                            foundLB = true
+                            local okL, msgL = invoke("MiniLuckyBlock_Consume", item.uid)
+                            if okL == true then
+                                nextAt.luckyBlock = now + 12
+                                notes.doQuest = "spawned " .. item.id
+                                CFG.Quest.currentDoing = ("Break %d Lucky Block (spawned)"):format(rem)
+                                CFG.Quest.Log("MiniLuckyBlock_Consume -> " .. item.id)
+                                nextAt.save = 0
+                                pcall(petTick); pcall(tapTick); pcall(vacuumTick)
+                                return
+                            else
+                                nextAt.luckyBlock = now + 3
+                                CFG.Quest.Log("MiniLuckyBlock_Consume rejected: " .. tostring(msgL or "cannot spawn here"))
+                                break
+                            end
+                        end
+                    end
+                    if not foundLB then
+                        CFG.Quest.Log("Lucky Block: no Mini Lucky Block in inventory")
                     end
                 end
             end
@@ -4419,9 +4667,9 @@ local function doQuestTick()
     pcall(petTick)
     pcall(tapTick)
     pcall(vacuumTick)
-    local topType = activeGoals[1].goal.Type
-    local topName = CFG.Quest.TYPE_NAMES[topType] or ("Type " .. tostring(topType))
-    notes.doQuest = ("farming %d goal(s) | top: %s [T%s]"):format(#activeGoals, topName, tostring(topType))
+    local topTitle = CFG.Quest.GoalTitle(activeGoals[1].goal)
+    CFG.Quest.currentDoing = topTitle
+    notes.doQuest = ("Doing: %s"):format(topTitle)
     CFG.Quest.Log(notes.doQuest)
 end
 
@@ -7238,16 +7486,16 @@ function CFG.RankHUD.Build()
     CFG.RankHUD.bodyFrame = body
 
     local meta = Instance.new("TextLabel")
-    meta.Size = UDim2.new(1, 0, 0, 36)
+    meta.Size = UDim2.new(1, 0, 0, 44)
     meta.BackgroundColor3 = Color3.fromRGB(20, 24, 33)
     meta.BorderSizePixel = 0
-    meta.Font = Enum.Font.Gotham
+    meta.Font = Enum.Font.GothamBold
     meta.TextSize = 11
-    meta.TextColor3 = Color3.fromRGB(225, 232, 244)
+    meta.TextColor3 = Color3.fromRGB(250, 224, 120)
     meta.TextXAlignment = Enum.TextXAlignment.Left
     meta.TextYAlignment = Enum.TextYAlignment.Top
     meta.TextWrapped = true
-    meta.Text = "collecting..."
+    meta.Text = "Doing: Idle"
     meta.Parent = body
     Instance.new("UICorner", meta).CornerRadius = UDim.new(0, 5)
     local metaPad = Instance.new("UIPadding", meta)
@@ -7255,8 +7503,8 @@ function CFG.RankHUD.Build()
     CFG.RankHUD.metaLabel = meta
 
     local goals = Instance.new("TextLabel")
-    goals.Size = UDim2.new(1, 0, 0, 112)
-    goals.Position = UDim2.fromOffset(0, 42)
+    goals.Size = UDim2.new(1, 0, 0, 108)
+    goals.Position = UDim2.fromOffset(0, 50)
     goals.BackgroundColor3 = Color3.fromRGB(20, 24, 33)
     goals.BorderSizePixel = 0
     goals.Font = Enum.Font.Code
@@ -7340,8 +7588,8 @@ function CFG.RankHUD.Update()
         CFG.RankHUD.titleLabel.Text = ("Auto Rank | R%s | %s Stars"):format(rank, stars)
     end
     if CFG.RankHUD.metaLabel then
-        CFG.RankHUD.metaLabel.Text = ("Zone: %s | Best Egg: %s\nDoQuest: %s | Claim: %s")
-            :format(zone, bestEgg, tostring(notes.doQuest or "off"), tostring(notes.rank or "off"))
+        CFG.RankHUD.metaLabel.Text = ("Doing: %s\nZone: %s | Best Egg: %s | Claim: %s")
+            :format(tostring(CFG.Quest.currentDoing or "Idle"), zone, bestEgg, tostring(notes.rank or "off"))
     end
     if CFG.RankHUD.goalsLabel then
         if not save then
@@ -7357,12 +7605,12 @@ function CFG.RankHUD.Update()
                     local e = active[i]
                     local g = e.goal
                     local gt = tonumber(g.Type) or -1
-                    local gname = CFG.Quest.TYPE_NAMES[gt] or ("Type " .. tostring(gt))
+                    local gtitle = CFG.Quest.GoalTitle(g)
                     local prog = tonumber(g.Progress) or 0
                     local amt = tonumber(g.Amount) or 0
                     local prefix = (i == 1) and "> " or "  "
-                    lines[#lines + 1] = ("%s[%s] %s (T%d): %d/%d (*%d)"):format(
-                        prefix, tostring(e.source), gname, gt, math.floor(prog), math.floor(amt), tonumber(e.stars) or 0
+                    lines[#lines + 1] = ("%s%s (%d/%d) [*T%d]"):format(
+                        prefix, gtitle, math.floor(prog), math.floor(amt), gt
                     )
                 end
                 CFG.RankHUD.goalsLabel.Text = table.concat(lines, "\n")

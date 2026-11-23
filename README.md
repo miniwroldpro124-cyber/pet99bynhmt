@@ -1,9 +1,9 @@
-# Steph HUB — PS99 (v9.3)
+# Steph HUB — PS99 (v9.5)
 
 Modular Pet Simulator 99 script: one loader (`main.lua`), one headless engine (`ps99_engine_v3.lua`), the Steph HUB UI (`lib/menu.lua`), and one file per tab under `modules/*.lua`.
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/main.lua?v=9.3"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/main.lua"))()
 ```
 
 `RightControl` toggles the Steph HUB window · `X` unloads everything.
