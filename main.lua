@@ -22,7 +22,7 @@ assert(player, "[Steph HUB] run this on the client")
 
 local REPO = "https://github.com/miniwroldpro124-cyber/pet99bynhmt"
 local COMMIT = "main"
-local VERSION = "9.1"
+local VERSION = "9.2"
 local PINNED = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/" .. COMMIT .. "/"
 local MIRROR_PINNED = "https://cdn.jsdelivr.net/gh/miniwroldpro124-cyber/pet99bynhmt@" .. COMMIT .. "/"
 local BASE = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/"
@@ -303,15 +303,16 @@ local function boot()
     ------------------------------------------------------------- interface
 
     setStage("downloading Steph HUB interface", 0.30)
-    local lib = hostGlobal("StephLib")
-    if type(lib) ~= "table" or type(lib.Window) ~= "table" then
-        local source = fetch("lib/menu.lua", "steph_ui")
-        setStage("booting Steph HUB interface", 0.40)
-        local returned = runBell(source, "steph_ui")
-        lib = type(returned) == "table" and returned or hostGlobal("StephLib")
-        if type(lib) == "table" then
-            publishGlobal("StephLib", lib)
-        end
+    local prevLib = hostGlobal("StephLib")
+    if type(prevLib) == "table" and type(prevLib.Destroy) == "function" then
+        pcall(prevLib.Destroy, prevLib)
+    end
+    local uiSource = fetch("lib/menu.lua", "steph_ui")
+    setStage("booting Steph HUB interface", 0.40)
+    local returnedUi = runBell(uiSource, "steph_ui")
+    local lib = type(returnedUi) == "table" and returnedUi or hostGlobal("StephLib")
+    if type(lib) == "table" then
+        publishGlobal("StephLib", lib)
     end
     local win = type(lib) == "table" and lib.Window or nil
     if type(win) ~= "table" then
