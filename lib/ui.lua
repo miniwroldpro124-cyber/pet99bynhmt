@@ -7,6 +7,11 @@
 -- it is a local control and only spec.onChange runs (player movement, etc).
 return function(lib, engine)
     local ui = {}
+    local configRef = nil
+
+    function ui.setConfig(cfg)
+        configRef = cfg
+    end
 
     function ui.notify(title, content, duration)
         pcall(lib.CreateNotification, lib, {
@@ -39,6 +44,8 @@ return function(lib, engine)
                     local ok, err = engine.SetEnabled(spec.key, value)
                     if not ok then
                         ui.notify("Engine", err or ("refused " .. tostring(spec.key)))
+                    elseif configRef then
+                        configRef.onChanged()
                     end
                 end
                 if spec.onChange then
@@ -49,6 +56,9 @@ return function(lib, engine)
                 end
             end,
         })
+        if spec.key and configRef then
+            configRef.register("toggle", spec.key, element)
+        end
         if spec.note then
             tab:CreateParagraph({ Title = spec.name, Content = spec.note })
         end
@@ -80,6 +90,8 @@ return function(lib, engine)
                     local ok, err = engine.SetConfig(spec.key, value)
                     if not ok then
                         ui.notify("Engine", err or ("knob refused: " .. tostring(spec.key)))
+                    elseif configRef then
+                        configRef.onChanged()
                     end
                 end
                 if spec.onChange then
@@ -90,6 +102,10 @@ return function(lib, engine)
                 end
             end,
         })
+        if spec.key and configRef then
+            configRef.register("slider", spec.key, slider)
+        end
+        return slider
     end
 
     function ui.button(tab, name, callback)

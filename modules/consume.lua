@@ -59,4 +59,5 @@ return function(ctx)
     ui.toggle(tab, { name = "Auto Fruits", key = "autoFruits", default = false })
     ui.toggle(tab, { name = "Auto Gift Bags & Lootboxes", key = "autoGiftBags", default = false })
     ui.toggle(tab, { name = "Auto Keys (Combine & Unlock)", key = "autoKeys", default = false })
+    ui.toggle(tab, { name = "Auto Open All Chests", key = "autoOpenChests", default = false })
 end

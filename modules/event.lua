@@ -38,6 +38,10 @@ return function(ctx)
         note = "Supports all 8 zones including Part 2 (Pine Woods, Maple Creek, Golden Ridge).",
     })
     ui.toggle(tab, {
+        name = "Auto Tele to Nearest Farm Area (Best Tele)", key = "ptAutoTeleNearestFarm", default = false,
+        note = "Teleports to the middle of the nearest/best unlocked Pumpkin Tycoon farm area.",
+    })
+    ui.toggle(tab, {
         name = "Auto Buy Pumpkin Tycoon Buttons", key = "ptAutoBuyButtons", default = false,
         note = "Builds all zones (including 3 new Part 2 zones) & claims island rewards.",
     })

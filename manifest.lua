@@ -14,4 +14,5 @@ return {
     { name = "Machines",       file = "modules/machines.lua", icon = "rbxassetid://126141499544212" },
     { name = "Render",         file = "modules/render.lua",   icon = "rbxassetid://6035047409" },
     { name = "Server",         file = "modules/server.lua",   icon = "rbxassetid://16093555964" },
+    { name = "Config",         file = "modules/config.lua",   icon = "rbxassetid://6031090990" },
 }

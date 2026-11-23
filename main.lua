@@ -22,7 +22,7 @@ assert(player, "[Steph HUB] run this on the client")
 
 local REPO = "https://github.com/miniwroldpro124-cyber/pet99bynhmt"
 local COMMIT = "main"
-local VERSION = "8.0"
+local VERSION = "8.3"
 local PINNED = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/" .. COMMIT .. "/"
 local MIRROR_PINNED = "https://cdn.jsdelivr.net/gh/miniwroldpro124-cyber/pet99bynhmt@" .. COMMIT .. "/"
 local BASE = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/"
@@ -281,7 +281,8 @@ local function boot()
     -- a half-initialised one is torn down and the engine is fetched again.
     local engine = hostGlobal("__PS99CLEAN")
     if type(engine) ~= "table" or type(engine.SetEnabled) ~= "function"
-        or type(engine.GetStatus) ~= "function" then
+        or type(engine.GetStatus) ~= "function"
+        or (type(engine.IsRunning) == "function" and not engine.IsRunning()) then
         if type(engine) == "table" and type(engine.Stop) == "function" then
             pcall(engine.Stop)
             engine = nil
@@ -303,14 +304,14 @@ local function boot()
     ------------------------------------------------------------- interface
 
     setStage("downloading Steph HUB interface", 0.30)
-    local lib = hostGlobal("ZapLib")
+    local lib = hostGlobal("StephLib")
     if type(lib) ~= "table" or type(lib.Window) ~= "table" then
-        local source = fetch("zaphub.lua", "steph_ui")
+        local source = fetch("lib/menu.lua", "steph_ui")
         setStage("booting Steph HUB interface", 0.40)
         local returned = runBell(source, "steph_ui")
-        lib = type(returned) == "table" and returned or hostGlobal("ZapLib")
+        lib = type(returned) == "table" and returned or hostGlobal("StephLib")
         if type(lib) == "table" then
-            publishGlobal("ZapLib", lib)
+            publishGlobal("StephLib", lib)
         end
     end
     local win = type(lib) == "table" and lib.Window or nil
@@ -326,6 +327,22 @@ local function boot()
         error("[Steph HUB] lib/ui did not return a builder", 0)
     end
     local ui = builder(lib, engine)
+
+    setStage("loading config manager", 0.48)
+    local config = nil
+    local cfgSrc = httpGet("lib/config.lua")
+    if cfgSrc then
+        local okCfg, cfgMod = pcall(compile(cfgSrc, "lib/config"))
+        if okCfg and type(cfgMod) == "function" then
+            local okInst, inst = pcall(cfgMod, engine, ui)
+            if okInst and type(inst) == "table" then
+                config = inst
+                if type(ui.setConfig) == "function" then
+                    ui.setConfig(config)
+                end
+            end
+        end
+    end
 
     --------------------------------------------------------------- manifest
 
@@ -364,6 +381,7 @@ local function boot()
                         lib = lib,
                         win = win,
                         ui = ui,
+                        config = config,
                         version = VERSION,
                         base = BASE,
                         repo = REPO,
@@ -483,6 +501,9 @@ local function boot()
     end)
 
     setStage("ready", 1)
+    if config and type(config.load) == "function" then
+        pcall(config.load)
+    end
     task.wait(0.3)
     if loading and loading.Parent then
         loading:Destroy()

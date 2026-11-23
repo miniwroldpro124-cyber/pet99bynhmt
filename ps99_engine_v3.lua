@@ -152,6 +152,7 @@ local CFG = {
     LowCpuFpsCap = 15,
     SelectedFlag = "Any Flag",
     SelectedMoveMode = "Teleport",
+    TeleMode = "Instant", -- "Instant" | "Legit"
     SelectedKeepRung = 4,
     HuntMinTier = 0,
 }
@@ -172,10 +173,12 @@ local enabled = {
     autoFreeGifts = false, autoUltimate = false, autoSprinkler = false, autoDaycare = false, autoFlags = false,
     autoSecretRooms = false, autoTreehouse = false, autoFuse = false, autoCards = false,
     autoRelics = false, autoMailClaim = false, autoDice = false,
+    autoSpinTickets = false, autoOpenChests = false,
     noclip = false, fly = false, unlockGamepasses = false, removeGates = false,
     -- Pumpkin Tycoon Event
     optPumpkinTycoon = false,
     ptAutoTeleBestEgg = false,
+    ptAutoTeleNearestFarm = false,
     ptAutoBuyEgg = false,
     ptAutoBuyButtons = false,
     ptAutoRebirth = false,
@@ -1846,10 +1849,13 @@ local function leaveActiveInstance()
     return false
 end
 
--- Direct CFrame island teleport (supports Zones 1-279 / World 1-4). Crosses worlds
--- automatically if target zone belongs to another World (e.g. Zone 200+ in World 3/4),
--- and runs streaming refinement until INTERACT.BREAK_ZONES middle is reached.
-local function teleportToIslandMiddle(id)
+local legitTeleDone = {}
+
+-- Island teleport (supports Zones 1-279 / World 1-4) with 2 modes:
+--   "Instant" : direct CFrame snap to INTERACT.BREAK_ZONES middle (falls back to server tp if streamed out)
+--   "Legit"   : uses Teleports_RequestTeleport first, waits for zone stream, then moves/snaps to middle
+-- Both modes always finish in the exact middle of the farm area.
+local function teleportToIslandMiddle(id, modeOverride)
     if type(id) ~= "string" or #id == 0 then return false, "invalid zone id" end
     leaveActiveInstance()
     local hereW = detectActiveWorld()
@@ -1860,9 +1866,12 @@ local function teleportToIslandMiddle(id)
         return ok == true, ok == true and ("switching to World " .. targetW .. " for " .. id)
             or tostring(message or ("invoke " .. remoteName .. " failed"))
     end
-    local centre, exact = zoneCenter(id)
-    if not centre then
-        -- Zone is streamed out (common for Zone 200+ across a large world): ask server teleport + streaming first.
+    local mode = tostring(modeOverride or CFG.TeleMode or "Instant")
+    local isLegit = mode:lower():find("legit", 1, true) ~= nil
+    local zoneNum = zoneNumbers[id]
+    local isFirstLegit200 = zoneNum and zoneNum >= 200 and not legitTeleDone[id]
+
+    local function requestServerTele()
         local inst = modules.instancing
         local inInst = false
         if inst and type(inst.IsInInstance) == "function" then
@@ -1870,8 +1879,76 @@ local function teleportToIslandMiddle(id)
             inInst = okI and resI == true
         end
         local tpRemote = inInst and "Teleports_RequestInstanceTeleport" or "Teleports_RequestTeleport"
-        local okTp = invoke(tpRemote, id)
-        if okTp == true then
+        return invoke(tpRemote, id) == true
+    end
+
+    local function moveMiddleLegit(targetPos)
+        local ch = LocalPlayer.Character
+        local root = ch and (ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart)
+        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+        if not root then return false end
+        local dist2D = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude
+        if dist2D <= 10 then return true end
+        if hum and dist2D <= 120 then
+            pcall(function() hum:MoveTo(targetPos) end)
+            local walkDeadline = os.clock() + math.clamp(dist2D / math.max(hum.WalkSpeed, 16) + 0.6, 0.8, 3.0)
+            while alive and os.clock() < walkDeadline do
+                local cur = position()
+                if cur and (Vector3.new(cur.X, 0, cur.Z) - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude <= 10 then
+                    return true
+                end
+                task.wait(0.1)
+            end
+        end
+        return snapTo(targetPos)
+    end
+
+    if isLegit or isFirstLegit200 then
+        local alreadyInZone = currentZone() == id
+        if not alreadyInZone then
+            local okTp = requestServerTele()
+            if okTp then
+                if zoneNum and zoneNum >= 200 then legitTeleDone[id] = true end
+                local deadline = os.clock() + 2.5
+                local centre, exact = zoneCenter(id)
+                while not exact and os.clock() < deadline and alive do
+                    task.wait(0.2)
+                    centre, exact = zoneCenter(id)
+                end
+                if centre then
+                    if isLegit then
+                        moveMiddleLegit(centre)
+                    else
+                        snapTo(centre)
+                    end
+                    task.delay(0.4, function()
+                        if not alive then return end
+                        local refined, isExact = zoneCenter(id)
+                        if refined and (isExact or enabled.teleCenter or enabled.zoneTele) then
+                            local cur = position()
+                            if not cur or (Vector3.new(cur.X, 0, cur.Z) - Vector3.new(refined.X, 0, refined.Z)).Magnitude > 10 then
+                                if isLegit then moveMiddleLegit(refined) else snapTo(refined) end
+                            end
+                        end
+                    end)
+                    return true, (isLegit and "legit teleported to middle of " or "legit teleported (first visit) to ") .. id
+                end
+                return true, "legit teleported to " .. id .. " (via server)"
+            end
+        else
+            local centre = zoneCenter(id)
+            if centre then
+                local okM = isLegit and moveMiddleLegit(centre) or snapTo(centre)
+                return okM, okM and ("centered in middle of " .. id .. (isLegit and " (legit)" or "")) or "character unavailable"
+            end
+        end
+    end
+
+    local centre, exact = zoneCenter(id)
+    if not centre then
+        -- Zone is streamed out (common for Zone 200+ across a large world): ask server teleport + streaming first.
+        if requestServerTele() then
+            if zoneNum and zoneNum >= 200 then legitTeleDone[id] = true end
             task.wait(0.35)
             centre, exact = zoneCenter(id)
             if not centre then
@@ -1895,7 +1972,7 @@ local function teleportToIslandMiddle(id)
         end
         return false, "island center not loaded: " .. tostring(id)
     end
-    local ok = snapTo(centre)
+    local ok = isLegit and moveMiddleLegit(centre) or snapTo(centre)
     if ok then
         local delays = exact and { 0.25 } or { 0.25, 0.65, 1.25 }
         for _, waitSec in ipairs(delays) do
@@ -1903,12 +1980,15 @@ local function teleportToIslandMiddle(id)
                 if not alive then return end
                 local refined, isExact = zoneCenter(id)
                 if refined and (isExact or enabled.teleCenter or enabled.zoneTele) then
-                    snapTo(refined)
+                    local cur = position()
+                    if not cur or (Vector3.new(cur.X, 0, cur.Z) - Vector3.new(refined.X, 0, refined.Z)).Magnitude > 10 then
+                        if isLegit then moveMiddleLegit(refined) else snapTo(refined) end
+                    end
                 end
             end)
         end
     end
-    return ok, ok and ("teleported to middle of " .. id) or "character unavailable"
+    return ok, ok and ("teleported to middle of " .. id .. " (" .. (isLegit and "legit" or "instant") .. ")") or "character unavailable"
 end
 
 local function teleTick()
@@ -1932,20 +2012,21 @@ local function teleTick()
         return
     end
     local centre = zoneCenter(id)
-    if not centre then
-        notes.tele = "island " .. id .. " not loaded yet"
-        return
-    end
     local pos = position()
     local inZone = currentZone() == id
-    local dist2D = pos and (Vector3.new(pos.X, 0, pos.Z) - Vector3.new(centre.X, 0, centre.Z)).Magnitude or math.huge
-    if inZone and (not enabled.teleCenter or dist2D <= 16) then
-        notes.tele = "standing in middle of " .. id
+    if centre then
+        local dist2D = pos and (Vector3.new(pos.X, 0, pos.Z) - Vector3.new(centre.X, 0, centre.Z)).Magnitude or math.huge
+        if inZone and (not enabled.teleCenter or dist2D <= 10) then
+            notes.tele = ("standing in middle of %s (%s)"):format(id, tostring(CFG.TeleMode or "Instant"))
+            return
+        end
+    elseif inZone then
+        notes.tele = "in " .. id .. " (waiting for center)"
         return
     end
     nextAt.tele = now + CFG.TeleInterval
     local ok, msg = teleportToIslandMiddle(id)
-    notes.tele = ok and ("middle: " .. id) or tostring(msg)
+    notes.tele = ok and ("middle: " .. id .. " (" .. tostring(CFG.TeleMode or "Instant") .. ")") or tostring(msg)
 end
 
 local function buyTick()
@@ -2932,6 +3013,253 @@ local function bagTick()
         end
     end
     notes.bags = "no selected bags or lootboxes in inventory"
+end
+
+local SPINNY_WHEELS = {
+    { id = "StarterWheel", ticket = "Spinny Wheel Ticket",         zone = nil },
+    { id = "TechWheel",    ticket = "Tech Spinny Wheel Ticket",    zone = "Tech Spawn",    rebirths = 4 },
+    { id = "VoidWheel",    ticket = "Void Spinny Wheel Ticket",    zone = "Void Spawn",    rebirths = 4 },
+    { id = "FantasyWheel", ticket = "Fantasy Spinny Wheel Ticket", zone = "Fantasy Spawn", rebirths = 4 },
+}
+
+local function clickGuiButton(btn)
+    if not btn or not btn:IsA("GuiButton") then return false end
+    local fired = false
+    if type(firesignal) == "function" then
+        for _, sigName in ipairs({ "Activated", "MouseButton1Click", "MouseButton1Down" }) do
+            local ok = pcall(function() firesignal(btn[sigName]) end)
+            if ok then fired = true end
+        end
+    end
+    if not fired and type(getconnections) == "function" then
+        for _, sigName in ipairs({ "Activated", "MouseButton1Click" }) do
+            pcall(function()
+                for _, conn in ipairs(getconnections(btn[sigName])) do
+                    if type(conn.Fire) == "function" then
+                        pcall(conn.Fire, conn)
+                        fired = true
+                    elseif type(conn.Function) == "function" then
+                        pcall(conn.Function)
+                        fired = true
+                    end
+                end
+            end)
+        end
+    end
+    return fired
+end
+
+local function claimSpinMessagePopup()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    local msg = pg and pg:FindFirstChild("Message")
+    if not msg or not msg.Enabled then return false end
+    local frame = msg:FindFirstChild("Frame")
+    local contents = frame and frame:FindFirstChild("Contents")
+    local okBtn = contents and contents:FindFirstChild("Ok")
+    local closeBtn = frame and frame:FindFirstChild("Close")
+    local clicked = false
+    if okBtn and okBtn.Visible then
+        clicked = clickGuiButton(okBtn) or clicked
+    end
+    if not clicked and closeBtn and closeBtn.Visible then
+        clicked = clickGuiButton(closeBtn) or clicked
+    end
+    return clicked
+end
+
+local function bypassSpinAnimationAndReopen(wheelId)
+    local tabCtrl, swCmds = nil, nil
+    pcall(function() tabCtrl = require(RS.Library.Client.TabController) end)
+    pcall(function() swCmds = require(RS.Library.Client.SpinnyWheelCmds) end)
+    -- Trick: closing the SpinnyWheel tab triggers SpinnyWheelCmds's CloseListener
+    -- (u120 = true; u119:Disconnect()), immediately skipping the 5s animation + 1s wait.
+    if tabCtrl and type(tabCtrl.CloseTab) == "function" then
+        for _ = 1, 8 do
+            local cur = type(tabCtrl.Get) == "function" and tabCtrl.Get() or nil
+            if cur == "SpinnyWheel" then
+                pcall(tabCtrl.CloseTab)
+                break
+            end
+            task.wait(0.03)
+        end
+    end
+    -- Auto-click the "You win!" / "Congratulations!" Claim (Ok) popup
+    for _ = 1, 10 do
+        if claimSpinMessagePopup() then break end
+        task.wait(0.03)
+    end
+    -- Reopen wheel menu cleanly so the game's client state resets for the next spin
+    if swCmds and type(swCmds.Get) == "function" and type(swCmds.Show) == "function" then
+        local okW, wheelObj = pcall(swCmds.Get, wheelId)
+        if okW and wheelObj then
+            pcall(swCmds.Show, wheelObj)
+        end
+    elseif tabCtrl and type(tabCtrl.OpenTab) == "function" then
+        pcall(tabCtrl.OpenTab, "SpinnyWheel")
+    end
+end
+
+local function collectAllTicketWheels()
+    local list = {}
+    local seen = {}
+    for _, w in ipairs(SPINNY_WHEELS) do
+        list[#list + 1] = w
+        seen[w.id] = true
+    end
+    pcall(function()
+        local dir = require(RS.Library.Directory.SpinnyWheels)
+        if type(dir) == "table" then
+            for id, entry in pairs(dir) do
+                if not seen[id] and type(entry) == "table" and type(entry.RequiredItem) == "table" then
+                    local req = entry.RequiredItem
+                    local isMisc = (req._class == "Misc") or (type(req.Class) == "table" and req.Class.Name == "Misc")
+                    local ticketId = (type(req.GetId) == "function" and select(2, pcall(req.GetId, req)))
+                        or (req._data and req._data.id) or req._id or req.id
+                    if isMisc and type(ticketId) == "string" and #ticketId > 0 then
+                        list[#list + 1] = {
+                            id = tostring(id),
+                            ticket = ticketId,
+                            zone = entry.ParentType == 1 and entry.ParentId or nil,
+                            rebirths = 0,
+                        }
+                        seen[id] = true
+                    end
+                end
+            end
+        end
+    end)
+    return list
+end
+
+local spinCountTotal = 0
+local function spinTick()
+    local now = os.clock()
+    if now < (nextAt.spin or 0) then return end
+    -- Always dismiss any lingering spin reward popup first
+    claimSpinMessagePopup()
+    local save = getSave()
+    if not save then notes.spin = "waiting for profile"; return end
+    local misc = stackList(inventory(save, "Misc"))
+    local counts = {}
+    for _, item in ipairs(misc) do
+        counts[item.id] = (counts[item.id] or 0) + item.amount
+    end
+    local serverNow = workspace:GetServerTimeNow()
+    local cooldowns = type(save.SpinnyWheelCooldowns) == "table" and save.SpinnyWheelCooldowns or {}
+    local rebirths = tonumber(save.Rebirths) or 0
+    local wheels = collectAllTicketWheels()
+    for _, w in ipairs(wheels) do
+        if not alive or not enabled.autoSpinTickets then return end
+        local unlocked = true
+        if w.id == "StarterWheel" then
+            unlocked = save.CastleUnlocked == true
+        else
+            unlocked = rebirths >= (w.rebirths or 0) and (not w.zone or ownsZone(save, w.zone))
+        end
+        if unlocked then
+            local cd = cooldowns[w.id]
+            if not cd or cd <= serverNow then
+                pcall(fire, "Spinny Wheel: Request Ticket", w.id)
+            end
+            local have = counts[w.ticket] or 0
+            if have > 0 then
+                nextAt.spin = now + 0.15
+                local ok = invoke("Spinny Wheel: Request Spin", w.id)
+                if not alive or not enabled.autoSpinTickets then return end
+                if ok then
+                    spinCountTotal += 1
+                    notes.spin = ("spun %s (#%d, %d left)"):format(w.id, spinCountTotal, math.max(0, have - 1))
+                    bypassSpinAnimationAndReopen(w.id)
+                    nextAt.save = 0
+                    return
+                end
+            end
+        end
+    end
+    -- Close SpinnyWheel tab cleanly once all tickets are spent
+    pcall(function()
+        local tabCtrl = require(RS.Library.Client.TabController)
+        if tabCtrl and type(tabCtrl.Get) == "function" and tabCtrl.Get() == "SpinnyWheel" then
+            tabCtrl.CloseTab()
+        end
+    end)
+    notes.spin = spinCountTotal > 0 and ("all tickets spun (" .. spinCountTotal .. ")") or "no spinny wheel tickets"
+end
+
+local ALL_KEY_CHESTS = {
+    { item = "Crystal Key", remote = "CrystalKey_Unlock", batch = true },
+    { item = "Tech Key",    remote = "TechKey_Unlock",    batch = true },
+    { item = "Void Key",    remote = "VoidKey_Unlock",    batch = true },
+    { item = "Fantasy Key", remote = "FantasyKey_Unlock", batch = true },
+    { item = "Hacker Key",  remote = "HackerKey_Unlock",  batch = true },
+    { item = "Secret Key",  remote = "SecretKey_Unlock",  batch = false },
+    { item = "MVP Key",     remote = "MVPKey_Unlock",     batch = true, mvp = true },
+}
+
+local function chestTick()
+    local now = os.clock()
+    if now < (nextAt.chest or 0) then return end
+    local save = getSave()
+    if not save then notes.chests = "waiting for profile"; return end
+    local misc = stackList(inventory(save, "Misc"))
+    local counts = {}
+    for _, item in ipairs(misc) do
+        counts[item.id] = (counts[item.id] or 0) + item.amount
+    end
+    for _, kc in ipairs(ALL_KEY_CHESTS) do
+        if not alive or not enabled.autoOpenChests then return end
+        local have = counts[kc.item] or 0
+        if have > 0 then
+            local canRun = true
+            if kc.mvp then
+                local subOk, subMod = pcall(function() return require(RS.Library.Client.SubscriptionCmds) end)
+                if subOk and type(subMod) == "table" and type(subMod.HasMainSubscription) == "function" then
+                    local okH, has = pcall(subMod.HasMainSubscription)
+                    canRun = okH and has == true
+                end
+            end
+            if canRun then
+                nextAt.chest = now + CFG.KeyInterval
+                local amount = kc.batch and math.min(have, 100) or 1
+                local ok = kc.batch and invoke(kc.remote, amount) or invoke(kc.remote)
+                if not alive or not enabled.autoOpenChests then return end
+                if ok == true then
+                    notes.chests = ("unlocked %s x%d"):format(kc.item, amount)
+                    nextAt.save = 0
+                    return
+                end
+            end
+        end
+    end
+    for _, item in ipairs(stackList(inventory(save, "Lootbox"))) do
+        if not alive or not enabled.autoOpenChests then return end
+        if tostring(item.id):lower():find("chest", 1, true) then
+            nextAt.chest = now + CFG.BagInterval
+            local amount = math.max(1, math.min(item.amount, CFG.BagMaxOpen))
+            local ok = invoke("KX_Release", item.uid, amount, nil)
+            if not alive or not enabled.autoOpenChests then return end
+            if ok == true then
+                notes.chests = ("opened %s x%d"):format(item.id, amount)
+                nextAt.save = 0
+                return
+            end
+        end
+    end
+    for _, item in ipairs(misc) do
+        if not alive or not enabled.autoOpenChests then return end
+        if tostring(item.id):lower():find("chest", 1, true) then
+            nextAt.chest = now + CFG.BagInterval
+            local amount = math.max(1, math.min(item.amount, CFG.BagMaxOpen))
+            local ok = invoke("GiftBag_Open", item.id, amount)
+            if not alive or not enabled.autoOpenChests then return end
+            if ok == true then
+                notes.chests = ("opened %s x%d"):format(item.id, amount)
+                nextAt.save = 0
+                return
+            end
+        end
+    end
+    notes.chests = "no chests or keys in inventory"
 end
 
 local consumeNext = {Fruit = 0, Potion = 0, potionCooldown = {}}
@@ -3971,7 +4299,8 @@ function CFG.SyncWhiteScreen()
                 gui.Name = "StephHUB_WhiteScreen"
                 gui.ResetOnSpawn = false
                 gui.IgnoreGuiInset = true
-                gui.DisplayOrder = 100000
+                -- Stay below Steph HUB menu (DisplayOrder 500) so the user can always control toggles
+                gui.DisplayOrder = 400
                 local bg = Instance.new("Frame")
                 bg.Size = UDim2.fromScale(1, 1)
                 bg.BackgroundColor3 = Color3.new(1, 1, 1)
@@ -3979,13 +4308,34 @@ function CFG.SyncWhiteScreen()
                 bg.Parent = gui
                 local lbl = Instance.new("TextLabel")
                 lbl.Size = UDim2.new(1, 0, 0, 40)
-                lbl.Position = UDim2.new(0, 0, 0.5, -20)
+                lbl.Position = UDim2.new(0, 0, 0.5, -42)
                 lbl.BackgroundTransparency = 1
                 lbl.Font = Enum.Font.GothamBold
                 lbl.Text = "Steph HUB  -  White Screen Active (3D Render Paused)"
                 lbl.TextColor3 = Color3.fromRGB(60, 65, 80)
                 lbl.TextSize = 18
                 lbl.Parent = bg
+                local offBtn = Instance.new("TextButton")
+                offBtn.Size = UDim2.fromOffset(220, 38)
+                offBtn.Position = UDim2.new(0.5, -110, 0.5, 10)
+                offBtn.BackgroundColor3 = Color3.fromRGB(24, 28, 38)
+                offBtn.BorderSizePixel = 0
+                offBtn.Font = Enum.Font.GothamBold
+                offBtn.Text = "Disable White Screen"
+                offBtn.TextColor3 = Color3.new(1, 1, 1)
+                offBtn.TextSize = 14
+                offBtn.Parent = bg
+                local corner = Instance.new("UICorner")
+                corner.CornerRadius = UDim.new(0, 8)
+                corner.Parent = offBtn
+                offBtn.MouseButton1Click:Connect(function()
+                    if type(setEnabled) == "function" then
+                        pcall(setEnabled, "whiteScreen", false)
+                    else
+                        enabled.whiteScreen = false
+                        CFG.SyncWhiteScreen()
+                    end
+                end)
                 gui.Parent = parent
                 st.whiteGui = gui
             end
@@ -4505,23 +4855,146 @@ local function httpGet(url)
     return nil
 end
 
-local function hopTick()
+local hopState = {
+    inProgress = false,
+    startedAt = 0,
+    targetJobId = nil,
+    blacklist = {}, -- [jobId] = expireClock
+    failCount = 0,
+    forceRetry = false,
+    conn = nil,
+}
+
+local function fetchHopCandidates(force)
+    local now = os.clock()
+    for jobId, exp in pairs(hopState.blacklist) do
+        if exp <= now then hopState.blacklist[jobId] = nil end
+    end
+    local httpSvc = game:GetService("HttpService")
+    local candidates = {}
+    local cursor = nil
+    for _ = 1, 3 do
+        local url = ("https://games.roblox.com/v1/games/%s/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true")
+            :format(tostring(game.PlaceId))
+        if cursor and #cursor > 0 then
+            url = url .. "&cursor=" .. httpSvc:UrlEncode(cursor)
+        end
+        local body = httpGet(url)
+        if not body then break end
+        local ok, data = pcall(function() return httpSvc:JSONDecode(body) end)
+        if not ok or type(data) ~= "table" or type(data.data) ~= "table" then break end
+        for _, server in ipairs(data.data) do
+            if type(server) == "table" and type(server.id) == "string" and #server.id > 0
+                and server.id ~= game.JobId and not hopState.blacklist[server.id]
+                and type(server.playing) == "number" and server.playing >= 1
+                and type(server.maxPlayers) == "number" and server.playing < server.maxPlayers then
+                if force or server.playing < CFG.HopMaxPlayers then
+                    candidates[#candidates + 1] = server
+                end
+            end
+        end
+        if #candidates >= 10 then break end
+        cursor = type(data.nextPageCursor) == "string" and data.nextPageCursor or nil
+        if not cursor or #cursor == 0 then break end
+    end
+    table.sort(candidates, function(a, b)
+        if a.playing ~= b.playing then return a.playing < b.playing end
+        return (tonumber(a.ping) or 9999) < (tonumber(b.ping) or 9999)
+    end)
+    return candidates
+end
+
+local hopTick
+local function ensureHopListener()
+    if hopState.conn then return end
+    local tpSvc = game:GetService("TeleportService")
+    hopState.conn = connect(tpSvc.TeleportInitFailed, function(plr, tpResult, errMsg)
+        if plr ~= LocalPlayer then return end
+        hopState.inProgress = false
+        hopState.failCount += 1
+        if hopState.targetJobId then
+            hopState.blacklist[hopState.targetJobId] = os.clock() + 180
+        end
+        local code = tostring(tpResult and tpResult.Name or "Failed")
+        notes.hop = ("teleport failed (%s): %s; retrying"):format(code, tostring(errMsg or "err"))
+        if alive and (enabled.serverHop or hopState.forceRetry) then
+            task.delay(1.5, function()
+                if not alive then return end
+                if enabled.serverHop or hopState.forceRetry then
+                    hopTick(hopState.forceRetry)
+                end
+            end)
+        end
+    end)
+end
+
+hopTick = function(force)
+    ensureHopListener()
+    local now = os.clock()
+    if hopState.inProgress and (now - hopState.startedAt) < 12 then
+        notes.hop = "teleport already in progress..."
+        return
+    end
     local count = #Players:GetPlayers()
-    if count <= CFG.HopMaxPlayers then notes.hop = ("server has %d players (limit %d)"):format(count, CFG.HopMaxPlayers); return end
-    local body = httpGet("https://games.roblox.com/v1/games/" .. tostring(game.PlaceId) .. "/servers/Public?limit=100")
-    if not body then notes.hop = "no HTTP function available"; return end
-    local ok, data = pcall(function() return game:GetService("HttpService"):JSONDecode(body) end)
-    if not ok or type(data) ~= "table" or type(data.data) ~= "table" then notes.hop = "server list unavailable"; return end
-    for _, server in ipairs(data.data) do
-        if type(server) == "table" and type(server.id) == "string"
-            and type(server.playing) == "number" and server.playing < CFG.HopMaxPlayers
-            and server.id ~= game.JobId then
-            notes.hop = "hopping to a " .. server.playing .. "-player server"
-            pcall(function() game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, server.id, LocalPlayer) end)
+    if not force and count <= CFG.HopMaxPlayers then
+        notes.hop = ("server has %d players (limit %d)"):format(count, CFG.HopMaxPlayers)
+        return
+    end
+    hopState.forceRetry = force == true
+    local tpSvc = game:GetService("TeleportService")
+
+    -- After 3 specific-instance failures (e.g. Error 256 / restricted / stale JobIds),
+    -- fall back to Teleport(game.PlaceId) so Roblox assigns a fresh valid server cleanly.
+    if hopState.failCount >= 3 then
+        hopState.failCount = 0
+        hopState.inProgress = true
+        hopState.startedAt = now
+        hopState.targetJobId = nil
+        notes.hop = "fallback random server hop (PlaceId " .. tostring(game.PlaceId) .. ")"
+        local ok, err = pcall(function() tpSvc:Teleport(game.PlaceId, LocalPlayer) end)
+        if not ok then
+            hopState.inProgress = false
+            notes.hop = "fallback hop error: " .. tostring(err)
+        end
+        return
+    end
+
+    local candidates = fetchHopCandidates(force)
+    if #candidates == 0 then
+        if force then
+            hopState.inProgress = true
+            hopState.startedAt = now
+            hopState.targetJobId = nil
+            notes.hop = "no listed server; hopping to fresh server"
+            local ok, err = pcall(function() tpSvc:Teleport(game.PlaceId, LocalPlayer) end)
+            if not ok then
+                hopState.inProgress = false
+                notes.hop = "hop error: " .. tostring(err)
+            end
+        else
+            notes.hop = "no low-player server found"
+        end
+        return
+    end
+
+    for _, server in ipairs(candidates) do
+        hopState.inProgress = true
+        hopState.startedAt = os.clock()
+        hopState.targetJobId = server.id
+        notes.hop = ("hopping to %d/%d player server"):format(server.playing, server.maxPlayers)
+        local ok, err = pcall(function()
+            tpSvc:TeleportToPlaceInstance(game.PlaceId, server.id, LocalPlayer)
+        end)
+        if ok then
             return
         end
+        -- Synchronous error (e.g. invalid instance / Error 256): blacklist and try next server
+        hopState.inProgress = false
+        hopState.blacklist[server.id] = os.clock() + 180
+        hopState.failCount += 1
+        notes.hop = "server rejected (" .. tostring(err) .. "); trying next"
     end
-    notes.hop = "no low-player server found"
+    notes.hop = "all candidate servers failed; retrying next tick"
 end
 
 -- =========================================================================
@@ -4968,6 +5441,105 @@ function CFG.Event.TeleBestEgg(now, plot)
     local targetPos = CFG.Event.ZonePos(plot, bestZ)
     if targetPos then
         CFG.Event.MoveTo(targetPos)
+    end
+end
+
+function CFG.Event.FarmCenter(plot, zIdx)
+    if not plot then return nil end
+    local z = CFG.Event.ZONES[zIdx]
+    local model = type(plot.GetModel) == "function" and plot:GetModel() or nil
+    local island = CFG.Event.Feature("Island")
+    local decor = island and type(island.Decor) == "function" and island.Decor(plot) or nil
+
+    -- 1. Prefer explicit farm / breakable zone parts inside the zone section
+    for _, container in ipairs({ decor, model }) do
+        if container and z then
+            local section = container:FindFirstChild(z.Section, true)
+            if section then
+                for _, key in ipairs({ "BREAK_ZONES", "BreakZone", "BreakableZone", "FarmArea", "FarmZone", "Patch", "WildArea_" .. zIdx }) do
+                    local hit = section:FindFirstChild(key, true)
+                    if hit then
+                        if hit:IsA("BasePart") then
+                            return Vector3.new(hit.Position.X, hit.Position.Y + hit.Size.Y * 0.5 + 2, hit.Position.Z)
+                        elseif hit:IsA("Model") or hit:IsA("Folder") then
+                            local sum, n, maxY = Vector3.zero, 0, -math.huge
+                            for _, p in ipairs(hit:GetDescendants()) do
+                                if p:IsA("BasePart") then
+                                    sum += p.Position
+                                    n += 1
+                                    if p.Position.Y > maxY then maxY = p.Position.Y end
+                                end
+                            end
+                            if n > 0 then
+                                return Vector3.new(sum.X / n, maxY + 2, sum.Z / n)
+                            end
+                        end
+                    end
+                end
+                -- 2. Average pumpkin pedestals inside the section to get exact middle of the farm patch
+                local sum, n, maxY = Vector3.zero, 0, -math.huge
+                for _, desc in ipairs(section:GetDescendants()) do
+                    local nm = desc.Name:lower()
+                    if nm:find("pedestal", 1, true) or nm:find("pumpkin", 1, true) or nm:find("plot", 1, true) then
+                        local pos = desc:IsA("BasePart") and desc.Position or (desc:IsA("Model") and modelPosition(desc))
+                        if pos then
+                            sum += pos
+                            n += 1
+                            if pos.Y > maxY then maxY = pos.Y end
+                        end
+                    end
+                end
+                if n >= 2 then
+                    return Vector3.new(sum.X / n, maxY + 2, sum.Z / n)
+                end
+                -- 3. Section model bounding-box center
+                if section:IsA("Model") then
+                    local okB, cf, size = pcall(function() return section:GetBoundingBox() end)
+                    if okB and cf and size then
+                        return Vector3.new(cf.Position.X, cf.Position.Y - size.Y * 0.25 + 2, cf.Position.Z)
+                    end
+                end
+                local sp = modelPosition(section)
+                if sp then return sp + Vector3.new(0, 2, 0) end
+            end
+            local wildArea = container:FindFirstChild("WildArea_" .. zIdx, true)
+            if wildArea then
+                local wp = wildArea:IsA("BasePart") and wildArea.Position or modelPosition(wildArea)
+                if wp then return wp + Vector3.new(0, 2, 0) end
+            end
+        end
+    end
+    local fallback = CFG.Event.ZonePos(plot, zIdx)
+    return fallback
+end
+
+function CFG.Event.TeleNearestFarm(now, plot)
+    if now < (CFG.Event.next.nearFarm or 0) then return end
+    CFG.Event.next.nearFarm = now + 1.0
+    local myPos = position()
+    if not myPos then return end
+    local bestZ = CFG.Event.OwnedZones(plot)
+    local nearestPos, nearestDist = nil, math.huge
+    local bestPos = nil
+    for zIdx = 1, bestZ do
+        local zPos = CFG.Event.FarmCenter(plot, zIdx)
+        if zPos then
+            if zIdx == bestZ then bestPos = zPos end
+            local d = (Vector3.new(myPos.X, 0, myPos.Z) - Vector3.new(zPos.X, 0, zPos.Z)).Magnitude
+            if d < nearestDist then
+                nearestDist = d
+                nearestPos = zPos
+            end
+        end
+    end
+    -- If far from every farm area (e.g. just spawned/entered), tele to the best unlocked farm area middle;
+    -- otherwise keep centered in the middle of the nearest unlocked farm area.
+    local targetPos = (nearestDist > 120 and bestPos) or nearestPos or bestPos
+    if targetPos then
+        local d2 = (Vector3.new(myPos.X, 0, myPos.Z) - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude
+        if d2 > 10 then
+            CFG.Event.MoveTo(targetPos)
+        end
     end
 end
 
@@ -5506,6 +6078,7 @@ function CFG.Event.Tick()
     if enabled.ptAutoCatchWild then pcall(CFG.Event.CatchWild, now, plot, save) end
     if enabled.ptAutoBuyNets then pcall(CFG.Event.BuyNets, now, plot) end
     if enabled.ptAutoTeleBestEgg then pcall(CFG.Event.TeleBestEgg, now, plot) end
+    if enabled.ptAutoTeleNearestFarm then pcall(CFG.Event.TeleNearestFarm, now, plot) end
     if enabled.ptAutoBuyEgg then pcall(CFG.Event.BuyNearestEgg, now, plot, save) end
     notes.event = ("Pumpkin Tycoon (%s)"):format(CFG.EventOpts.moveMode)
 end
@@ -5555,34 +6128,75 @@ local function ensureWorker(name, wanted, interval, tick, onFailure)
 end
 
 local antiAfkConnection
+local antiAfkThread
+local antiAfkDisabledConns = {}
 local antiAfkLast, antiAfkCount = -math.huge, 0
+
+local function sendAntiAfkPulse()
+    local camera = workspace.CurrentCamera
+    local ok = pcall(function()
+        local virtualUser = game:GetService("VirtualUser")
+        virtualUser:CaptureController()
+        if camera then
+            virtualUser:ClickButton2(Vector2.new(0, 0), camera.CFrame)
+        else
+            virtualUser:ClickButton2(Vector2.new(0, 0))
+        end
+    end)
+    if not ok then
+        ok = pcall(function()
+            local vim = game:GetService("VirtualInputManager")
+            vim:SendKeyEvent(true, Enum.KeyCode.RightShift, false, game)
+            task.wait(0.05)
+            vim:SendKeyEvent(false, Enum.KeyCode.RightShift, false, game)
+        end)
+    end
+    if ok then
+        antiAfkCount += 1
+        antiAfkLast = os.clock()
+    end
+    return ok
+end
+
 local function syncAntiAfk()
     if not alive or not enabled.antiAfk then
         if antiAfkConnection then antiAfkConnection:Disconnect(); antiAfkConnection = nil end
+        if antiAfkThread then pcall(task.cancel, antiAfkThread); antiAfkThread = nil end
+        for _, c in ipairs(antiAfkDisabledConns) do
+            pcall(function() if type(c.Enable) == "function" then c:Enable() end end)
+        end
+        table.clear(antiAfkDisabledConns)
         notes.antiAfk = "off"
         return
     end
     if antiAfkConnection then return end
-    notes.antiAfk = "armed; waiting for idle event"
-    antiAfkConnection = LocalPlayer.Idled:Connect(function()
-        if not alive or not enabled.antiAfk or os.clock() - antiAfkLast < CFG.AntiAfkCooldown then return end
-        local camera = workspace.CurrentCamera
-        if not camera then notes.antiAfk = "waiting for camera"; return end
-        antiAfkLast = os.clock()
-        local ok, err = pcall(function()
-            local virtualUser = game:GetService("VirtualUser")
-            virtualUser:CaptureController()
-            virtualUser:ClickButton2(Vector2.new(0, 0), camera.CFrame)
+    -- Disable existing Roblox/game Idled kick connections if getconnections is supported
+    local disabledCount = 0
+    if type(getconnections) == "function" then
+        pcall(function()
+            for _, c in ipairs(getconnections(LocalPlayer.Idled)) do
+                if type(c.Disable) == "function" then
+                    pcall(c.Disable, c)
+                    antiAfkDisabledConns[#antiAfkDisabledConns + 1] = c
+                    disabledCount += 1
+                end
+            end
         end)
-        if not ok then
-            setEnabled("antiAfk", false)
-            notes.antiAfk = "input unavailable: " .. tostring(err)
-            stage("Anti-AFK disabled: " .. tostring(err))
-            return
+    end
+    antiAfkConnection = LocalPlayer.Idled:Connect(function()
+        if not alive or not enabled.antiAfk then return end
+        if sendAntiAfkPulse() then
+            notes.antiAfk = ("active (%d idle blocked, %d pulses)"):format(disabledCount, antiAfkCount)
         end
-        antiAfkCount += 1
-        notes.antiAfk = ("idle pulse sent (%d)"):format(antiAfkCount)
     end)
+    antiAfkThread = task.spawn(function()
+        while alive and enabled.antiAfk do
+            sendAntiAfkPulse()
+            notes.antiAfk = ("active (%d idle blocked, %d pulses)"):format(disabledCount, antiAfkCount)
+            task.wait(math.max(30, CFG.AntiAfkCooldown or 60))
+        end
+    end)
+    notes.antiAfk = ("active (%d idle blocked)"):format(disabledCount)
 end
 
 syncWorkers = function()
@@ -5596,7 +6210,7 @@ syncWorkers = function()
     CFG.SyncFastFarmBeta()
     CFG.SyncWhiteScreen()
     CFG.SyncReduceCpuRam()
-    local eventWanted = enabled.optPumpkinTycoon or enabled.ptAutoTeleBestEgg or enabled.ptAutoBuyEgg
+    local eventWanted = enabled.optPumpkinTycoon or enabled.ptAutoTeleBestEgg or enabled.ptAutoTeleNearestFarm or enabled.ptAutoBuyEgg
         or enabled.ptAutoBuyButtons or enabled.ptAutoRebirth or enabled.ptAutoKeepPumpkins
         or enabled.ptAutoBreakPumpkins or enabled.ptAutoBuyMerchant or enabled.ptAutoPlantPumpkins
         or enabled.ptAutoBuyUpgrades or enabled.ptAutoBuyCocoa or enabled.ptAutoUseBoosts
@@ -5610,6 +6224,7 @@ syncWorkers = function()
         or enabled.autoFreeGifts or enabled.autoUltimate or enabled.autoSprinkler or enabled.autoDaycare or enabled.autoFlags
         or enabled.autoSecretRooms or enabled.autoTreehouse or enabled.autoFuse or enabled.autoCards
         or enabled.autoRelics or enabled.autoMailClaim or enabled.autoDice or enabled.autoTNT or enabled.autoTNTCrate
+        or enabled.autoSpinTickets or enabled.autoOpenChests
         or eventWanted
     local discoveryWanted = profileWanted or enabled.petSpeed or enabled.farm or enabled.fastFarmBeta or enabled.vacuum or enabled.tap or enabled.clickAura
     ensureWorker("profile", profileWanted, CFG.ProfileInterval, profileTick)
@@ -5644,6 +6259,8 @@ syncWorkers = function()
     ensureWorker("tntCrate", enabled.autoTNTCrate, 1, CFG.TNTCrateTick, function() enabled.autoTNTCrate = false end)
     ensureWorker("keys", enabled.autoKeys, 1, keyTick, function() enabled.autoKeys = false end)
     ensureWorker("bags", enabled.autoGiftBags, 1, bagTick, function() enabled.autoGiftBags = false end)
+    ensureWorker("spin", enabled.autoSpinTickets, 0.15, spinTick, function() enabled.autoSpinTickets = false end)
+    ensureWorker("chests", enabled.autoOpenChests, 1, chestTick, function() enabled.autoOpenChests = false end)
     ensureWorker("fruits", enabled.autoFruits, 1, fruitTick, function() enabled.autoFruits = false end)
     ensureWorker("potions", enabled.autoPotions, 1, potionTick, function() enabled.autoPotions = false end)
     ensureWorker("freeGift", enabled.autoFreeGifts, 1, freeGiftTick, function() enabled.autoFreeGifts = false end)
@@ -5764,6 +6381,7 @@ cleanup = function()
     restoreEffects(optBreakableEffects)
     restoreEffects(optPetEffects)
     destroyAuraPart()
+    table.clear(legitTeleDone)
     unpublish()
     print("[Steph HUB] unloaded")
 end
@@ -5835,7 +6453,7 @@ local controller = {
         return true, number
     end,
     HopNow = function()
-        task.spawn(hopTick)
+        task.spawn(hopTick, true)
         return true, "searching low-player server"
     end,
     GetConfig = function(key)
