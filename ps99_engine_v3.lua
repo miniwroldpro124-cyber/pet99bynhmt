@@ -178,6 +178,7 @@ local enabled = {
     autoSpinTickets = false, autoOpenChests = false,
     autoSeasonPass = false, autoZoneGifts = false,
     autoTimeTrial = false, autoTimeTrialChests = false, ttStopAtDailyLimit = false,
+    autoRankHud = false,
     noclip = false, fly = false, unlockGamepasses = false, removeGates = false,
     -- Pumpkin Tycoon Event
     optPumpkinTycoon = false,
@@ -2262,6 +2263,9 @@ local function claimRankRewards(onlyIndex)
         if single then ok, message = single, singleMessage end
     end
     notes.rank = ok and "claim request sent" or message
+    if CFG.Quest and type(CFG.Quest.Log) == "function" then
+        CFG.Quest.Log("Ranks_Claim -> " .. tostring(notes.rank))
+    end
     if ok then nextAt.save = 0 end
     return ok, message
 end
@@ -2290,7 +2294,8 @@ local function rankTick()
     for _, entry in ipairs(order) do
         if not entry.need then notes.rank = "invalid reward definition"; return end
         total += entry.need
-        if stars >= total and redeemed[tostring(entry.index)] == nil then claimable = entry.index; break end
+        local already = redeemed[entry.index] ~= nil or redeemed[tostring(entry.index)] ~= nil or redeemed[entry.numeric] ~= nil
+        if stars >= total and not already then claimable = entry.index; break end
     end
     if claimable == nil then
         notes.rank = ("nothing earned (rank %s, %d stars)"):format(tostring(save.Rank), stars)
@@ -3922,6 +3927,26 @@ CFG.Quest = {
         [3] = "Void Spawn",
         [4] = "Fantasy Spawn",
     },
+    TYPE_NAMES = {
+        [1] = "Breakables", [2] = "Hatch Pets", [3] = "Hatch Eggs", [4] = "Gold Pets",
+        [5] = "Rainbow Pets", [6] = "Buy Zone", [7] = "Currency", [8] = "Criticals",
+        [9] = "Lootbags", [10] = "Buy Potion", [11] = "Buy Enchant", [12] = "Upgrade Potion",
+        [13] = "Upgrade Enchant", [14] = "Collect Potion", [15] = "Collect Enchant",
+        [18] = "Free Gift", [19] = "Fuse Pets", [20] = "Best Egg", [21] = "Best Breakables",
+        [31] = "Coin Jar", [32] = "Comet", [33] = "Use Flag", [34] = "Use Potion",
+        [35] = "Use Fruit", [37] = "Break Coin Jar", [38] = "Break Comet", [39] = "Mini Chest",
+        [40] = "Best Gold Pet", [41] = "Best Rainbow Pet", [42] = "Hatch Rare Pet",
+        [43] = "Pinata", [44] = "Lucky Block", [55] = "Secret Key", [56] = "Crystal Key",
+        [57] = "Upgrade Fruit", [61] = "Diamond Wheel", [63] = "Superior Chest",
+        [64] = "Breakable Vault", [65] = "Collect Fruit", [66] = "Break Pinata",
+        [67] = "Break Lucky Block", [68] = "Best Coin Jar", [69] = "Best Comet",
+        [70] = "Best Pinata", [71] = "Best Lucky Block", [74] = "XP Potion",
+        [75] = "Best Mini Chest", [80] = "Equip Pet Slot", [81] = "Specific Zone",
+        [83] = "Custom Egg", [99] = "Obtain Currency", [100] = "Free Diamonds",
+    },
+    logs = {},
+    lastLogMsg = nil,
+    lastLogAt = 0,
     PRIORITY = {
         [6] = 1, [81] = 1,
         [34] = 2, [74] = 2, [35] = 2, [33] = 2,
@@ -3935,6 +3960,24 @@ CFG.Quest = {
         [7] = 6, [99] = 6, [100] = 6,
     },
 }
+
+function CFG.Quest.Log(msg)
+    local text = tostring(msg or "")
+    if #text == 0 then return end
+    local now = os.clock()
+    if text == CFG.Quest.lastLogMsg and (now - (CFG.Quest.lastLogAt or 0)) < 4 then
+        return
+    end
+    CFG.Quest.lastLogMsg = text
+    CFG.Quest.lastLogAt = now
+    local stamp = os.date("%H:%M:%S")
+    local line = ("[%s] %s"):format(stamp, text)
+    local logs = CFG.Quest.logs
+    logs[#logs + 1] = line
+    while #logs > 25 do
+        table.remove(logs, 1)
+    end
+end
 
 function CFG.Quest.BestEggInfo(save)
     local maxEggNum = nil
@@ -4122,8 +4165,11 @@ local function doQuestTick()
             end
             if ok then
                 notes.doQuest = "quest hatch: " .. tostring(msg)
+                CFG.Quest.Log("Hatch [T" .. tostring(gtype) .. "] -> " .. tostring(msg))
                 nextAt.doQuest = now + 0.45
                 return
+            else
+                CFG.Quest.Log("Hatch [T" .. tostring(gtype) .. "] skipped: " .. tostring(msg or "failed"))
             end
         -- 34 = USE_POTION, 74 = XP_POTION
         elseif gtype == 34 or gtype == 74 then
@@ -4362,7 +4408,7 @@ local function doQuestTick()
         end
     end
     -- Fallback for breakable/currency/crit/lootbag/mini-chest goals (Types 1, 7, 8, 9, 21, 39, 63, 64, 75, 99):
-    -- make sure the player is standing in the middle of the best unlocked island and tapping + vacuuming.
+    -- make sure the player is standing in the middle of the best unlocked island and tapping + routing pets + vacuuming.
     local best = maxOwned(save)
     if best and zones[best] then
         local id = zones[best].id
@@ -4370,9 +4416,13 @@ local function doQuestTick()
             teleportToIslandMiddle(id)
         end
     end
+    pcall(petTick)
     pcall(tapTick)
     pcall(vacuumTick)
-    notes.doQuest = ("working on %d quest goal(s) (type %s)"):format(#activeGoals, tostring(activeGoals[1].goal.Type))
+    local topType = activeGoals[1].goal.Type
+    local topName = CFG.Quest.TYPE_NAMES[topType] or ("Type " .. tostring(topType))
+    notes.doQuest = ("farming %d goal(s) | top: %s [T%s]"):format(#activeGoals, topName, tostring(topType))
+    CFG.Quest.Log(notes.doQuest)
 end
 
 -- Auto Use Sprinkler: keeps a Breakable Sprinkler running in the current zone
@@ -7030,6 +7080,321 @@ function CFG.TimeTrial.Tick()
     CFG.TimeTrial.Enter()
 end
 
+-- Dedicated 2nd Floating Menu / Debug HUD for Auto Rank (StephHUB_AutoRankHUD)
+CFG.RankHUD = {
+    gui = nil,
+    minimized = false,
+    userClosed = false,
+    titleLabel = nil,
+    metaLabel = nil,
+    goalsLabel = nil,
+    logLabel = nil,
+    bodyFrame = nil,
+    mainFrame = nil,
+}
+
+function CFG.RankHUD.GetParent()
+    local okHui, hui = pcall(function()
+        return (gethui and gethui()) or (get_hidden_gui and get_hidden_gui())
+    end)
+    if okHui and typeof(hui) == "Instance" then return hui end
+    local okCore, cg = pcall(function() return game:GetService("CoreGui") end)
+    if okCore and typeof(cg) == "Instance" then return cg end
+    return LocalPlayer:FindFirstChild("PlayerGui")
+end
+
+function CFG.RankHUD.Destroy()
+    if CFG.RankHUD.gui then
+        pcall(function() CFG.RankHUD.gui:Destroy() end)
+        CFG.RankHUD.gui = nil
+    end
+    local containers = {}
+    local okHui, hui = pcall(function()
+        return (gethui and gethui()) or (get_hidden_gui and get_hidden_gui())
+    end)
+    if okHui and typeof(hui) == "Instance" then containers[#containers + 1] = hui end
+    local okCore, cg = pcall(function() return game:GetService("CoreGui") end)
+    if okCore and typeof(cg) == "Instance" then containers[#containers + 1] = cg end
+    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+    if pg then containers[#containers + 1] = pg end
+    for _, c in ipairs(containers) do
+        local old = c:FindFirstChild("StephHUB_AutoRankHUD")
+        if old then pcall(function() old:Destroy() end) end
+    end
+    CFG.RankHUD.titleLabel = nil
+    CFG.RankHUD.metaLabel = nil
+    CFG.RankHUD.goalsLabel = nil
+    CFG.RankHUD.logLabel = nil
+    CFG.RankHUD.bodyFrame = nil
+    CFG.RankHUD.mainFrame = nil
+end
+
+function CFG.RankHUD.Build()
+    CFG.RankHUD.Destroy()
+    local parent = CFG.RankHUD.GetParent()
+    if not parent then return end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "StephHUB_AutoRankHUD"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.DisplayOrder = 550
+    gui.Parent = parent
+    CFG.RankHUD.gui = gui
+
+    local frame = Instance.new("Frame")
+    frame.Name = "Main"
+    frame.Size = UDim2.fromOffset(360, 310)
+    frame.Position = UDim2.new(1, -380, 0, 70)
+    frame.BackgroundColor3 = Color3.fromRGB(14, 16, 22)
+    frame.BorderSizePixel = 0
+    frame.Active = true
+    frame.Parent = gui
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+    local stroke = Instance.new("UIStroke", frame)
+    stroke.Color = Color3.fromRGB(58, 72, 98)
+    stroke.Thickness = 1
+    CFG.RankHUD.mainFrame = frame
+
+    local top = Instance.new("Frame")
+    top.Size = UDim2.new(1, 0, 0, 30)
+    top.BackgroundColor3 = Color3.fromRGB(20, 24, 34)
+    top.BorderSizePixel = 0
+    top.Parent = frame
+    Instance.new("UICorner", top).CornerRadius = UDim.new(0, 8)
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -110, 1, 0)
+    title.Position = UDim2.fromOffset(10, 0)
+    title.BackgroundTransparency = 1
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 12
+    title.TextColor3 = Color3.fromRGB(125, 212, 236)
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Text = "Auto Rank Monitor"
+    title.Parent = top
+    CFG.RankHUD.titleLabel = title
+
+    local copyBtn = Instance.new("TextButton")
+    copyBtn.Size = UDim2.fromOffset(44, 20)
+    copyBtn.Position = UDim2.new(1, -104, 0.5, -10)
+    copyBtn.BackgroundColor3 = Color3.fromRGB(32, 38, 52)
+    copyBtn.BorderSizePixel = 0
+    copyBtn.Font = Enum.Font.GothamBold
+    copyBtn.TextSize = 10
+    copyBtn.TextColor3 = Color3.fromRGB(220, 228, 240)
+    copyBtn.Text = "Copy"
+    copyBtn.Parent = top
+    Instance.new("UICorner", copyBtn).CornerRadius = UDim.new(0, 4)
+    copyBtn.MouseButton1Click:Connect(function()
+        local dump = table.concat({
+            title.Text,
+            CFG.RankHUD.metaLabel and CFG.RankHUD.metaLabel.Text or "",
+            "--- GOALS ---",
+            CFG.RankHUD.goalsLabel and CFG.RankHUD.goalsLabel.Text or "",
+            "--- LOG ---",
+            table.concat(CFG.Quest.logs or {}, "\n"),
+        }, "\n")
+        local env = getfenv and getfenv() or {}
+        local clip = env.setclipboard or rawget(_G, "setclipboard") or env.toclipboard or rawget(_G, "toclipboard")
+        if type(clip) == "function" then
+            pcall(clip, dump)
+            copyBtn.Text = "OK!"
+            task.delay(1.2, function()
+                if copyBtn and copyBtn.Parent then copyBtn.Text = "Copy" end
+            end)
+        end
+    end)
+
+    local minBtn = Instance.new("TextButton")
+    minBtn.Size = UDim2.fromOffset(22, 20)
+    minBtn.Position = UDim2.new(1, -54, 0.5, -10)
+    minBtn.BackgroundColor3 = Color3.fromRGB(32, 38, 52)
+    minBtn.BorderSizePixel = 0
+    minBtn.Font = Enum.Font.GothamBold
+    minBtn.TextSize = 12
+    minBtn.TextColor3 = Color3.fromRGB(220, 228, 240)
+    minBtn.Text = "-"
+    minBtn.Parent = top
+    Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 4)
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.fromOffset(22, 20)
+    closeBtn.Position = UDim2.new(1, -28, 0.5, -10)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(70, 32, 36)
+    closeBtn.BorderSizePixel = 0
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.TextSize = 11
+    closeBtn.TextColor3 = Color3.fromRGB(245, 200, 200)
+    closeBtn.Text = "X"
+    closeBtn.Parent = top
+    Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 4)
+
+    local body = Instance.new("Frame")
+    body.Size = UDim2.new(1, -16, 1, -38)
+    body.Position = UDim2.fromOffset(8, 34)
+    body.BackgroundTransparency = 1
+    body.Parent = frame
+    CFG.RankHUD.bodyFrame = body
+
+    local meta = Instance.new("TextLabel")
+    meta.Size = UDim2.new(1, 0, 0, 36)
+    meta.BackgroundColor3 = Color3.fromRGB(20, 24, 33)
+    meta.BorderSizePixel = 0
+    meta.Font = Enum.Font.Gotham
+    meta.TextSize = 11
+    meta.TextColor3 = Color3.fromRGB(225, 232, 244)
+    meta.TextXAlignment = Enum.TextXAlignment.Left
+    meta.TextYAlignment = Enum.TextYAlignment.Top
+    meta.TextWrapped = true
+    meta.Text = "collecting..."
+    meta.Parent = body
+    Instance.new("UICorner", meta).CornerRadius = UDim.new(0, 5)
+    local metaPad = Instance.new("UIPadding", meta)
+    metaPad.PaddingLeft, metaPad.PaddingRight, metaPad.PaddingTop = UDim.new(0, 6), UDim.new(0, 6), UDim.new(0, 4)
+    CFG.RankHUD.metaLabel = meta
+
+    local goals = Instance.new("TextLabel")
+    goals.Size = UDim2.new(1, 0, 0, 112)
+    goals.Position = UDim2.fromOffset(0, 42)
+    goals.BackgroundColor3 = Color3.fromRGB(20, 24, 33)
+    goals.BorderSizePixel = 0
+    goals.Font = Enum.Font.Code
+    goals.TextSize = 11
+    goals.TextColor3 = Color3.fromRGB(165, 230, 185)
+    goals.TextXAlignment = Enum.TextXAlignment.Left
+    goals.TextYAlignment = Enum.TextYAlignment.Top
+    goals.TextWrapped = true
+    goals.Text = "Active goals: loading..."
+    goals.Parent = body
+    Instance.new("UICorner", goals).CornerRadius = UDim.new(0, 5)
+    local goalsPad = Instance.new("UIPadding", goals)
+    goalsPad.PaddingLeft, goalsPad.PaddingRight, goalsPad.PaddingTop = UDim.new(0, 6), UDim.new(0, 6), UDim.new(0, 4)
+    CFG.RankHUD.goalsLabel = goals
+
+    local logBox = Instance.new("TextLabel")
+    logBox.Size = UDim2.new(1, 0, 1, -160)
+    logBox.Position = UDim2.fromOffset(0, 160)
+    logBox.BackgroundColor3 = Color3.fromRGB(10, 12, 17)
+    logBox.BorderSizePixel = 0
+    logBox.Font = Enum.Font.Code
+    logBox.TextSize = 10
+    logBox.TextColor3 = Color3.fromRGB(190, 200, 218)
+    logBox.TextXAlignment = Enum.TextXAlignment.Left
+    logBox.TextYAlignment = Enum.TextYAlignment.Top
+    logBox.TextWrapped = true
+    logBox.ClipsDescendants = true
+    logBox.Text = "[Auto Rank log]"
+    logBox.Parent = body
+    Instance.new("UICorner", logBox).CornerRadius = UDim.new(0, 5)
+    local logPad = Instance.new("UIPadding", logBox)
+    logPad.PaddingLeft, logPad.PaddingRight, logPad.PaddingTop = UDim.new(0, 6), UDim.new(0, 6), UDim.new(0, 4)
+    CFG.RankHUD.logLabel = logBox
+
+    minBtn.MouseButton1Click:Connect(function()
+        CFG.RankHUD.minimized = not CFG.RankHUD.minimized
+        body.Visible = not CFG.RankHUD.minimized
+        frame.Size = CFG.RankHUD.minimized and UDim2.fromOffset(360, 30) or UDim2.fromOffset(360, 310)
+        minBtn.Text = CFG.RankHUD.minimized and "+" or "-"
+    end)
+    closeBtn.MouseButton1Click:Connect(function()
+        CFG.RankHUD.userClosed = true
+        enabled.autoRankHud = false
+        CFG.RankHUD.Destroy()
+    end)
+
+    -- Draggable topbar
+    local dragging, dragStart, startPos = false, nil, nil
+    top.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = inp.Position
+            startPos = frame.Position
+        end
+    end)
+    UIS.InputChanged:Connect(function(inp)
+        if dragging and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
+            local delta = inp.Position - dragStart
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+    UIS.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+
+function CFG.RankHUD.Update()
+    if not CFG.RankHUD.gui or not CFG.RankHUD.gui.Parent then return end
+    local save = getSave()
+    local rank = save and tostring(save.Rank or "?") or "?"
+    local stars = save and tostring(save.RankStars or "0") or "0"
+    local zone = tostring(currentZone() or "?")
+    local bestEgg = "?"
+    if save then
+        local okE, eId = pcall(CFG.Quest.BestEggInfo, save)
+        if okE and eId then bestEgg = tostring(eId) end
+    end
+    if CFG.RankHUD.titleLabel then
+        CFG.RankHUD.titleLabel.Text = ("Auto Rank | R%s | %s Stars"):format(rank, stars)
+    end
+    if CFG.RankHUD.metaLabel then
+        CFG.RankHUD.metaLabel.Text = ("Zone: %s | Best Egg: %s\nDoQuest: %s | Claim: %s")
+            :format(zone, bestEgg, tostring(notes.doQuest or "off"), tostring(notes.rank or "off"))
+    end
+    if CFG.RankHUD.goalsLabel then
+        if not save then
+            CFG.RankHUD.goalsLabel.Text = "Waiting for Save profile..."
+        else
+            local active = collectActiveGoals(save)
+            if #active == 0 then
+                CFG.RankHUD.goalsLabel.Text = "No active incomplete goals."
+            else
+                local lines = {}
+                local limit = math.min(#active, 6)
+                for i = 1, limit do
+                    local e = active[i]
+                    local g = e.goal
+                    local gt = tonumber(g.Type) or -1
+                    local gname = CFG.Quest.TYPE_NAMES[gt] or ("Type " .. tostring(gt))
+                    local prog = tonumber(g.Progress) or 0
+                    local amt = tonumber(g.Amount) or 0
+                    local prefix = (i == 1) and "> " or "  "
+                    lines[#lines + 1] = ("%s[%s] %s (T%d): %d/%d (*%d)"):format(
+                        prefix, tostring(e.source), gname, gt, math.floor(prog), math.floor(amt), tonumber(e.stars) or 0
+                    )
+                end
+                CFG.RankHUD.goalsLabel.Text = table.concat(lines, "\n")
+            end
+        end
+    end
+    if CFG.RankHUD.logLabel then
+        local logs = CFG.Quest.logs or {}
+        if #logs == 0 then
+            CFG.RankHUD.logLabel.Text = "[Auto Rank log] idle"
+        else
+            local startIdx = math.max(1, #logs - 7)
+            local slice = {}
+            for i = startIdx, #logs do slice[#slice + 1] = logs[i] end
+            CFG.RankHUD.logLabel.Text = table.concat(slice, "\n")
+        end
+    end
+end
+
+function CFG.RankHUD.Sync()
+    local want = alive and (enabled.autoRankHud or ((enabled.autoDoQuest or enabled.autoRank) and not CFG.RankHUD.userClosed))
+    if not want then
+        CFG.RankHUD.Destroy()
+        stopWorker("rankHud")
+        return
+    end
+    if not CFG.RankHUD.gui or not CFG.RankHUD.gui.Parent then
+        CFG.RankHUD.Build()
+    end
+    ensureWorker("rankHud", true, 0.5, CFG.RankHUD.Update)
+end
+
 syncWorkers = function()
     if not alive then return end
     syncAntiAfk()
@@ -7041,6 +7406,7 @@ syncWorkers = function()
     CFG.SyncFastFarmBeta()
     CFG.SyncWhiteScreen()
     CFG.SyncReduceCpuRam()
+    CFG.RankHUD.Sync()
     local eventWanted = enabled.optPumpkinTycoon or enabled.ptAutoTeleBestEgg or enabled.ptAutoTeleNearestFarm or enabled.ptAutoBuyEgg
         or enabled.ptAutoBuyButtons or enabled.ptAutoRebirth or enabled.ptAutoKeepPumpkins
         or enabled.ptAutoBreakPumpkins or enabled.ptAutoBuyMerchant or enabled.ptAutoPlantPumpkins
@@ -7062,17 +7428,17 @@ syncWorkers = function()
     ensureWorker("profile", profileWanted, CFG.ProfileInterval, profileTick)
     ensureWorker("discovery", discoveryWanted, CFG.DiscoveryInterval, discoveryTick)
     if not discoveryWanted then heapObjects, heapCursor, treeScan = nil, nil, nil end
-    local petWanted = enabled.petSpeed or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.ptAutoFightTurkey or enabled.autoTimeTrial
+    local petWanted = enabled.petSpeed or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.ptAutoFightTurkey or enabled.autoTimeTrial or enabled.autoDoQuest
     if not petWanted and petState.hook then restorePetSpeed() end
     ensureWorker("pet", petWanted, CFG.PetInterval, petTick)
     local tapRate = enabled.clickAura and CFG.AuraRate or (enabled.farm and CFG.FarmTapRate or CFG.TapRate)
     if enabled.legitTap and not enabled.farm and not enabled.clickAura then tapRate = 8 end
     ensureWorker("tap", enabled.tap or enabled.farm or enabled.clickAura, 1 / math.clamp(math.min(tapRate, CFG.MaxTapRate), 1, 120), tapTick)
-    if (enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.autoTimeTrial) and not orbState.hook then
+    if (enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.autoTimeTrial or enabled.autoDoQuest) and not orbState.hook then
         if not orbBackfillNeeded then nextAt.heap = math.min(nextAt.heap, os.clock() + CFG.HeapRetryInterval) end
         orbBackfillNeeded = true
     end
-    ensureWorker("vacuum", enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.autoTimeTrial, CFG.VacuumRate, vacuumTick)
+    ensureWorker("vacuum", enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.autoTimeTrial or enabled.autoDoQuest, CFG.VacuumRate, vacuumTick)
     ensureWorker("tele", enabled.zoneTele, 0.5, teleTick, function() enabled.zoneTele = false end)
     ensureWorker("buy", enabled.zoneBuy, 0.5, buyTick, function() enabled.zoneBuy = false end)
     ensureWorker("quest", enabled.autoQuest, CFG.QuestInterval, questTick, function() enabled.autoQuest = false end)
@@ -7259,6 +7625,9 @@ updateToggles = function() end
 setEnabled = function(key, value)
     if not alive then return false, "stopped" end
     if enabled[key] == nil or type(value) ~= "boolean" then return false, "invalid toggle" end
+    if value and (key == "autoRankHud" or key == "autoDoQuest" or key == "autoRank") then
+        CFG.RankHUD.userClosed = false
+    end
     enabled[key] = value
     syncWorkers()
     updateToggles()
@@ -7317,6 +7686,7 @@ cleanup = function()
     CFG.SyncFastFarmBeta()
     CFG.SyncWhiteScreen()
     CFG.SyncReduceCpuRam()
+    CFG.RankHUD.Sync()
     for name in pairs(workers) do stopWorker(name) end
     heapObjects, heapCursor, treeScan, targetScan, stats.pending = nil, nil, nil, nil, nil
     for _, request in pairs(requests) do
@@ -7331,6 +7701,7 @@ cleanup = function()
     restoreEffects(optBreakableEffects)
     restoreEffects(optPetEffects)
     destroyAuraPart()
+    if CFG.RankHUD and type(CFG.RankHUD.Destroy) == "function" then CFG.RankHUD.Destroy() end
     table.clear(legitTeleDone)
     unpublish()
     print("[Steph HUB] unloaded")

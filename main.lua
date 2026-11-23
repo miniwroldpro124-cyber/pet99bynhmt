@@ -22,7 +22,7 @@ assert(player, "[Steph HUB] run this on the client")
 
 local REPO = "https://github.com/miniwroldpro124-cyber/pet99bynhmt"
 local COMMIT = "main"
-local VERSION = "9.3"
+local VERSION = "9.4"
 local PINNED = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/" .. COMMIT .. "/"
 local MIRROR_PINNED = "https://cdn.jsdelivr.net/gh/miniwroldpro124-cyber/pet99bynhmt@" .. COMMIT .. "/"
 local BASE = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/"
@@ -44,7 +44,7 @@ local function destroyOldMenus()
     if okHui and typeof(hui) == "Instance" then
         containers[#containers + 1] = hui
     end
-    local oldNames = { "StephHUB_UI", "STEPHHUB_LOADING", "ZapLib", "KaitunZapLib", "ZapLibKey" }
+    local oldNames = { "StephHUB_UI", "STEPHHUB_LOADING", "StephHUB_AutoRankHUD", "ZapLib", "KaitunZapLib", "ZapLibKey" }
     for _, container in ipairs(containers) do
         for _, guiName in ipairs(oldNames) do
             for _, child in ipairs(container:GetChildren()) do

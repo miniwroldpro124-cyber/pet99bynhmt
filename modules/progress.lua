@@ -12,6 +12,10 @@ return function(ctx)
     ui.toggle(tab, { name = "Auto Claim Quests (NPC & Daily)", key = "autoQuest", default = false })
     ui.toggle(tab, { name = "Auto Claim Rank Rewards", key = "autoRank", default = false })
     ui.toggle(tab, {
+        name = "Auto Rank 2nd Menu (Live Debug HUD)", key = "autoRankHud", default = false,
+        note = "Spawns a draggable 2nd floating window printing live Rank, Stars, active Rank Quests, and a timestamped action/error log (also auto-opens when Auto Do Rank is enabled).",
+    })
+    ui.toggle(tab, {
         name = "Auto Season Pass", key = "autoSeasonPass", default = false,
         note = "Automatically claims/buys unlocked Season Pass rewards with your earned Season Tokens.",
     })
