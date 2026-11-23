@@ -7,7 +7,7 @@ return function(ctx)
     ui.section(tab, "Auto Rank & Quests")
     ui.toggle(tab, {
         name = "Auto Do Rank / Quest Tasks", key = "autoDoQuest", default = false,
-        note = "Basic Coin Jar first; opens Large/Small Gift Bags only for Gem quests; never wastes bags when not needed.",
+        note = "Priority-sorted Rank quests: auto hatches best egg & crafts Best Golden/Rainbow pets, Basic Coin Jar first, opens bundles/bags only when needed.",
     })
     ui.toggle(tab, { name = "Auto Claim Quests (NPC & Daily)", key = "autoQuest", default = false })
     ui.toggle(tab, { name = "Auto Claim Rank Rewards", key = "autoRank", default = false })

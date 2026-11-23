@@ -76,7 +76,7 @@ local CFG = {
     QuestBackoff = 25,
     EnsureBackoff = 45,
     QuestMaxRequests = 2,
-    DoQuestInterval = 1.5,
+    DoQuestInterval = 0.6,
     RankInterval = 4,
     RebirthInterval = 20,
     EggInterval = 0.6,
@@ -3770,13 +3770,137 @@ local function mailClaimTick()
     pendingMail = nil
 end
 
+-- Best Egg resolver for Rank Quests (BEST_EGG=20, BEST_GOLD_PET=40, BEST_RAINBOW_PET=41, HATCH_RARE_PET=42).
+-- Reads live EggCmds.GetHighestEggNumberAvailable / GetMaxHatch and Directory.Eggs[id].pets so we only
+-- craft and hatch pets that actually belong to the player's current best egg.
+local WORLD_SPAWN_ZONE = {
+    [1] = "Spawn",
+    [2] = "Tech Spawn",
+    [3] = "Void Spawn",
+    [4] = "Fantasy Spawn",
+}
+
+local function getBestEggInfo(save)
+    local maxEggNum = nil
+    local maxHatch = nil
+    pcall(function()
+        local eggCmds = require(RS.Library.Client.EggCmds)
+        if type(eggCmds) == "table" then
+            if type(eggCmds.GetHighestEggNumberAvailable) == "function" then
+                local ok, num = pcall(eggCmds.GetHighestEggNumberAvailable)
+                if ok and type(num) == "number" and num > 0 then maxEggNum = num end
+            end
+            if type(eggCmds.GetMaxHatch) == "function" then
+                local ok, cnt = pcall(eggCmds.GetMaxHatch)
+                if ok and type(cnt) == "number" and cnt > 0 then maxHatch = cnt end
+            end
+        end
+    end)
+    if not maxEggNum then
+        maxEggNum = tonumber(save and save.MaximumAvailableEgg) or 1
+    end
+    if not maxHatch then
+        maxHatch = tonumber(save and save.EggHatchCount) or 1
+    end
+    local bestEggId = eggByNumber[maxEggNum]
+    local bestEggPets = {}
+    local petCount = 0
+    pcall(function()
+        local dir = require(RS.Library.Directory)
+        local eggs = dir and dir.Eggs
+        if type(eggs) == "table" then
+            local entry = bestEggId and eggs[bestEggId] or nil
+            if type(entry) ~= "table" then
+                for id, data in pairs(eggs) do
+                    if type(data) == "table" and data.eggNumber == maxEggNum then
+                        bestEggId = tostring(id)
+                        entry = data
+                        break
+                    end
+                end
+            end
+            if type(entry) == "table" and type(entry.pets) == "table" then
+                for _, p in ipairs(entry.pets) do
+                    local pid = type(p) == "table" and p[1] or (type(p) == "string" and p or nil)
+                    if type(pid) == "string" and #pid > 0 then
+                        bestEggPets[pid] = true
+                        petCount += 1
+                    end
+                end
+            end
+        end
+    end)
+    if not bestEggId then bestEggId = eggByNumber[1] end
+    return bestEggId, bestEggPets, petCount, maxEggNum, math.clamp(maxHatch, 1, CFG.EggMaxHatch)
+end
+
+local function hatchBestEggForQuest(save, desiredCount)
+    local bestEggId, _, _, _, maxHatch = getBestEggInfo(save)
+    if not bestEggId then return false, "best egg unknown" end
+    local count = math.clamp(tonumber(desiredCount) or maxHatch, 1, maxHatch)
+    -- Make sure the egg capsule is streamed in; if not found, teleport to current world's Spawn zone first.
+    local _, _, eggPos = findEggModel(bestEggId, position())
+    if not eggPos then
+        local spawnZone = WORLD_SPAWN_ZONE[detectActiveWorld()] or "Spawn"
+        if currentZone() ~= spawnZone then
+            teleportToIslandMiddle(spawnZone)
+            task.wait(0.35)
+        end
+        _, _, eggPos = findEggModel(bestEggId, position())
+    end
+    local ok, msg = hatchEggById(bestEggId, count, true)
+    if not ok then
+        -- Try unlocking the best egg once if the server says it is locked
+        local unlocked = invoke("Eggs_RequestUnlock", bestEggId)
+        if unlocked == true then
+            task.wait(0.15)
+            ok, msg = hatchEggById(bestEggId, count, true)
+        end
+    end
+    if ok then nextAt.save = 0 end
+    return ok, msg
+end
+
+local function findBestPetStacks(save, petFilter, wantPt)
+    local matches = {}
+    for _, pet in ipairs(stackList(inventory(save, "Pet"))) do
+        if pet.data._lk ~= true and pet.amount >= 10 then
+            local ptOk = (wantPt == nil and not pet.data.pt) or (wantPt ~= nil and pet.data.pt == wantPt)
+            if ptOk and (not petFilter or petFilter[pet.id] == true) then
+                matches[#matches + 1] = pet
+            end
+        end
+    end
+    table.sort(matches, function(a, b) return a.amount > b.amount end)
+    return matches
+end
+
+-- Priority for Rank / Quest Goals: fast craft/consume/bundle/zone tasks first, then hatching, then passive farming.
+local GOAL_PRIORITY = {
+    [6] = 1, [81] = 1,                                     -- Unlock zone
+    [34] = 2, [74] = 2, [35] = 2, [33] = 2,                -- Use potion / fruit / flag
+    [12] = 2, [13] = 2, [57] = 2,                          -- Upgrade potion / enchant / fruit
+    [10] = 2, [14] = 2, [11] = 2, [15] = 2, [65] = 2,      -- Bundles (potion / enchant / fruit)
+    [18] = 2, [55] = 2, [56] = 2, [61] = 2, [80] = 2,      -- Free gift / keys / wheel / slots
+    [4] = 3, [5] = 3, [40] = 3, [41] = 3, [19] = 3,        -- Gold / Rainbow / Best Gold / Best Rainbow / Fuse
+    [31] = 4, [37] = 4, [68] = 4,                          -- Coin jars
+    [32] = 4, [38] = 4, [69] = 4, [43] = 4, [66] = 4, [70] = 4, [44] = 4, [67] = 4, [71] = 4, -- Comets / Pinatas / Lucky Blocks
+    [2] = 5, [3] = 5, [20] = 5, [42] = 5, [83] = 5,        -- Hatch eggs / pets
+    [7] = 6, [99] = 6, [100] = 6,                          -- Currency / diamonds
+}
+
 -- Item 6: Auto Do Quest Tasks. Inspects Rank Goals (save.Goals), ZoneGateQuest,
 -- ZoneQuests, and NPCQuests, and automatically performs the required action.
 local function collectActiveGoals(save)
     local list = {}
     local function push(goal, source)
         if type(goal) == "table" and type(goal.Type) == "number" and not goalFull(goal) and goal.Claimed ~= true then
-            list[#list + 1] = {goal = goal, source = source}
+            list[#list + 1] = {
+                goal = goal,
+                source = source,
+                prio = GOAL_PRIORITY[goal.Type] or 9,
+                stars = tonumber(goal.Stars) or 0,
+            }
         end
     end
     if type(save.ZoneGateQuest) == "table" then push(save.ZoneGateQuest, "gate") end
@@ -3800,6 +3924,11 @@ local function collectActiveGoals(save)
             for _, g in pairs(zq.Quests) do push(g, "zone:" .. tostring(here)) end
         end
     end
+    table.sort(list, function(a, b)
+        if a.prio ~= b.prio then return a.prio < b.prio end
+        if a.stars ~= b.stars then return a.stars > b.stars end
+        return tostring(a.source) < tostring(b.source)
+    end)
     return list
 end
 
@@ -3809,6 +3938,7 @@ local function doQuestTick()
     local save = getSave()
     if not save then notes.doQuest = "waiting for profile"; return end
     if enabled.autoQuest then pcall(questTick) end
+    if enabled.autoRank then pcall(rankTick) end
     local activeGoals = collectActiveGoals(save)
     if #activeGoals == 0 then
         notes.doQuest = "no active incomplete quest goals"
@@ -3834,23 +3964,26 @@ local function doQuestTick()
                 if ok == true then
                     notes.doQuest = "bought quest zone " .. targetZoneId
                     nextAt.save = 0
+                    nextAt.doQuest = now + 0.35
                     return
                 end
             end
         -- 2 = PET, 3 = EGG, 20 = BEST_EGG, 42 = HATCH_RARE_PET, 83 = HATCH_CUSTOM_EGG
         elseif gtype == 2 or gtype == 3 or gtype == 20 or gtype == 42 or gtype == 83 then
-            local eggId = goal.EggID
-            if not eggId then
-                local maxEgg = tonumber(save.MaximumAvailableEgg) or 1
-                eggId = eggByNumber[maxEgg] or eggByNumber[1]
+            local ok, msg
+            if goal.EggID then
+                local _, _, _, _, maxHatch = getBestEggInfo(save)
+                local count = math.clamp(math.min(rem, maxHatch), 1, maxHatch)
+                ok, msg = hatchEggById(goal.EggID, count, true)
+                if ok then nextAt.save = 0 end
+            else
+                local _, _, _, _, maxHatch = getBestEggInfo(save)
+                ok, msg = hatchBestEggForQuest(save, math.min(rem, maxHatch))
             end
-            if eggId then
-                local count = math.clamp(math.min(rem, tonumber(save.EggHatchCount) or 1), 1, CFG.EggMaxHatch)
-                local ok, msg = hatchEggById(eggId, count, true)
-                if ok then
-                    notes.doQuest = "quest hatch: " .. msg
-                    return
-                end
+            if ok then
+                notes.doQuest = "quest hatch: " .. tostring(msg)
+                nextAt.doQuest = now + 0.45
+                return
             end
         -- 34 = USE_POTION, 74 = XP_POTION
         elseif gtype == 34 or gtype == 74 then
@@ -3864,6 +3997,8 @@ local function doQuestTick()
                     local ok = fire(rName, item.uid, take)
                     if ok then
                         notes.doQuest = ("quest potion: %s (T%d) x%d"):format(item.id, item.tier, take)
+                        nextAt.save = 0
+                        nextAt.doQuest = now + 0.35
                         return
                     end
                 end
@@ -3876,6 +4011,8 @@ local function doQuestTick()
                     local take = math.max(1, math.min(rem, item.amount, CFG.FruitQueueLimit))
                     if fire("Fruits: Consume", item.uid, take) then
                         notes.doQuest = ("quest fruit: %s x%d"):format(item.id, take)
+                        nextAt.save = 0
+                        nextAt.doQuest = now + 0.35
                         return
                     end
                 end
@@ -3890,31 +4027,77 @@ local function doQuestTick()
                 if item.id:match(" Flag$") then
                     if invoke("FlexibleFlags_Consume", item.id, item.uid, 1) == true then
                         notes.doQuest = "quest flag: " .. item.id
+                        nextAt.save = 0
+                        nextAt.doQuest = now + 0.4
                         return
                     end
                 end
             end
-        -- 4 = GOLD_PET, 40 = BEST_GOLD_PET
+        -- 4 = GOLD_PET, 40 = BEST_GOLD_PET (auto crafts best-egg pets into Golden; auto hatches best egg when short)
         elseif gtype == 4 or gtype == 40 then
-            for _, pet in ipairs(stackList(inventory(save, "Pet"))) do
-                if pet.data._lk ~= true and not pet.data.pt and pet.amount >= 10 then
-                    local craftCount = math.max(1, math.min(rem, pet.amount // 10))
-                    if invoke("GoldMachine_Activate", pet.uid, craftCount) == true then
-                        notes.doQuest = ("quest gold pet: %s x%d"):format(pet.id, craftCount)
-                        return
-                    end
+            local bestEggId, bestEggPets, bestPetCount, _, maxHatch = getBestEggInfo(save)
+            local filter = (gtype == 40 and bestPetCount > 0) and bestEggPets or nil
+            local stacks = findBestPetStacks(save, filter, nil)
+            if #stacks == 0 and gtype == 4 then
+                stacks = findBestPetStacks(save, nil, nil)
+            end
+            for _, pet in ipairs(stacks) do
+                local craftCount = math.max(1, math.min(rem, pet.amount // 10, 100))
+                local ok = invoke("GoldMachine_Activate", pet.uid, craftCount)
+                if ok then
+                    notes.doQuest = ("quest best gold: %s x%d"):format(pet.id, craftCount)
+                    nextAt.save = 0
+                    nextAt.doQuest = now + 0.35
+                    return
                 end
             end
-        -- 5 = RAINBOW_PET, 41 = BEST_RAINBOW_PET
+            -- Not enough normal pets from the best egg -> hatch best egg automatically
+            local okH, msgH = hatchBestEggForQuest(save, maxHatch)
+            if okH then
+                notes.doQuest = ("quest best gold: hatching %s (%s)"):format(tostring(bestEggId), tostring(msgH))
+                nextAt.doQuest = now + 0.55
+                return
+            end
+        -- 5 = RAINBOW_PET, 41 = BEST_RAINBOW_PET (crafts Golden -> Rainbow; crafts Normal -> Golden first; hatches best egg when short)
         elseif gtype == 5 or gtype == 41 then
-            for _, pet in ipairs(stackList(inventory(save, "Pet"))) do
-                if pet.data._lk ~= true and pet.data.pt == 1 and pet.amount >= 10 then
-                    local craftCount = math.max(1, math.min(rem, pet.amount // 10))
-                    if invoke("RainbowMachine_Activate", pet.uid, craftCount) == true then
-                        notes.doQuest = ("quest rainbow pet: %s x%d"):format(pet.id, craftCount)
-                        return
-                    end
+            local bestEggId, bestEggPets, bestPetCount, _, maxHatch = getBestEggInfo(save)
+            local filter = (gtype == 41 and bestPetCount > 0) and bestEggPets or nil
+            -- Step 1: Craft Golden pets from best egg into Rainbow
+            local goldStacks = findBestPetStacks(save, filter, 1)
+            if #goldStacks == 0 and gtype == 5 then
+                goldStacks = findBestPetStacks(save, nil, 1)
+            end
+            for _, pet in ipairs(goldStacks) do
+                local craftCount = math.max(1, math.min(rem, pet.amount // 10, 100))
+                local ok = invoke("RainbowMachine_Activate", pet.uid, craftCount)
+                if ok then
+                    notes.doQuest = ("quest best rainbow: %s x%d"):format(pet.id, craftCount)
+                    nextAt.save = 0
+                    nextAt.doQuest = now + 0.35
+                    return
                 end
+            end
+            -- Step 2: Craft Normal pets from best egg into Golden so we accumulate Golden for Rainbow
+            local normalStacks = findBestPetStacks(save, filter, nil)
+            if #normalStacks == 0 and gtype == 5 then
+                normalStacks = findBestPetStacks(save, nil, nil)
+            end
+            for _, pet in ipairs(normalStacks) do
+                local craftCount = math.max(1, math.min(rem * 10, pet.amount // 10, 100))
+                local ok = invoke("GoldMachine_Activate", pet.uid, craftCount)
+                if ok then
+                    notes.doQuest = ("quest best rainbow (prep gold): %s x%d"):format(pet.id, craftCount)
+                    nextAt.save = 0
+                    nextAt.doQuest = now + 0.35
+                    return
+                end
+            end
+            -- Step 3: Not enough best-egg pets -> hatch best egg automatically
+            local okH, msgH = hatchBestEggForQuest(save, maxHatch)
+            if okH then
+                notes.doQuest = ("quest best rainbow: hatching %s (%s)"):format(tostring(bestEggId), tostring(msgH))
+                nextAt.doQuest = now + 0.55
+                return
             end
         -- 19 = FUSE_PETS
         elseif gtype == 19 then
