@@ -22,7 +22,7 @@ assert(player, "[Steph HUB] run this on the client")
 
 local REPO = "https://github.com/miniwroldpro124-cyber/pet99bynhmt"
 local COMMIT = "main"
-local VERSION = "9.2"
+local VERSION = "9.3"
 local PINNED = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/" .. COMMIT .. "/"
 local MIRROR_PINNED = "https://cdn.jsdelivr.net/gh/miniwroldpro124-cyber/pet99bynhmt@" .. COMMIT .. "/"
 local BASE = "https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/"
@@ -30,6 +30,46 @@ local MIRROR = "https://cdn.jsdelivr.net/gh/miniwroldpro124-cyber/pet99bynhmt@ma
 
 local playerGui = player:WaitForChild("PlayerGui", 30)
 assert(playerGui, "[Steph HUB] PlayerGui never appeared")
+
+-- Always wipe any old menu / loading GUIs across all GUI containers before booting
+local function destroyOldMenus()
+    local containers = { playerGui }
+    local okCore, coreGui = pcall(function() return game:GetService("CoreGui") end)
+    if okCore and typeof(coreGui) == "Instance" then
+        containers[#containers + 1] = coreGui
+    end
+    local okHui, hui = pcall(function()
+        return (gethui and gethui()) or (get_hidden_gui and get_hidden_gui())
+    end)
+    if okHui and typeof(hui) == "Instance" then
+        containers[#containers + 1] = hui
+    end
+    local oldNames = { "StephHUB_UI", "STEPHHUB_LOADING", "ZapLib", "KaitunZapLib", "ZapLibKey" }
+    for _, container in ipairs(containers) do
+        for _, guiName in ipairs(oldNames) do
+            for _, child in ipairs(container:GetChildren()) do
+                if child.Name == guiName then
+                    pcall(function() child:Destroy() end)
+                end
+            end
+        end
+    end
+    for _, globalName in ipairs({ "StephLib", "ZapLib" }) do
+        local gVal = rawget(_G, globalName)
+        if gVal == nil and type(getgenv) == "function" then
+            local okG, env = pcall(getgenv)
+            if okG and type(env) == "table" then gVal = env[globalName] end
+        end
+        if type(gVal) == "table" and type(gVal.Destroy) == "function" then
+            pcall(gVal.Destroy, gVal)
+        end
+        pcall(rawset, _G, globalName, nil)
+        if type(getgenv) == "function" then
+            pcall(function() getgenv()[globalName] = nil end)
+        end
+    end
+end
+destroyOldMenus()
 
 ----------------------------------------------------------------- loader shell
 

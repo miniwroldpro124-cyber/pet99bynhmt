@@ -66,9 +66,22 @@ local function track(conn)
 end
 
 local guiParent = getGuiParent()
-local existing = guiParent:FindFirstChild("StephHUB_UI")
-if existing then
-    pcall(function() existing:Destroy() end)
+do
+    local containers = { guiParent }
+    local okCore = pcall(function() return CoreGui.Name end)
+    if okCore and CoreGui ~= guiParent then containers[#containers + 1] = CoreGui end
+    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+    if pg and pg ~= guiParent then containers[#containers + 1] = pg end
+    local oldNames = { "StephHUB_UI", "ZapLib", "KaitunZapLib", "ZapLibKey" }
+    for _, container in ipairs(containers) do
+        for _, name in ipairs(oldNames) do
+            for _, child in ipairs(container:GetChildren()) do
+                if child.Name == name then
+                    pcall(function() child:Destroy() end)
+                end
+            end
+        end
+    end
 end
 
 local screen = make("ScreenGui", {

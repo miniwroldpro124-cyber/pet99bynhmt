@@ -1,26 +1,28 @@
-# Steph HUB — PS99 (v8.0)
+# Steph HUB — PS99 (v9.3)
 
-Modular Pet Simulator 99 script: one loader (`main.lua`), one headless engine (`ps99_engine_v3.lua`), the Steph HUB UI (`zaphub.lua`), and one file per tab under `modules/*.lua`.
+Modular Pet Simulator 99 script: one loader (`main.lua`), one headless engine (`ps99_engine_v3.lua`), the Steph HUB UI (`lib/menu.lua`), and one file per tab under `modules/*.lua`.
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/main.lua?v=8.0"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/main.lua?v=9.3"))()
 ```
 
 `RightControl` toggles the Steph HUB window · `X` unloads everything.
 
 ## Load order
 
-`main.lua` → loading screen → `ps99_engine_v3.lua` → `zaphub.lua` (Steph HUB UI) → `lib/ui.lua` → `manifest.lua` → `modules/*.lua` → Status tab.
+`main.lua` → loading screen → `ps99_engine_v3.lua` → `lib/menu.lua` (Steph HUB UI) → `lib/ui.lua` → `lib/config.lua` → `manifest.lua` → `modules/*.lua` → Status tab.
 
 ## Repository layout
 
 | file | role |
 |---|---|
 | `main.lua` | loader — progress bar, engine bootstrap, Steph HUB UI, module loader, Status tab, unload (`X`) |
-| `ps99_engine_v3.lua` | headless farm, teleport (World 1–4 / Zones 1–279), enchant mastery, flag/ultimate/TNT, perf & Pumpkin Tycoon engine on `_G.__PS99CLEAN` |
-| `zaphub.lua` | Steph HUB UI runtime (`_G.ZapLib`) |
+| `ps99_engine_v3.lua` | headless farm, teleport (World 1–4 / Zones 1–279), Time Trial (World 4 / Zone 279), enchant mastery, flag/ultimate/TNT, perf & Pumpkin Tycoon engine on `_G.__PS99CLEAN` |
+| `lib/menu.lua` | Steph HUB UI runtime (`_G.StephLib`) |
 | `lib/ui.lua` | UI element helpers bound to `lib` + `engine` |
-| `manifest.lua` | ordered tab manifest (`Pumpkin Tycoon` → `Server`) |
+| `lib/config.lua` | JSON config auto-save / auto-load / reset (`StephHUB/config.json`) |
+| `manifest.lua` | ordered tab manifest (`Pumpkin Tycoon` → `Config`) |
+| `modules/timetrial.lua` | Auto Time Trial (World 4 / Zone 279 Hollow Veil Castle minigame), daily limit guard, Auto Open Time Trial Chests |
 | `modules/event.lua` | Current Event tab (**Pumpkin Tycoon** Part 1 & Part 2, Movement Mode, Optimizer, Turkey, Wild Pets, Nets, Cocoa, Boosts, Gifts) |
 | `modules/farm.lua` | Fast Auto Farm, Fast Farm v2_Beta, Auto Tap (Real Game Speed), Flag selector + active check, Ultimate, Sprinkler, TNT / TNT Crate, Auto Equip Enchants (Mastery-aware) |
 | `modules/pets.lua` | Pet Speed, Re-route rate, Auto Hatch, Hide Egg FX, Route All Pets, Bulk Join |

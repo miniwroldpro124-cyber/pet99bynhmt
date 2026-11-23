@@ -155,6 +155,8 @@ local CFG = {
     TeleMode = "Instant", -- "Instant" | "Legit"
     SelectedKeepRung = 4,
     HuntMinTier = 0,
+    TimeTrialChestTier = "Best Affordable",
+    TimeTrialInterval = 0.12,
 }
 
 local enabled = {
@@ -175,6 +177,7 @@ local enabled = {
     autoRelics = false, autoMailClaim = false, autoDice = false,
     autoSpinTickets = false, autoOpenChests = false,
     autoSeasonPass = false, autoZoneGifts = false,
+    autoTimeTrial = false, autoTimeTrialChests = false, ttStopAtDailyLimit = false,
     noclip = false, fly = false, unlockGamepasses = false, removeGates = false,
     -- Pumpkin Tycoon Event
     optPumpkinTycoon = false,
@@ -250,7 +253,7 @@ local notes = {
     quest = "off", doQuest = "off", rank = "off", rebirth = "off", antiAfk = "off", egg = "off",
     world = "off", advance = "off", optimize = "off", hop = "off", petSlot = "off", eggSlot = "off",
     foreverPack = "off", upgrade = "off", enchant = "off", tnt = "off", tntCrate = "off",
-    whiteScreen = "off", reduceCpu = "off", event = "off",
+    whiteScreen = "off", reduceCpu = "off", event = "off", timeTrial = "off",
     keys = "off", bags = "off", fruits = "off", potions = "off", freeGift = "off", ultimate = "off",
     sprinkler = "off", daycare = "off", flags = "off", secret = "off", relics = "off", treehouse = "off",
     fuse = "off", cards = "off", dice = "off", mailClaim = "off", cheat = "ready",
@@ -303,6 +306,8 @@ local REMOTE_TYPES = {
     ["Teleports_RequestInstanceTeleport"] = "RemoteFunction",
     ["Instancing_PlayerEnterInstance"] = "RemoteFunction",
     ["Instancing_PlayerLeaveInstance"] = "RemoteEvent",
+    ["TimeTrials_OpenChest"] = "RemoteFunction",
+    ["TimeTrial_Multipliers_Request"] = "RemoteFunction",
     ["RequestStreaming"] = "RemoteEvent",
     ["World1Teleport"] = "RemoteFunction",
     ["World2Teleport"] = "RemoteFunction",
@@ -6611,6 +6616,420 @@ local function syncAntiAfk()
     notes.antiAfk = ("active (%d idle blocked)"):format(disabledCount)
 end
 
+-- Auto Time Trial (World 4 / Zone 279 Hollow Veil Castle minigame, Instance ID "TimeTrial")
+CFG.TimeTrial = {
+    INSTANCE_ID = "TimeTrial",
+    ZONE_NUMBER = 279,
+    ZONE_NAME = "Hollow Veil Castle",
+    WORLD_NUMBER = 4,
+    nextEnterAt = 0,
+    nextChestAt = 0,
+    nextMoveAt = 0,
+    emptySince = nil,
+    visitedPads = {},
+}
+
+function CFG.TimeTrial.Types()
+    local ok, mod = pcall(function()
+        return require(RS.Library.Types.TimeTrials)
+    end)
+    return ok and type(mod) == "table" and mod or nil
+end
+
+function CFG.TimeTrial.InInstance()
+    local inst = modules.instancing
+    if inst then
+        if type(inst.GetInstanceID) == "function" then
+            local okId, curId = pcall(inst.GetInstanceID)
+            if okId and curId == CFG.TimeTrial.INSTANCE_ID then return true end
+        end
+        if type(inst.IsInInstance) == "function" then
+            local okIn, resIn = pcall(inst.IsInInstance, CFG.TimeTrial.INSTANCE_ID)
+            if okIn and resIn == true then return true end
+        end
+        if type(inst.Get) == "function" then
+            local okG, cur = pcall(inst.Get)
+            if okG and type(cur) == "table" and cur.instanceID == CFG.TimeTrial.INSTANCE_ID then
+                return true
+            end
+        end
+    end
+    local ic = thingsFolder("__INSTANCE_CONTAINER")
+    local active = ic and ic:FindFirstChild("Active")
+    if active and active:FindFirstChild(CFG.TimeTrial.INSTANCE_ID) then
+        return true
+    end
+    return false
+end
+
+function CFG.TimeTrial.GetModel()
+    local inst = modules.instancing
+    if inst and type(inst.GetModel) == "function" and CFG.TimeTrial.InInstance() then
+        local okM, model = pcall(inst.GetModel)
+        if okM and typeof(model) == "Instance" then return model end
+    end
+    local ic = thingsFolder("__INSTANCE_CONTAINER")
+    local active = ic and ic:FindFirstChild("Active")
+    return active and active:FindFirstChild(CFG.TimeTrial.INSTANCE_ID) or nil
+end
+
+function CFG.TimeTrial.IsSummaryOpen()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    local summaryGui = pg and pg:FindFirstChild("TimeTrialSummary")
+    if summaryGui and summaryGui:IsA("ScreenGui") and summaryGui.Enabled then
+        return true
+    end
+    local okTab, open = pcall(function()
+        local tc = require(RS.Library.Client.TabController)
+        if type(tc) == "table" and type(tc.GetCurrentTab) == "function" then
+            return tc.GetCurrentTab() == "TimeTrialSummary"
+        end
+        return false
+    end)
+    return okTab and open == true
+end
+
+function CFG.TimeTrial.GetStatus()
+    local save = getSave()
+    local ttTypes = CFG.TimeTrial.Types()
+    local totalGoals = (ttTypes and tonumber(ttTypes.TotalGoals)) or 5
+    local dailyLimit = (ttTypes and tonumber(ttTypes.DailyRuns)) or 10
+    local st = save and type(save.TimeTrialStats) == "table" and save.TimeTrialStats or nil
+    local goalIndex = (st and tonumber(st.GoalIndex)) or 1
+    local dailyRuns = (st and tonumber(st.DailyRuns)) or 0
+    local points = (st and tonumber(st.Points)) or 0
+    local totalRuns = (st and tonumber(st.TotalRuns)) or 0
+    local streak = (st and tonumber(st.Streak)) or 0
+    local pvpUnlocked = goalIndex > totalGoals
+    return {
+        inInstance = CFG.TimeTrial.InInstance(),
+        world = detectActiveWorld(),
+        goalIndex = goalIndex,
+        totalGoals = totalGoals,
+        pvpUnlocked = pvpUnlocked,
+        dailyRuns = dailyRuns,
+        dailyLimit = dailyLimit,
+        runsLeft = math.max(0, dailyLimit - dailyRuns),
+        points = points,
+        totalRuns = totalRuns,
+        streak = streak,
+        note = notes.timeTrial or "off",
+    }
+end
+
+function CFG.TimeTrial.TeleportToZone()
+    if CFG.TimeTrial.InInstance() then
+        return true, "already inside Time Trial"
+    end
+    if detectActiveWorld() ~= CFG.TimeTrial.WORLD_NUMBER then
+        local okW, msgW = teleportToWorldOrBestIsland(CFG.TimeTrial.WORLD_NUMBER)
+        return okW, okW and "teleporting to World 4" or tostring(msgW or "failed World 4 teleport")
+    end
+    local inst = modules.instancing
+    if inst and type(inst.GetEnterPart) == "function" then
+        local okP, part = pcall(inst.GetEnterPart, CFG.TimeTrial.INSTANCE_ID)
+        if okP and typeof(part) == "Instance" and part:IsA("BasePart") then
+            snapTo(part.Position + Vector3.new(0, 4, 0))
+            return true, "teleported to Time Trial portal"
+        end
+    end
+    local okZ, msgZ = teleportToIslandMiddle(CFG.TimeTrial.ZONE_NAME)
+    return okZ, msgZ or ("teleported to " .. CFG.TimeTrial.ZONE_NAME)
+end
+
+function CFG.TimeTrial.Enter()
+    if CFG.TimeTrial.InInstance() then
+        return true, "already inside Time Trial"
+    end
+    local inst = modules.instancing
+    if inst and type(inst.IsInInstance) == "function" then
+        local okOther, inAny = pcall(inst.IsInInstance)
+        if okOther and inAny == true then
+            leaveActiveInstance()
+            task.wait(0.6)
+        end
+    end
+    if detectActiveWorld() ~= CFG.TimeTrial.WORLD_NUMBER then
+        notes.timeTrial = "switching to World 4..."
+        teleportToWorldOrBestIsland(CFG.TimeTrial.WORLD_NUMBER)
+        return false, "switching to World 4 (re-run after load)"
+    end
+    local portalPart = nil
+    if inst and type(inst.GetEnterPart) == "function" then
+        local okP, part = pcall(inst.GetEnterPart, CFG.TimeTrial.INSTANCE_ID)
+        if okP and typeof(part) == "Instance" and part:IsA("BasePart") then
+            portalPart = part
+        end
+    end
+    if portalPart then
+        local myPos = position()
+        if not myPos or (myPos - portalPart.Position).Magnitude > 45 then
+            snapTo(portalPart.Position + Vector3.new(0, 4, 0))
+            task.wait(0.25)
+        end
+    else
+        pcall(teleportToIslandMiddle, CFG.TimeTrial.ZONE_NAME)
+        task.wait(0.35)
+    end
+    table.clear(CFG.TimeTrial.visitedPads)
+    CFG.TimeTrial.emptySince = nil
+    if inst and type(inst.Enter) == "function" then
+        local okE, resE = pcall(inst.Enter, CFG.TimeTrial.INSTANCE_ID)
+        if okE and resE ~= false then
+            for _ = 1, 20 do
+                if CFG.TimeTrial.InInstance() then
+                    notes.timeTrial = "entered Time Trial"
+                    return true, "entered Time Trial"
+                end
+                task.wait(0.2)
+            end
+        end
+    end
+    local okInv, msgInv = invoke("Instancing_PlayerEnterInstance", CFG.TimeTrial.INSTANCE_ID)
+    if okInv == true then
+        for _ = 1, 15 do
+            if CFG.TimeTrial.InInstance() then break end
+            task.wait(0.2)
+        end
+        notes.timeTrial = "entered Time Trial"
+        return true, "entered Time Trial"
+    end
+    notes.timeTrial = "enter failed: " .. tostring(msgInv or "unavailable")
+    return false, tostring(msgInv or "failed to enter Time Trial")
+end
+
+function CFG.TimeTrial.Leave()
+    pcall(function()
+        local tc = require(RS.Library.Client.TabController)
+        if type(tc) == "table" and type(tc.CloseTab) == "function" then
+            tc.CloseTab()
+        end
+    end)
+    local inst = modules.instancing
+    if inst and type(inst.Leave) == "function" and CFG.TimeTrial.InInstance() then
+        pcall(inst.Leave)
+        task.wait(0.6)
+    end
+    if CFG.TimeTrial.InInstance() then
+        pcall(fire, "Instancing_PlayerLeaveInstance")
+        task.wait(0.8)
+    end
+    table.clear(CFG.TimeTrial.visitedPads)
+    CFG.TimeTrial.emptySince = nil
+    nextAt.save = 0
+    return true, "left Time Trial"
+end
+
+function CFG.TimeTrial.OpenChest(tierOverride)
+    local st = CFG.TimeTrial.GetStatus()
+    if not st.pvpUnlocked then
+        return false, ("complete all %d goals first (%d/%d)"):format(st.totalGoals, st.goalIndex, st.totalGoals)
+    end
+    local ttTypes = CFG.TimeTrial.Types()
+    local chestDir = ttTypes and type(ttTypes.ChestDirectory) == "table" and ttTypes.ChestDirectory or nil
+    local function chestCost(id)
+        local entry = chestDir and chestDir[id]
+        if type(entry) == "table" and type(entry.PointsRequired) == "function" then
+            local okC, cost = pcall(entry.PointsRequired)
+            if okC and type(cost) == "number" and cost > 0 then return cost end
+        end
+        return nil
+    end
+    local mode = tostring(tierOverride or CFG.TimeTrialChestTier or "Best Affordable")
+    local order = { 3, 2, 1 }
+    if mode:find("3", 1, true) then
+        order = { 3 }
+    elseif mode:find("2", 1, true) then
+        order = { 2 }
+    elseif mode:find("1", 1, true) then
+        order = { 1 }
+    end
+    for _, id in ipairs(order) do
+        local cost = chestCost(id)
+        if cost == nil or st.points >= cost then
+            local okOpen, errOpen = invoke("TimeTrials_OpenChest", id)
+            if okOpen == true then
+                nextAt.save = 0
+                notes.timeTrial = ("opened Time Trial Chest #%d"):format(id)
+                return true, ("opened Time Trial Chest #%d"):format(id)
+            elseif #order == 1 then
+                return false, tostring(errOpen or ("need more points for Chest #" .. id))
+            end
+        end
+    end
+    return false, ("not enough points (%d)"):format(st.points)
+end
+
+function CFG.TimeTrial.FindBreakables(point)
+    local folder = thingsFolder("Breakables")
+    if not folder then return {} end
+    local list = {}
+    for _, m in ipairs(folder:GetChildren()) do
+        if m and m.Parent then
+            local uid = m:GetAttribute("BreakableUID")
+            if uid ~= nil then
+                local pos = modelPosition(m)
+                if pos then
+                    local dist = point and (pos - point).Magnitude or 0
+                    if dist <= 1500 then
+                        local bid = tostring(m:GetAttribute("BreakableID") or m.Name):lower()
+                        local isChest = bid:find("chest", 1, true) ~= nil
+                        list[#list + 1] = { model = m, uid = uid, pos = pos, dist = dist, isChest = isChest }
+                    end
+                end
+            end
+        end
+    end
+    table.sort(list, function(a, b)
+        if enabled.chestFirst and a.isChest ~= b.isChest then
+            return a.isChest
+        end
+        return a.dist < b.dist
+    end)
+    return list
+end
+
+function CFG.TimeTrial.AttackBreakables(list)
+    local maxTap = math.min(#list, 25)
+    for i = 1, maxTap do
+        fire("Breakables_PlayerDealDamage", list[i].uid)
+    end
+    local mod = modules.pet
+    local pets, seenP = {}, {}
+    local group = mod and type(mod.GetByPlayer) == "function" and mod.GetByPlayer(LocalPlayer) or nil
+    if type(group) == "table" then
+        for _, rec in pairs(group) do if not seenP[rec] then seenP[rec] = true; pets[#pets + 1] = rec end end
+    end
+    for rec in pairs(petState.records) do
+        if not seenP[rec] then seenP[rec] = true; pets[#pets + 1] = rec end
+    end
+    local cqRoute, joinBulk = {}, {}
+    local assigned = 0
+    for pIdx, rec in ipairs(pets) do
+        if not rec.destroyed and (rawget(rec, "owner") == nil or rawget(rec, "owner") == LocalPlayer) then
+            local entry = list[((pIdx - 1) % #list) + 1]
+            if entry and entry.model and entry.model.Parent then
+                assigned += 1
+                local euid = rawget(rec, "euid")
+                if petState.joinedTarget[rec] ~= entry.model then
+                    petState.joinedTarget[rec] = entry.model
+                    pcall(function() rec:SetTarget(entry.model) end)
+                    if euid ~= nil then
+                        cqRoute[euid] = { t = 2, v = entry.uid }
+                        joinBulk[euid] = entry.uid
+                    end
+                    local angle = (pIdx / math.max(#pets, 1)) * math.pi * 2
+                    local ringPos = entry.pos + Vector3.new(math.cos(angle) * 3.0, 0, math.sin(angle) * 3.0)
+                    local ringCF = CFrame.lookAt(ringPos, Vector3.new(entry.pos.X, ringPos.Y, entry.pos.Z))
+                    pcall(function()
+                        rec.speedMult = 1e6
+                        local cpet = rawget(rec, "cpet")
+                        if type(cpet) == "table" then
+                            if cpet.parallelIn then
+                                cpet.parallelIn.petSpeedMult = 1e6
+                                cpet.parallelIn.petSpeed = 100
+                            end
+                            cpet:Broadcast("petSpeedMult", 1e6)
+                            cpet:Broadcast("petSpeed", 100)
+                            if cpet.physical and cpet.physical.Parent then cpet.physical:PivotTo(ringCF) end
+                            if type(cpet.parallelOut) == "table" then
+                                cpet.parallelOut.cf = ringCF
+                                cpet.parallelOut.arrived = true
+                                cpet.parallelOut.farming = true
+                            end
+                            if type(cpet.Arrived) == "table" and type(cpet.Arrived.Fire) == "function" then
+                                cpet.Arrived:Fire()
+                            end
+                        end
+                    end)
+                end
+            end
+        end
+    end
+    if next(cqRoute) ~= nil then pcall(fire, "CQ_Route", cqRoute) end
+    if next(joinBulk) ~= nil then pcall(fire, "Breakables_JoinPetBulk", joinBulk) end
+    return assigned
+end
+
+function CFG.TimeTrial.FindNextPad(ttModel, myPos)
+    if not ttModel then return nil end
+    local bestPart, bestDist = nil, math.huge
+    for _, desc in ipairs(ttModel:GetDescendants()) do
+        if desc:IsA("BasePart") and not CFG.TimeTrial.visitedPads[desc] then
+            local lname = desc.Name:lower()
+            if lname ~= "safety_net" and lname ~= "enterteleport" and lname ~= "leave" and lname ~= "leaveteleport" then
+                if lname:find("finish", 1, true) or lname:find("goal", 1, true)
+                    or lname:find("checkpoint", 1, true) or lname:find("pad", 1, true)
+                    or lname:find("portal", 1, true) or lname:find("end", 1, true) then
+                    local d = myPos and (desc.Position - myPos).Magnitude or 0
+                    if d < bestDist then
+                        bestPart, bestDist = desc, d
+                    end
+                end
+            end
+        end
+    end
+    return bestPart
+end
+
+function CFG.TimeTrial.Tick()
+    if not alive then return end
+    local now = os.clock()
+    local inTT = CFG.TimeTrial.InInstance()
+    if enabled.autoTimeTrialChests and not inTT and now >= (CFG.TimeTrial.nextChestAt or 0) then
+        CFG.TimeTrial.nextChestAt = now + 2.0
+        pcall(CFG.TimeTrial.OpenChest)
+    end
+    if not enabled.autoTimeTrial then
+        if not enabled.autoTimeTrialChests then notes.timeTrial = "off" end
+        return
+    end
+    if inTT then
+        if CFG.TimeTrial.IsSummaryOpen() then
+            notes.timeTrial = "run complete, restarting..."
+            CFG.TimeTrial.Leave()
+            CFG.TimeTrial.nextEnterAt = os.clock() + 1.5
+            return
+        end
+        local myPos = position()
+        local list = CFG.TimeTrial.FindBreakables(myPos)
+        if #list > 0 then
+            CFG.TimeTrial.emptySince = nil
+            local nearest = list[1]
+            if myPos and nearest.dist > 28 and now >= (CFG.TimeTrial.nextMoveAt or 0) then
+                CFG.TimeTrial.nextMoveAt = now + 0.35
+                snapTo(nearest.pos + Vector3.new(0, 4, 0))
+            end
+            local assigned = CFG.TimeTrial.AttackBreakables(list)
+            notes.timeTrial = ("running | %d targets | %d pets"):format(#list, assigned)
+        else
+            if not CFG.TimeTrial.emptySince then
+                CFG.TimeTrial.emptySince = now
+            elseif now - CFG.TimeTrial.emptySince >= 1.5 then
+                local pad = CFG.TimeTrial.FindNextPad(CFG.TimeTrial.GetModel(), myPos)
+                if pad and now >= (CFG.TimeTrial.nextMoveAt or 0) then
+                    CFG.TimeTrial.visitedPads[pad] = true
+                    CFG.TimeTrial.nextMoveAt = now + 0.8
+                    snapTo(pad.Position + Vector3.new(0, 4, 0))
+                    notes.timeTrial = "moving to " .. pad.Name
+                    return
+                end
+            end
+            notes.timeTrial = "waiting for breakables..."
+        end
+        return
+    end
+    -- Outside Time Trial instance
+    local st = CFG.TimeTrial.GetStatus()
+    if enabled.ttStopAtDailyLimit and st.pvpUnlocked and st.runsLeft <= 0 then
+        notes.timeTrial = ("daily limit reached (%d/%d)"):format(st.dailyRuns, st.dailyLimit)
+        return
+    end
+    if now < (CFG.TimeTrial.nextEnterAt or 0) then return end
+    CFG.TimeTrial.nextEnterAt = now + 3.5
+    CFG.TimeTrial.Enter()
+end
+
 syncWorkers = function()
     if not alive then return end
     syncAntiAfk()
@@ -6628,6 +7047,7 @@ syncWorkers = function()
         or enabled.ptAutoBuyUpgrades or enabled.ptAutoBuyCocoa or enabled.ptAutoUseBoosts
         or enabled.ptAutoFlannelGifts or enabled.ptAutoHuntWild or enabled.ptAutoCatchWild
         or enabled.ptAutoBuyNets or enabled.ptAutoFightTurkey or enabled.ptAutoCatchRare
+    local ttWanted = enabled.autoTimeTrial or enabled.autoTimeTrialChests
     local profileWanted = enabled.zoneTele or enabled.zoneBuy or enabled.autoQuest or enabled.autoDoQuest
         or enabled.autoRank or enabled.autoRebirth or enabled.autoEgg or enabled.worldTele
         or enabled.autoBuyPetSlots or enabled.autoBuyEggSlots or enabled.autoForeverPack
@@ -6637,22 +7057,22 @@ syncWorkers = function()
         or enabled.autoSecretRooms or enabled.autoTreehouse or enabled.autoFuse or enabled.autoCards
         or enabled.autoRelics or enabled.autoMailClaim or enabled.autoDice or enabled.autoTNT or enabled.autoTNTCrate
         or enabled.autoSpinTickets or enabled.autoOpenChests
-        or eventWanted
+        or eventWanted or ttWanted
     local discoveryWanted = profileWanted or enabled.petSpeed or enabled.farm or enabled.fastFarmBeta or enabled.vacuum or enabled.tap or enabled.clickAura
     ensureWorker("profile", profileWanted, CFG.ProfileInterval, profileTick)
     ensureWorker("discovery", discoveryWanted, CFG.DiscoveryInterval, discoveryTick)
     if not discoveryWanted then heapObjects, heapCursor, treeScan = nil, nil, nil end
-    local petWanted = enabled.petSpeed or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.ptAutoFightTurkey
+    local petWanted = enabled.petSpeed or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.ptAutoFightTurkey or enabled.autoTimeTrial
     if not petWanted and petState.hook then restorePetSpeed() end
     ensureWorker("pet", petWanted, CFG.PetInterval, petTick)
     local tapRate = enabled.clickAura and CFG.AuraRate or (enabled.farm and CFG.FarmTapRate or CFG.TapRate)
     if enabled.legitTap and not enabled.farm and not enabled.clickAura then tapRate = 8 end
     ensureWorker("tap", enabled.tap or enabled.farm or enabled.clickAura, 1 / math.clamp(math.min(tapRate, CFG.MaxTapRate), 1, 120), tapTick)
-    if (enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins) and not orbState.hook then
+    if (enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.autoTimeTrial) and not orbState.hook then
         if not orbBackfillNeeded then nextAt.heap = math.min(nextAt.heap, os.clock() + CFG.HeapRetryInterval) end
         orbBackfillNeeded = true
     end
-    ensureWorker("vacuum", enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins, CFG.VacuumRate, vacuumTick)
+    ensureWorker("vacuum", enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.autoTimeTrial, CFG.VacuumRate, vacuumTick)
     ensureWorker("tele", enabled.zoneTele, 0.5, teleTick, function() enabled.zoneTele = false end)
     ensureWorker("buy", enabled.zoneBuy, 0.5, buyTick, function() enabled.zoneBuy = false end)
     ensureWorker("quest", enabled.autoQuest, CFG.QuestInterval, questTick, function() enabled.autoQuest = false end)
@@ -6806,6 +7226,8 @@ end
     ensureWorker("hop", enabled.serverHop, CFG.HopInterval, hopTick, function() enabled.serverHop = false end)
     ensureWorker("pumpkinEvent", eventWanted, (enabled.ptAutoBreakPumpkins or enabled.ptAutoFightTurkey) and 0.12 or 0.4, CFG.Event.Tick)
     if not eventWanted then notes.event = "off" end
+    ensureWorker("timeTrial", ttWanted, CFG.TimeTrialInterval or 0.12, CFG.TimeTrial.Tick)
+    if not ttWanted then notes.timeTrial = "off" end
     if not enabled.optBreakables and not enabled.reduceCpuRam and not enabled.optPumpkinTycoon then restoreEffects(optBreakableEffects) end
     if not enabled.optPets and not enabled.hideEggFx and not enabled.reduceCpuRam then restoreEffects(optPetEffects) end
     if enabled.optBreakables or enabled.optPets or enabled.hideEggFx or enabled.reduceCpuRam then
@@ -6829,7 +7251,7 @@ end
         table.clear(petState.joinedTarget)
         notes.tap = "off"
     end
-    if not enabled.vacuum and not enabled.farm and not enabled.fastFarmBeta and not enabled.autoDoQuest and not enabled.ptAutoBreakPumpkins then restoreOrbCapture(); notes.vacuum = "off" end
+    if not enabled.vacuum and not enabled.farm and not enabled.fastFarmBeta and not enabled.autoDoQuest and not enabled.ptAutoBreakPumpkins and not enabled.autoTimeTrial then restoreOrbCapture(); notes.vacuum = "off" end
 end
 
 updateToggles = function() end
@@ -6922,6 +7344,21 @@ local controller = {
     TeleportIsland = teleportToIslandMiddle,
     EnterPumpkinTycoon = function()
         return CFG.Event.Enter()
+    end,
+    EnterTimeTrial = function()
+        return CFG.TimeTrial.Enter()
+    end,
+    LeaveTimeTrial = function()
+        return CFG.TimeTrial.Leave()
+    end,
+    TeleportTimeTrialZone = function()
+        return CFG.TimeTrial.TeleportToZone()
+    end,
+    OpenTimeTrialChest = function(tier)
+        return CFG.TimeTrial.OpenChest(tier)
+    end,
+    GetTimeTrialStatus = function()
+        return CFG.TimeTrial.GetStatus()
     end,
     SetEventOpt = function(key, value, subKey)
         if subKey ~= nil and type(CFG.EventOpts[key]) == "table" then
