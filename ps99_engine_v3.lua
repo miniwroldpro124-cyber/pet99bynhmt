@@ -297,7 +297,7 @@ local REMOTE_TYPES = {
     ["Teleports_RequestTeleport"] = "RemoteFunction",
     ["Teleports_RequestInstanceTeleport"] = "RemoteFunction",
     ["Instancing_PlayerEnterInstance"] = "RemoteFunction",
-    ["Instancing_PlayerLeaveInstance"] = "RemoteFunction",
+    ["Instancing_PlayerLeaveInstance"] = "RemoteEvent",
     ["RequestStreaming"] = "RemoteEvent",
     ["World1Teleport"] = "RemoteFunction",
     ["World2Teleport"] = "RemoteFunction",
@@ -312,6 +312,7 @@ local REMOTE_TYPES = {
     ["Ranks_ClaimReward"] = "RemoteEvent",
     ["Rebirth_Request"] = "RemoteFunction",
     ["Eggs_RequestPurchase"] = "RemoteFunction",
+    ["CustomEggs_Hatch"] = "RemoteFunction",
     ["EquipSlotsMachine_RequestPurchase"] = "RemoteFunction",
     ["CrystalKey_Combine"] = "RemoteFunction",
     ["TechKey_Combine"] = "RemoteFunction",
@@ -505,6 +506,8 @@ function CFG.BootstrapModules()
     tryReq("network", "Network")
     tryReq("pet", "PlayerPet")
     tryReq("breakables", "BreakableCmds")
+    tryReq("breakableFrontend", "BreakableFrontend")
+    tryReq("customEggs", "CustomEggsCmds")
     tryReq("gamepasses", "Gamepasses")
     tryReq("ultimates", "UltimateCmds")
     tryReq("sprinklers", "SprinklerCmds")
@@ -1814,22 +1817,44 @@ local WORLD_FALLBACK_SPAWN = {
     [4] = Vector3.new(-15916.173828125, 50.972, -387.6759948730469),
 }
 
+local function leaveActiveInstance()
+    local inst = modules.instancing
+    local inInst = false
+    if inst then
+        if type(inst.IsInInstance) == "function" then
+            local okI, resI = pcall(inst.IsInInstance)
+            if okI and resI == true then inInst = true end
+        elseif type(inst.Get) == "function" then
+            local okI, cur = pcall(inst.Get)
+            if okI and type(cur) == "table" and cur.instanceID ~= nil then inInst = true end
+        end
+    end
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    local stuckPg = pg and pg:FindFirstChild("PumpkinTycoon") ~= nil
+    local ptPos = position()
+    local onPlotSky = CFG.Event and CFG.Event.Plot and CFG.Event.Plot() ~= nil and ptPos and ptPos.Y > 400
+    if inInst and inst and type(inst.Leave) == "function" then
+        pcall(inst.Leave)
+        task.wait(0.6)
+        return true
+    end
+    if inInst or stuckPg or onPlotSky then
+        pcall(fire, "Instancing_PlayerLeaveInstance")
+        task.wait(0.8)
+        return true
+    end
+    return false
+end
+
 -- Direct CFrame island teleport (supports Zones 1-279 / World 1-4). Crosses worlds
 -- automatically if target zone belongs to another World (e.g. Zone 200+ in World 3/4),
 -- and runs streaming refinement until INTERACT.BREAK_ZONES middle is reached.
 local function teleportToIslandMiddle(id)
     if type(id) ~= "string" or #id == 0 then return false, "invalid zone id" end
+    leaveActiveInstance()
     local hereW = detectActiveWorld()
     local targetW = zoneWorldNumber(id)
     if targetW ~= hereW and targetW >= 1 and targetW <= CFG.WorldCount then
-        local inst = modules.instancing
-        if inst and type(inst.Get) == "function" then
-            local okI, cur = pcall(inst.Get)
-            if okI and type(cur) == "table" and cur.instanceID then
-                pcall(invoke, "Instancing_PlayerLeaveInstance")
-                task.wait(0.25)
-            end
-        end
         local remoteName = "World" .. tostring(targetW) .. "Teleport"
         local ok, message = invoke(remoteName)
         return ok == true, ok == true and ("switching to World " .. targetW .. " for " .. id)
@@ -4642,27 +4667,64 @@ function CFG.Event.InInstance()
             end
         end
     end
-    local things = thingsFolder("Instances")
-    if things and things:FindFirstChild("PumpkinTycoon") then
-        local p = CFG.Event.Plot()
-        if p then return true end
+    local ic = thingsFolder("__INSTANCE_CONTAINER")
+    local active = ic and ic:FindFirstChild("Active")
+    if active and active:FindFirstChild("PumpkinTycoon") then
+        return true
     end
     return false
 end
 
 function CFG.Event.Enter()
+    local function ensureOnPlot()
+        local plot = nil
+        for _ = 1, 20 do
+            plot = CFG.Event.Plot()
+            if plot and (type(plot.GetModel) ~= "function" or plot:GetModel()) then break end
+            task.wait(0.2)
+        end
+        if plot then
+            local island = CFG.Event.Feature("Island")
+            if island and type(island.Show) == "function" then
+                pcall(island.Show, plot, 8)
+            end
+            if type(plot.LocalTeleport) == "function" then
+                local okLT, resLT = pcall(plot.LocalTeleport, plot)
+                if okLT and resLT == true then return end
+            end
+            if type(plot.GetModel) == "function" then
+                local model = plot:GetModel()
+                if model then
+                    local sp = model:FindFirstChild("SpawnPosition", true)
+                    local target = (sp and sp:IsA("BasePart") and sp.Position) or modelPosition(model)
+                    local myPos = position()
+                    if target and (not myPos or (myPos - target).Magnitude > 250 or myPos.Y < target.Y - 60) then
+                        snapTo(target + Vector3.new(0, 3, 0))
+                    end
+                end
+            end
+        end
+    end
     if CFG.Event.InInstance() then
+        ensureOnPlot()
         return true, "already inside Pumpkin Tycoon"
+    end
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if pg and pg:FindFirstChild("PumpkinTycoon") then
+        pcall(fire, "Instancing_PlayerLeaveInstance")
+        task.wait(1.0)
     end
     local inst = modules.instancing
     if inst then
         if type(inst.Enter) == "function" then
-            local okE, resE, msgE = pcall(inst.Enter, "PumpkinTycoon")
+            local okE, resE = pcall(inst.Enter, "PumpkinTycoon")
             if okE and resE ~= false then
+                for _ = 1, 25 do
+                    if CFG.Event.InInstance() then break end
+                    task.wait(0.2)
+                end
+                ensureOnPlot()
                 return true, "entered Pumpkin Tycoon"
-            end
-            if msgE and type(msgE) == "string" then
-                -- fallback to direct remote below if Enter returned a transient error
             end
         end
         if type(inst.GetEnterPart) == "function" then
@@ -4675,13 +4737,118 @@ function CFG.Event.Enter()
     end
     local ok, msg = invoke("Instancing_PlayerEnterInstance", "PumpkinTycoon")
     if ok == true then
-        for _ = 1, 12 do
-            if CFG.Event.Plot() then break end
-            task.wait(0.2)
-        end
+        ensureOnPlot()
         return true, "entered Pumpkin Tycoon"
     end
     return false, tostring(msg or "failed to enter Pumpkin Tycoon")
+end
+
+function CFG.Event.FindCustomEgg(eggId)
+    local ce = modules.customEggs
+    if not ce then
+        local cli = RS:FindFirstChild("Library") and RS.Library:FindFirstChild("Client")
+        local mod = cli and cli:FindFirstChild("CustomEggsCmds")
+        if mod then
+            local ok, loaded = pcall(require, mod)
+            if ok and type(loaded) == "table" then ce = loaded; modules.customEggs = loaded end
+        end
+    end
+    if not ce then return nil, nil end
+    local obj = nil
+    local function resolveObj(res)
+        if type(res) == "table" then return res end
+        if type(res) == "string" and type(ce.Get) == "function" then
+            local okG, got = pcall(ce.Get, res)
+            if okG and type(got) == "table" then return got end
+        end
+        return nil
+    end
+    if type(ce.GetClosestById) == "function" then
+        local ok, res = pcall(ce.GetClosestById, eggId)
+        if ok and res then obj = resolveObj(res) end
+    end
+    if not obj and type(ce.GetById) == "function" then
+        local ok, res = pcall(ce.GetById, eggId)
+        if ok and res then obj = resolveObj(res) end
+    end
+    if not obj and type(ce.All) == "function" then
+        local ok, all = pcall(ce.All)
+        if ok and type(all) == "table" then
+            for _, entry in pairs(all) do
+                local eid = type(entry) == "table" and (entry._id or entry.id or (entry.dir and entry.dir._id))
+                if eid == eggId then obj = entry; break end
+            end
+        end
+    end
+    if not obj then return nil, nil end
+    local uid = obj._uid or obj.uid
+    local pos = nil
+    if type(obj.GetPosition) == "function" then
+        local okP, p = pcall(obj.GetPosition, obj)
+        if okP and typeof(p) == "Vector3" then pos = p end
+    end
+    if not pos and typeof(obj._model) == "Instance" then
+        pos = modelPosition(obj._model)
+    end
+    return uid, pos
+end
+
+function CFG.Event.CollectBreakables()
+    local found = {}
+    local bf = modules.breakableFrontend
+    if not bf then
+        local cli = RS:FindFirstChild("Library") and RS.Library:FindFirstChild("Client")
+        local mod = cli and cli:FindFirstChild("BreakableFrontend")
+        if mod then
+            local ok, loaded = pcall(require, mod)
+            if ok and type(loaded) == "table" then bf = loaded; modules.breakableFrontend = loaded end
+        end
+    end
+    local reg = bf or modules.breakables
+    local getRecord = (bf and bf.Get) or (modules.breakables and modules.breakables.Get)
+    if reg then
+        local list = nil
+        if type(reg.AllByInstanceAndClasses) == "function" then
+            local ok, r = pcall(reg.AllByInstanceAndClasses, "Chest", "Normal")
+            if ok and type(r) == "table" then list = r end
+        end
+        if (not list or next(list) == nil) and type(reg.AllByInstanceAndClass) == "function" then
+            local ok, r = pcall(reg.AllByInstanceAndClass, "Chest")
+            if ok and type(r) == "table" then list = r end
+        end
+        if list then
+            for uid, val in pairs(list) do
+                local rec = type(val) == "table" and val.clientAttributes and val or nil
+                if not rec and type(getRecord) == "function" then
+                    local okG, g = pcall(getRecord, uid)
+                    if okG and type(g) == "table" then rec = g end
+                end
+                if rec then
+                    found[rec.uid or uid] = rec
+                elseif typeof(val) == "Instance" then
+                    found[uid] = { uid = uid, model = val, clientAttributes = val:GetAttributes() }
+                end
+            end
+        end
+    end
+    if next(found) == nil then
+        local root = thingsFolder("Breakables")
+        if root then
+            for _, child in ipairs(root:GetChildren()) do
+                local uid = child:GetAttribute("BreakableUID") or child.Name
+                local rec = type(getRecord) == "function" and select(2, pcall(getRecord, uid)) or nil
+                if type(rec) == "table" then
+                    found[rec.uid or uid] = rec
+                else
+                    local attrs = child:GetAttributes()
+                    if type(attrs.PumpkinPedestal) == "number" or attrs.PumpkinTurkey == true then
+                        found[uid] = { uid = uid, model = child, clientAttributes = attrs }
+                    end
+                end
+            end
+        end
+    end
+    return found
 end
 
 function CFG.Event.OwnedZones(plot)
@@ -4700,6 +4867,12 @@ end
 function CFG.Event.ZonePos(plot, zIdx)
     if not plot then return nil, nil end
     local z = CFG.Event.ZONES[zIdx]
+    if z and z.Egg then
+        local _, cePos = CFG.Event.FindCustomEgg(z.Egg)
+        if cePos then
+            return cePos + Vector3.new(0, 2, 6), cePos
+        end
+    end
     local model = type(plot.GetModel) == "function" and plot:GetModel() or nil
     local island = CFG.Event.Feature("Island")
     local decor = island and type(island.Decor) == "function" and island.Decor(plot) or nil
@@ -4738,7 +4911,7 @@ local EVENT_DEBRIS_FX = {
 
 function CFG.Event.Optimize(now)
     if now < CFG.Event.next.opt then return end
-    CFG.Event.next.opt = now + 1.5
+    CFG.Event.next.opt = now + 5.0
     local Lighting = game:GetService("Lighting")
     for _, name in ipairs({ "PumpkinFxFlash", "PumpkinFxDim", "TurkeyFlash" }) do
         local fx = Lighting:FindFirstChild(name)
@@ -4755,24 +4928,26 @@ function CFG.Event.Optimize(now)
         end
     end
     local instFolder = thingsFolder("Instances")
-    local ptInst = instFolder and instFolder:FindFirstChild("PumpkinTycoon")
-    if ptInst then
-        local shared = ptInst:FindFirstChild("PumpkinTycoonShared")
-        if shared then
-            suppressEffects("Instances", optBreakableEffects)
-            local arena = shared:FindFirstChild("TurkeyArena", true)
-            if arena then
-                for _, child in ipairs(arena:GetDescendants()) do
-                    if EFFECT_CLASSES[child.ClassName] then
-                        pcall(function() child.Enabled = false end)
+    local icFolder = thingsFolder("__INSTANCE_CONTAINER")
+    for _, ptInst in ipairs({ instFolder and instFolder:FindFirstChild("PumpkinTycoon"), icFolder and icFolder:FindFirstChild("PumpkinTycoon") }) do
+        if ptInst then
+            local shared = ptInst:FindFirstChild("PumpkinTycoonShared")
+            if shared then
+                suppressEffects("Instances", optBreakableEffects)
+                local arena = shared:FindFirstChild("TurkeyArena", true)
+                if arena then
+                    for _, child in ipairs(arena:GetDescendants()) do
+                        if EFFECT_CLASSES[child.ClassName] then
+                            pcall(function() child.Enabled = false end)
+                        end
                     end
                 end
             end
-        end
-        for _, child in ipairs(ptInst:GetDescendants()) do
-            if EFFECT_CLASSES[child.ClassName] then
-                if optBreakableEffects[child] == nil then optBreakableEffects[child] = child.Enabled end
-                pcall(function() child.Enabled = false end)
+            for _, child in ipairs(ptInst:GetDescendants()) do
+                if EFFECT_CLASSES[child.ClassName] then
+                    if optBreakableEffects[child] == nil then optBreakableEffects[child] = child.Enabled end
+                    pcall(function() child.Enabled = false end)
+                end
             end
         end
     end
@@ -4896,7 +5071,12 @@ function CFG.Event.BuyNearestEgg(now, plot, save)
         end
         CFG.Event.next.egg = now + CFG.EggInterval
         local count = math.clamp(tonumber(save and save.EggHatchCount) or 1, 1, CFG.EggMaxHatch)
-        invoke("Eggs_RequestPurchase", zInfo.Egg, count)
+        local eggUid = CFG.Event.FindCustomEgg(zInfo.Egg)
+        if eggUid then
+            invoke("CustomEggs_Hatch", eggUid, count)
+        else
+            invoke("Eggs_RequestPurchase", zInfo.Egg, count)
+        end
     end
 end
 
@@ -4932,10 +5112,8 @@ end
 function CFG.Event.BreakPumpkins(now, plot)
     if now < CFG.Event.next.breakP then return end
     CFG.Event.next.breakP = now + 0.12
-    local reg = modules.breakables
-    if not reg or type(reg.AllByInstanceAndClass) ~= "function" then return end
-    local okList, list = pcall(reg.AllByInstanceAndClass, "Chest")
-    if not okList or type(list) ~= "table" then return end
+    local list = CFG.Event.CollectBreakables()
+    if next(list) == nil then return end
 
     local pedSave = plot:Save("Pedestals") or {}
     local wantRung = enabled.ptAutoKeepPumpkins and (tonumber(CFG.EventOpts.keepRung) or 0) or 0
@@ -4991,10 +5169,12 @@ function CFG.Event.Merchant(now, plot, save)
     end
     local mSave = plot:Save("Merchant")
     if type(mSave) == "table" then
+        local items = type(mSave.Items) == "table" and mSave.Items or mSave
         local bands = CFG.EventOpts.merchantBands or {}
         for _, bandId in ipairs({ "ExoticPlus", "MythicalPlus", "LegendaryPlus", "EpicPlus", "RarePlus" }) do
-            if bands[bandId] and tonumber(mSave[bandId]) and tonumber(mSave[bandId]) > 0 then
-                CFG.Event.PlotInvoke(plot, CFG.Event.NET.BuyBand, bandId)
+            if bands[bandId] and tonumber(items[bandId]) and tonumber(items[bandId]) > 0 then
+                local ok = CFG.Event.PlotInvoke(plot, CFG.Event.NET.BuyBand, bandId)
+                if ok == true then nextAt.save = 0 end
                 break
             end
         end
@@ -5215,10 +5395,7 @@ end
 function CFG.Event.FightTurkey(now, plot)
     if now < CFG.Event.next.turkey then return end
     CFG.Event.next.turkey = now + 0.15
-    local reg = modules.breakables
-    if not reg or type(reg.AllByInstanceAndClass) ~= "function" then return end
-    local okList, list = pcall(reg.AllByInstanceAndClass, "Chest")
-    if not okList or type(list) ~= "table" then return end
+    local list = CFG.Event.CollectBreakables()
     local turkeyUid, turkeyModel = nil, nil
     for uid, rec in pairs(list) do
         local attrs = type(rec) == "table" and rec.clientAttributes
@@ -5229,8 +5406,9 @@ function CFG.Event.FightTurkey(now, plot)
     end
     if not turkeyModel then
         local instFolder = thingsFolder("Instances")
-        local ptShared = instFolder and instFolder:FindFirstChild("PumpkinTycoon")
-            and instFolder.PumpkinTycoon:FindFirstChild("PumpkinTycoonShared")
+        local icFolder = thingsFolder("__INSTANCE_CONTAINER")
+        local ptShared = (icFolder and icFolder:FindFirstChild("PumpkinTycoonShared", true))
+            or (instFolder and instFolder:FindFirstChild("PumpkinTycoon") and instFolder.PumpkinTycoon:FindFirstChild("PumpkinTycoonShared"))
         local arena = ptShared and ptShared:FindFirstChild("TurkeyArena", true)
         if arena and arena:GetAttribute("TurkeyAlive") == true then
             local spawnPart = arena:FindFirstChild("TurkeySpawn", true)
@@ -5285,17 +5463,21 @@ function CFG.Event.CatchRare(now, plot, save)
             if okT then CFG.Event.next.rare = now + 3.2; return end
         end
     end
-    for _, desc in ipairs(workspace:GetDescendants()) do
-        if desc:IsA("BasePart") then
-            local sid = desc:GetAttribute("PumpkinSighting")
-            if type(sid) == "string" and #sid > 0 then
-                CFG.Event.MoveTo(desc.Position + Vector3.new(0, 2, 8))
-                local ok = CFG.Event.PlotInvoke(plot, CFG.Event.NET.CatchSighting, sid, bestNet)
-                if ok == true then
-                    CFG.Event.next.rare = now + 3.2
-                    nextAt.save = 0
+    for _, container in ipairs({ workspace:FindFirstChild("__DEBRIS"), thingsFolder("Pets") }) do
+        if container then
+            for _, desc in ipairs(container:GetDescendants()) do
+                if desc:IsA("BasePart") then
+                    local sid = desc:GetAttribute("PumpkinSighting")
+                    if type(sid) == "string" and #sid > 0 then
+                        CFG.Event.MoveTo(desc.Position + Vector3.new(0, 2, 8))
+                        local ok = CFG.Event.PlotInvoke(plot, CFG.Event.NET.CatchSighting, sid, bestNet)
+                        if ok == true then
+                            CFG.Event.next.rare = now + 3.2
+                            nextAt.save = 0
+                        end
+                        return
+                    end
                 end
-                return
             end
         end
     end
