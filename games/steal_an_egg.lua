@@ -1,8 +1,8 @@
 --!nolint
--- STEPH_COMPONENT: sae_hub 1.4.1
+-- STEPH_COMPONENT: sae_hub 1.5.0
 -- Stehp-Hub | Luau / Roblox executor | Steal an Egg + PS99 StephUI Edition
 
-local VERSION = "1.4.1"
+local VERSION = "1.5.0"
 local HUB_NAME = "Steph HUB"
 local CONFIG_FOLDER = "StephHUB_SAE"
 local CONFIG_FILE = CONFIG_FOLDER .. "/config.json"
@@ -80,6 +80,11 @@ local DEFAULTS = {
         smart = false,
         hatch = false,
         treadmill = false,
+        targetZone = "Auto (Best For My Speed)",
+        respectSpeed = true,
+        prioritizeRarity = true,
+        speedSafetyPct = 90,
+        autoPlant = true,
     },
     training = {
         between = true,
@@ -251,6 +256,7 @@ local function coerceState(target, defaults)
     end
 end
 coerceState(state, DEFAULTS)
+state.farm.speedSafetyPct = math.clamp(tonumber(state.farm.speedSafetyPct) or 90, 50, 120)
 state.training.seconds = math.clamp(state.training.seconds, 1, 60)
 state.training.farmRuns = math.clamp(state.training.farmRuns, 1, 20)
 state.economy.reserve = math.max(state.economy.reserve, 0)
@@ -365,6 +371,9 @@ local runtime = {
     acCleanedStuns = 0,
     acLastNote = "Active",
     walkStatus = "Idle",
+    speedSummary = "Scanning speed...",
+    zoneSummary = "Auto",
+    targetEggSummary = "None",
 }
 
 local function notify(message, _color, title)
@@ -786,38 +795,75 @@ syncAntiCheat = function()
 end
 
 -- ============================================================================
--- Upgraded Walk-To-Egg Navigation (Steal an Egg)
+-- Upgraded Direct Walk-To-Egg & Instant Escape Navigation (Steal an Egg)
 -- ============================================================================
-local function getSeparationWaypoints(startPos, destPos)
+local function getSeparationLine()
     local world = workspace:FindFirstChild("World")
     local areas = world and world:FindFirstChild("Areas")
     local sep = areas and areas:FindFirstChild("SeparationLine")
-    if not (sep and sep:IsA("BasePart")) then
-        return nil
-    end
-    local sepCf = sep.CFrame
-    local localStart = sepCf:PointToObjectSpace(startPos)
-    local localDest = sepCf:PointToObjectSpace(destPos)
-    -- If start and destination are on opposite sides of SeparationLine (Z sign differs)
-    if (localStart.Z * localDest.Z) < 0 and math.abs(localStart.Z - localDest.Z) > 8 then
-        local clampedX = math.clamp(
-            (localStart.X + localDest.X) * 0.5,
-            -math.max(sep.Size.X * 0.42, 4),
-            math.max(sep.Size.X * 0.42, 4)
-        )
-        local groundY = startPos.Y
-        local signStart = localStart.Z >= 0 and 1 or -1
-        local p1World = sepCf:PointToWorldSpace(Vector3.new(clampedX, 0, signStart * 5))
-        local p2World = sepCf:PointToWorldSpace(Vector3.new(clampedX, 0, -signStart * 5))
-        return {
-            Vector3.new(p1World.X, groundY, p1World.Z),
-            Vector3.new(p2World.X, groundY, p2World.Z),
-        }
+    if sep and sep:IsA("BasePart") then
+        return sep
     end
     return nil
 end
 
-local function walkToCFrame(cframe, timeout)
+local function isPastSeparationLine(pos)
+    local sep = getSeparationLine()
+    if not sep or not pos then
+        return false
+    end
+    return sep.CFrame.LookVector:Dot(pos - sep.Position) > 0
+end
+
+-- Computes the shortest perpendicular escape point across SeparationLine into the Safe Zone
+-- at the player's current X coordinate (never detouring to the center X=0 of the map).
+local function computePerpendicularEscapePoint(fromPos, depthIntoSafeZone)
+    local sep = getSeparationLine()
+    if not sep then
+        return nil
+    end
+    local root = characterRoot()
+    local refPos = fromPos or (root and root.Position) or sep.Position
+    local sepCf = sep.CFrame
+    local localRef = sepCf:PointToObjectSpace(refPos)
+    local halfWidth = math.max(sep.Size.X * 0.46, 4)
+    local clampedX = math.clamp(localRef.X, -halfWidth, halfWidth)
+    -- In GuardAreaGeometry.IsPastLine: LookVector:Dot(pos - sep.Position) > 0 means localZ < 0 in Roblox CFrame
+    -- (since LookVector == -ZVector). Usingsep.Position - LookVector * depth guarantees Dot < 0 (safe side).
+    local centerAlongX = sepCf:PointToWorldSpace(Vector3.new(clampedX, 0, 0))
+    local safeDepth = tonumber(depthIntoSafeZone) or 7.5
+    local worldExit = centerAlongX - sepCf.LookVector * safeDepth
+    return Vector3.new(worldExit.X, refPos.Y, worldExit.Z)
+end
+
+-- When entering the field from the plot side, cross SeparationLine straight at the destination's X coordinate.
+-- When exiting the field to the plot side, cross SeparationLine perpendicular at the current X coordinate.
+local function getDirectCrossingPoint(startPos, destPos)
+    local sep = getSeparationLine()
+    if not sep then
+        return nil
+    end
+    local startInField = sep.CFrame.LookVector:Dot(startPos - sep.Position) > 0
+    local destInField = sep.CFrame.LookVector:Dot(destPos - sep.Position) > 0
+    if startInField == destInField then
+        return nil
+    end
+    local sepCf = sep.CFrame
+    local halfWidth = math.max(sep.Size.X * 0.46, 4)
+    if not startInField and destInField then
+        -- Entering field: align with destination's X so we walk straight into the egg's lane
+        local localDest = sepCf:PointToObjectSpace(destPos)
+        local clampedX = math.clamp(localDest.X, -halfWidth, halfWidth)
+        local linePoint = sepCf:PointToWorldSpace(Vector3.new(clampedX, 0, 0)) + sepCf.LookVector * 3.5
+        return Vector3.new(linePoint.X, startPos.Y, linePoint.Z)
+    else
+        -- Exiting field: cross perpendicular at current X (shortest path out of guard area)
+        return computePerpendicularEscapePoint(startPos, 7.0)
+    end
+end
+
+local function walkToCFrame(cframe, timeout, opts)
+    opts = type(opts) == "table" and opts or {}
     local character = LocalPlayer.Character
     local root = character and character:FindFirstChild("HumanoidRootPart")
     local humanoid = character and character:FindFirstChildOfClass("Humanoid")
@@ -832,14 +878,17 @@ local function walkToCFrame(cframe, timeout)
 
     local hipHeight = math.max(tonumber(humanoid.HipHeight) or 2, 1)
     local destination = cframe.Position + Vector3.new(0, hipHeight + 0.5, 0)
+    local finalStopRadius = tonumber(opts.stopRadius) or 3.6
+    local abortIf = type(opts.abortIf) == "function" and opts.abortIf or nil
+
     local function horizontalDistance(target)
         local offset = root.Position - target
         return Vector3.new(offset.X, 0, offset.Z).Magnitude
     end
     local function atDestination()
         return root.Parent ~= nil
-            and horizontalDistance(destination) <= 4.0
-            and math.abs(root.Position.Y - destination.Y) <= 9.0
+            and horizontalDistance(destination) <= finalStopRadius
+            and math.abs(root.Position.Y - destination.Y) <= 10.0
     end
     if atDestination() then
         runtime.walkStatus = "Arrived"
@@ -847,12 +896,17 @@ local function walkToCFrame(cframe, timeout)
     end
 
     local totalDist = horizontalDistance(destination)
-    local walkSpeed = math.max(tonumber(humanoid.WalkSpeed) or 16, 12)
-    local dynamicTimeout = math.max(tonumber(timeout) or 18, (totalDist / math.max(walkSpeed * 0.6, 9)) + 10)
+    local walkSpeed = math.max(tonumber(humanoid.WalkSpeed) or 16, 10)
+    local dynamicTimeout = math.max(tonumber(timeout) or 16, (totalDist / math.max(walkSpeed * 0.55, 8)) + 8)
     local deadline = os.clock() + dynamicTimeout
 
-    local function followPoint(target, stopRadius)
-        stopRadius = stopRadius or 3.2
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.IgnoreWater = true
+
+    -- Clean, direct line-of-sight steering without zig-zag pathfinding or random sideways nudges
+    local function steerDirectTo(target, stopRadius)
+        stopRadius = stopRadius or finalStopRadius
         local lastMove = -math.huge
         local lastProgressPos = root.Position
         local lastProgressAt = os.clock()
@@ -860,101 +914,56 @@ local function walkToCFrame(cframe, timeout)
             if shuttingDown or not root.Parent or not humanoid.Parent or humanoid.Health <= 0 then
                 return false
             end
-            local distH = horizontalDistance(target)
+            if abortIf and abortIf() then
+                return true
+            end
+            local curPos = root.Position
+            local delta = target - curPos
+            local flatDelta = Vector3.new(delta.X, 0, delta.Z)
+            local distH = flatDelta.Magnitude
             if distH <= stopRadius then
                 return true
             end
+
             local now = os.clock()
-            if (root.Position - lastProgressPos).Magnitude >= 1.5 then
-                lastProgressPos = root.Position
+            local moved = Vector3.new(curPos.X - lastProgressPos.X, 0, curPos.Z - lastProgressPos.Z).Magnitude
+            if moved >= 0.8 then
+                lastProgressPos = curPos
                 lastProgressAt = now
-            elseif now - lastProgressAt >= 1.35 then
-                -- Unstick character with jump + slight lateral nudge MoveTo
+            elseif now - lastProgressAt >= 1.45 then
+                -- Only jump if genuinely blocked by a physical obstacle ahead
                 pcall(function()
                     if humanoid.Sit then humanoid.Sit = false end
-                    humanoid.Jump = true
+                    rayParams.FilterDescendantsInstances = { character }
+                    local hit = workspace:Raycast(curPos, flatDelta.Unit * 5, rayParams)
+                    if hit or moved < 0.25 then
+                        humanoid.Jump = true
+                    end
                 end)
-                local dir = (target - root.Position)
-                local flatDir = Vector3.new(dir.X, 0, dir.Z)
-                if flatDir.Magnitude > 0.1 then
-                    local unit = flatDir.Unit
-                    local side = Vector3.new(-unit.Z, 0, unit.X) * ((math.floor(now * 2) % 2 == 0) and 4 or -4)
-                    humanoid:MoveTo(root.Position + unit * math.min(distH, 14) + side)
-                end
-                lastProgressPos = root.Position
+                lastProgressPos = curPos
                 lastProgressAt = now
+            end
+
+            if now - lastMove >= 0.05 then
+                -- Project look-ahead point up to 45 studs along the straight line so MoveTo never slows down
+                local moveTarget = distH > 45
+                    and (curPos + flatDelta.Unit * 45)
+                    or target
+                humanoid:MoveTo(moveTarget)
                 lastMove = now
             end
-            if now - lastMove >= 0.25 then
-                humanoid:MoveTo(target)
-                lastMove = now
-            end
-            runtime.walkStatus = string.format("Walking (%.0f studs)", horizontalDistance(destination))
-            task.wait(0.06)
+            runtime.walkStatus = string.format("Moving (%.0f studs)", horizontalDistance(destination))
+            task.wait(0.03)
         end
-        return horizontalDistance(target) <= (stopRadius + 1.5)
+        return horizontalDistance(target) <= (stopRadius + 1.2)
     end
 
-    local function walkSegment(segmentTarget)
-        if horizontalDistance(segmentTarget) <= 3.2 then
-            return true
-        end
-        local waypoints
-        pcall(function()
-            local path = PathfindingService:CreatePath({
-                AgentRadius = 2,
-                AgentHeight = 5,
-                AgentCanJump = true,
-                WaypointSpacing = 12,
-            })
-            path:ComputeAsync(root.Position, segmentTarget)
-            if path.Status == Enum.PathStatus.Success then
-                waypoints = path:GetWaypoints()
-            end
-        end)
-        if waypoints and #waypoints > 1 then
-            for i = 2, #waypoints do
-                local wp = waypoints[i]
-                if wp.Action == Enum.PathWaypointAction.Jump then
-                    pcall(function() humanoid.Jump = true end)
-                end
-                local radius = (i == #waypoints) and 3.2 or 3.8
-                if os.clock() >= deadline or not followPoint(wp.Position, radius) then
-                    break
-                end
-            end
-        end
-        if horizontalDistance(segmentTarget) <= 3.8 then
-            return true
-        end
-        -- Direct segmented MoveTo fallback (30-stud steps so MoveTo's 8-second timer never expires)
-        while os.clock() < deadline and horizontalDistance(segmentTarget) > 3.5 do
-            if shuttingDown or not root.Parent or not humanoid.Parent or humanoid.Health <= 0 then
-                return false
-            end
-            local currentPos = root.Position
-            local delta = segmentTarget - currentPos
-            local flatDelta = Vector3.new(delta.X, 0, delta.Z)
-            local dist = flatDelta.Magnitude
-            local stepTarget = dist > 30
-                and (currentPos + flatDelta.Unit * 30)
-                or segmentTarget
-            if not followPoint(stepTarget, dist > 30 and 4.0 or 3.5) then
-                break
-            end
-        end
-        return horizontalDistance(segmentTarget) <= 4.2
+    local crossingPt = getDirectCrossingPoint(root.Position, destination)
+    if crossingPt and horizontalDistance(crossingPt) > 4.5 then
+        steerDirectTo(crossingPt, 4.2)
     end
 
-    local crossing = getSeparationWaypoints(root.Position, destination)
-    if crossing then
-        for _, crossPt in ipairs(crossing) do
-            if os.clock() >= deadline then break end
-            walkSegment(crossPt)
-        end
-    end
-
-    local okWalk = walkSegment(destination)
+    local okWalk = steerDirectTo(destination, finalStopRadius)
     runtime.walkStatus = (okWalk or atDestination()) and "Arrived" or "Blocked"
     return okWalk or atDestination()
 end
@@ -1311,17 +1320,40 @@ do
     local AssetItems
     local AreaEggSlotIdentity
     local Remotes
+    local Areas
+    local Assets
+    local Guards
+    local TreadmillUtil
+    local SpeedPowerProjection
+    local SafeZoneBarriers
     local nextOwnedSync = 0
     local nextHatchSync = 0
     local nextWearBest = 0
     local nextWornTrailSync = 0
     local wornTrailId = nil
     local wornTrailHooked = false
+    local carryHooked = false
     local onTreadmill = false
     local plantSkipUntil = {}
+    local carrySkipUntil = {}
     local hatchSkipUntil = {}
     local pendingFinish = {}
     local stopped = false
+
+    -- Triggers an immediate MoveTo across SeparationLine the exact frame CarryChanged fires IsCarrying = true
+    local function triggerInstantEscapeSprint(fromPos)
+        local character = LocalPlayer.Character
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if not root or not humanoid then return end
+        local escapePos = computePerpendicularEscapePoint(fromPos or root.Position, 8.5)
+        if escapePos then
+            pcall(function()
+                if humanoid.Sit then humanoid.Sit = false end
+                humanoid:MoveTo(escapePos)
+            end)
+        end
+    end
 
     local function ensureModules()
         EggState = EggState or safeRequire(remoteAt("Client/EggState"))
@@ -1335,14 +1367,34 @@ do
         AssetItems = AssetItems or safeRequire(remoteAt("Shared/Util/AssetItems"))
         AreaEggSlotIdentity = AreaEggSlotIdentity or safeRequire(remoteAt("Shared/Util/AreaEggSlotIdentity"))
         Remotes = Remotes or safeRequire(remoteAt("Shared/Remotes"))
+        Areas = Areas or safeRequire(remoteAt("Data/Areas"))
+        Assets = Assets or safeRequire(remoteAt("Data/Assets"))
+        Guards = Guards or safeRequire(remoteAt("Data/Guards"))
+        TreadmillUtil = TreadmillUtil or safeRequire(remoteAt("Shared/Util/TreadmillUtil"))
+        SpeedPowerProjection = SpeedPowerProjection or safeRequire(remoteAt("Client/SpeedPowerProjection"))
+        SafeZoneBarriers = SafeZoneBarriers or safeRequire(remoteAt("Shared/Util/SafeZoneBarriers"))
         assert(EggState and PlotState and Save and Remotes, "Steal an Egg modules are not ready")
+
+        if not carryHooked and EggState and EggState.CarryChanged then
+            carryHooked = true
+            local okC, conn = pcall(function()
+                return EggState.CarryChanged:Connect(function(carryState)
+                    if not shuttingDown and not stopped and type(carryState) == "table" and carryState.IsCarrying then
+                        triggerInstantEscapeSprint()
+                    end
+                end)
+            end)
+            if okC and conn then
+                track(conn)
+            end
+        end
     end
 
     local function leaveTreadmillIfNeeded()
         if onTreadmill and Remotes and Remotes.Treadmill and Remotes.Treadmill.AskDoff then
             pcall(invokeServer, Remotes.Treadmill.AskDoff)
             onTreadmill = false
-            task.wait(0.08)
+            task.wait(0.04)
         end
     end
 
@@ -1413,39 +1465,43 @@ do
         return EggState.ReadOwnerEggs(LocalPlayer.UserId) or {}
     end
 
-    local function plantOwnedEgg(uid)
-        assert(type(uid) == "string" and uid ~= "", "Invalid egg UID")
-        leaveTreadmillIfNeeded()
-        local plot = localPlot()
-        local center = plot.CenterPoint
-        local area = plot.PetArea
-        assert(center and area, "Your egg area is not ready")
-        if not walkToCFrame(center.CFrame, 25) then
-            return false
+    -- Checks if the player's plot has an available slot BEFORE walking back to base (prevents useless trips when plot is full)
+    local function findFreePlotSlot(plot, records)
+        local center = plot and plot.CenterPoint
+        local area = plot and plot.PetArea
+        if not center or not area then
+            return nil
         end
-        local wore, wearError = EggState.WearEggTool(uid)
-        if wore ~= true then
-            plantSkipUntil[uid] = os.clock() + 3.0
-            if wearError then
-                notify("Wear: " .. tostring(wearError), THEME.Amber)
+        -- Check base upgrade capacity if available
+        if Bases and Bases.BASES and Save then
+            local okP, data = pcall(Save.Await, LocalPlayer)
+            local level = (okP and type(data) == "table" and tonumber(data.BaseUpgradeLevel)) or nil
+            local baseDef = level and Bases.BASES[level]
+            local maxSlots = type(baseDef) == "table" and (tonumber(baseDef.MaxEggs) or tonumber(baseDef.MaxPets) or tonumber(baseDef.Slots)) or nil
+            if maxSlots and maxSlots > 0 then
+                local placedCount = 0
+                for _, rec in pairs(records or {}) do
+                    if rec.Placement ~= nil then
+                        placedCount = placedCount + 1
+                    end
+                end
+                if placedCount >= maxSlots then
+                    return nil
+                end
             end
-            return false
         end
-        task.wait(0.08)
         local spacing = 4
         local columns = math.max(1, math.floor(area.Size.X / spacing))
         local rows = math.max(1, math.floor(area.Size.Z / spacing))
         local originX = -area.Size.X / 2 + spacing * 0.5
         local originZ = -area.Size.Z / 2 + spacing * 0.5
-        local records = EggState.ReadOwnerEggs(LocalPlayer.UserId) or {}
-        local chosen
         for index = 0, columns * rows - 1 do
             local column = index % columns
             local row = math.floor(index / columns)
             local worldPoint = area.CFrame * CFrame.new(originX + column * spacing, area.Size.Y * 0.5, originZ + row * spacing)
             local localPoint = center.CFrame:ToObjectSpace(CFrame.new(worldPoint.Position))
             local occupied = false
-            for _, record in pairs(records) do
+            for _, record in pairs(records or {}) do
                 local placement = record.Placement
                 if placement and placement.LocalCFrame and (placement.LocalCFrame.Position - localPoint.Position).Magnitude < spacing * 0.8 then
                     occupied = true
@@ -1453,19 +1509,36 @@ do
                 end
             end
             if not occupied then
-                chosen = localPoint
-                break
+                return localPoint, center.CFrame * localPoint
             end
         end
-        if not chosen then
-            plantSkipUntil[uid] = os.clock() + 12.0
+        return nil
+    end
+
+    -- Single-walk planting: checks for an open slot first, walks directly to the target slot once, equips and plants
+    local function plantOwnedEgg(uid)
+        assert(type(uid) == "string" and uid ~= "", "Invalid egg UID")
+        local plot = localPlot()
+        local records = EggState.ReadOwnerEggs(LocalPlayer.UserId) or {}
+        local chosenLocal, chosenWorldCf = findFreePlotSlot(plot, records)
+        if not chosenLocal or not chosenWorldCf then
+            plantSkipUntil[uid] = os.clock() + 10.0
             return false
         end
-        if not walkToCFrame(center.CFrame * chosen, 16) then
-            pcall(EggState.DoffEggTool, uid)
+        leaveTreadmillIfNeeded()
+        if not walkToCFrame(chosenWorldCf, 22, { stopRadius = 3.5 }) then
             return false
         end
-        local planted, errText = EggState.PlantEgg(uid, chosen)
+        local wore, wearError = EggState.WearEggTool(uid)
+        if wore ~= true then
+            plantSkipUntil[uid] = os.clock() + 5.0
+            if wearError then
+                notify("Wear: " .. tostring(wearError), THEME.Amber)
+            end
+            return false
+        end
+        task.wait(0.04)
+        local planted, errText = EggState.PlantEgg(uid, chosenLocal)
         if planted == true then
             plantSkipUntil[uid] = nil
             if PlacedEggRenderer and type(PlacedEggRenderer.Refresh) == "function" then
@@ -1474,71 +1547,382 @@ do
             pcall(EggState.DoffEggTool, uid)
             return true
         end
-        plantSkipUntil[uid] = os.clock() + 10.0
+        pcall(EggState.DoffEggTool, uid)
+        plantSkipUntil[uid] = os.clock() + 12.0
         if errText then
             notify("Plant: " .. tostring(errText), THEME.Amber)
         end
         return false
     end
 
-    local function separationExitCFrame()
-        local world = workspace:FindFirstChild("World")
-        local areas = world and world:FindFirstChild("Areas")
-        local sep = areas and areas:FindFirstChild("SeparationLine")
-        if sep and sep:IsA("BasePart") then
-            local root = characterRoot()
-            local groundY = root and root.Position.Y or sep.Position.Y
-            local exitPos = sep.Position - sep.CFrame.LookVector * 6
-            exitPos = Vector3.new(exitPos.X, groundY, exitPos.Z)
-            return CFrame.new(exitPos)
-        end
-        return nil
-    end
-
-    local function deliverCarriedEgg()
+    -- ========================================================================
+    -- Instant Post-Steal Escape Sprint
+    -- ========================================================================
+    local function deliverCarriedEgg(stolenFromPos)
         leaveTreadmillIfNeeded()
-        local plot = localPlot()
-        local exitCf = separationExitCFrame()
-        if exitCf and not walkToCFrame(exitCf, 25) then
+        local character = LocalPlayer.Character
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if not root or not humanoid then
             return false
         end
-        local targetCFrame = (plot.CenterPoint and plot.CenterPoint.CFrame) or plot.RespawnPointCFrame
-        if not targetCFrame then
-            return false
+
+        local escapePos = computePerpendicularEscapePoint(stolenFromPos or root.Position, 8.5)
+        if escapePos then
+            -- Immediate frame-0 MoveTo command (zero pathfinding delay, zero pre-move pause)
+            pcall(function()
+                if humanoid.Sit then humanoid.Sit = false end
+                humanoid:MoveTo(escapePos)
+            end)
+            runtime.walkStatus = "Instant Escape Sprint!"
+
+            local deadline = os.clock() + 18.0
+            local lastMove = -math.huge
+            local crossedAt = nil
+            while os.clock() < deadline do
+                if shuttingDown or stopped or not root.Parent or not humanoid.Parent or humanoid.Health <= 0 then
+                    return false
+                end
+                local carry = EggState.ReadCarryState() or {}
+                if not carry.IsCarrying then
+                    runtime.walkStatus = "Egg Redeemed!"
+                    nextOwnedSync = 0
+                    task.spawn(function() pcall(EggState.SyncOwnedEggs) end)
+                    return true
+                end
+
+                local curPos = root.Position
+                local stillInField = isPastSeparationLine(curPos)
+                if not stillInField then
+                    crossedAt = crossedAt or os.clock()
+                    -- Wait up to 0.55s right after crossing SeparationLine for server redeem packet
+                    if os.clock() - crossedAt >= 0.55 then
+                        break
+                    end
+                else
+                    -- Keep updating perpendicular escape target at player's current X for a dead-straight run
+                    escapePos = computePerpendicularEscapePoint(curPos, 8.5) or escapePos
+                end
+
+                local now = os.clock()
+                if now - lastMove >= 0.03 then
+                    humanoid:MoveTo(escapePos)
+                    lastMove = now
+                end
+                task.wait(0.025)
+            end
         end
-        if not walkToCFrame(targetCFrame, 30) then
-            return false
+
+        -- Check if already redeemed across SeparationLine
+        local carryAfterLine = EggState.ReadCarryState() or {}
+        if not carryAfterLine.IsCarrying then
+            runtime.walkStatus = "Egg Redeemed!"
+            nextOwnedSync = 0
+            task.spawn(function() pcall(EggState.SyncOwnedEggs) end)
+            return true
         end
-        for _ = 1, 12 do
-            task.wait(0.12)
+
+        -- Fallback only if server still shows IsCarrying after crossing SeparationLine: walk toward plot until IsCarrying clears
+        local plot = PlotState and PlotState.ResolvePlot()
+        local targetCFrame = plot and ((plot.CenterPoint and plot.CenterPoint.CFrame) or plot.RespawnPointCFrame)
+        if targetCFrame then
+            walkToCFrame(targetCFrame, 20, {
+                stopRadius = 3.8,
+                abortIf = function()
+                    local c = EggState.ReadCarryState() or {}
+                    return not c.IsCarrying
+                end,
+            })
+        end
+
+        for _ = 1, 8 do
             local carry = EggState.ReadCarryState() or {}
             if not carry.IsCarrying then
                 nextOwnedSync = 0
-                pcall(EggState.SyncOwnedEggs)
+                task.spawn(function() pcall(EggState.SyncOwnedEggs) end)
                 return true
             end
+            task.wait(0.06)
         end
-        return false
+        return not (EggState.ReadCarryState() or {}).IsCarrying
     end
 
-    local function nearestFieldEgg()
-        local snapshot = EggState.ReadFieldEggs()
-        local root = characterRoot()
-        local best, bestDistance
-        for _, record in ipairs(snapshot and snapshot.Records or {}) do
-            local cf = record.BottomCFrame or record.BoundsCFrame
-            if (record.State == "Slot" or record.State == "Dropped") and cf then
-                local distance = 0
-                if root then
-                    distance = (cf.Position - root.Position).Magnitude
+    -- ========================================================================
+    -- Speed & Zone Aware Smart Egg Selector
+    -- ========================================================================
+    local function getPlayerSpeedMetrics()
+        local speedPower = 16
+        local walkSpeed = 16
+        pcall(function()
+            if SpeedPowerProjection and type(SpeedPowerProjection.ReadProjected) == "function" then
+                local proj = tonumber(SpeedPowerProjection.ReadProjected())
+                if proj and proj > 0 then
+                    speedPower = proj
                 end
-                if not bestDistance or distance < bestDistance then
-                    best, bestDistance = record, distance
+            elseif Save and type(Save.Await) == "function" then
+                local data = Save.Await(LocalPlayer)
+                if type(data) == "table" and tonumber(data.SpeedPower) then
+                    speedPower = tonumber(data.SpeedPower)
+                end
+            end
+            if TreadmillUtil and type(TreadmillUtil.SpeedPowerToWalkSpeed) == "function" then
+                local ws = tonumber(TreadmillUtil.SpeedPowerToWalkSpeed(speedPower))
+                if ws and ws > 0 then
+                    walkSpeed = ws
+                end
+            end
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum and tonumber(hum.WalkSpeed) and hum.WalkSpeed > walkSpeed then
+                walkSpeed = hum.WalkSpeed
+            end
+        end)
+        return speedPower, walkSpeed
+    end
+
+    local function inspectZoneInfo(areaId)
+        local info = {
+            areaId = tostring(areaId or "Forest"),
+            progression = 1,
+            reqSpeedPower = 0,
+            reqWalkSpeed = 0,
+            guardWalkSpeed = 0,
+            guardPos = nil,
+            exitPos = nil,
+        }
+        pcall(function()
+            if Areas and type(Areas.Directory) == "table" then
+                local areaDef = Areas.Directory[areaId]
+                if type(areaDef) == "table" then
+                    if type(Areas.GetProgressionOrder) == "function" then
+                        info.progression = tonumber(Areas.GetProgressionOrder(areaDef)) or info.progression
+                    elseif type(areaDef.Rarity) == "table" and tonumber(areaDef.Rarity.Rank) then
+                        info.progression = tonumber(areaDef.Rarity.Rank)
+                    end
+                    if Guards and type(Guards.Directory) == "table" and areaDef.GuardId then
+                        local gDef = Guards.Directory[areaDef.GuardId]
+                        if type(gDef) == "table" and tonumber(gDef.WalkSpeed) then
+                            info.guardWalkSpeed = tonumber(gDef.WalkSpeed)
+                        end
+                    end
+                end
+            end
+            local world = workspace:FindFirstChild("World")
+            local areasFolder = world and world:FindFirstChild("Areas")
+            local guardAreas = areasFolder and areasFolder:FindFirstChild("GuardAreas")
+            local areaModel = guardAreas and guardAreas:FindFirstChild(tostring(areaId or ""))
+            if areaModel then
+                local attr = areaModel:GetAttribute("GuardEscapeSpeeds")
+                if typeof(attr) == "Vector2" then
+                    if attr.X >= 0 and attr.X < math.huge then
+                        info.reqSpeedPower = attr.X
+                    end
+                    if attr.Y >= 0 and attr.Y < math.huge then
+                        info.reqWalkSpeed = attr.Y
+                    end
+                end
+                local exitPart = areaModel:FindFirstChild("ClosestExitPoint")
+                if exitPart and exitPart:IsA("BasePart") then
+                    info.exitPos = exitPart.Position
+                end
+                local guardModel = areaModel:FindFirstChild("Guard")
+                local guardRoot = guardModel and guardModel:FindFirstChild("HumanoidRootPart")
+                if guardRoot and guardRoot:IsA("BasePart") then
+                    info.guardPos = guardRoot.Position
+                end
+            end
+        end)
+        return info
+    end
+
+    local function isZoneSafeForPlayer(zoneInfo, playerSpeedPower, playerWalkSpeed)
+        if zoneInfo.areaId == "Forest" then
+            return true
+        end
+        if state.farm.respectSpeed == false then
+            return true
+        end
+        local safetyRatio = math.clamp((tonumber(state.farm.speedSafetyPct) or 90) / 100, 0.4, 1.5)
+        if zoneInfo.reqSpeedPower > 0 then
+            if playerSpeedPower >= zoneInfo.reqSpeedPower * safetyRatio then
+                return true
+            end
+            if zoneInfo.reqWalkSpeed > 0 and playerWalkSpeed >= zoneInfo.reqWalkSpeed * safetyRatio then
+                return true
+            end
+            return false
+        end
+        if zoneInfo.reqWalkSpeed > 0 then
+            return playerWalkSpeed >= zoneInfo.reqWalkSpeed * safetyRatio
+        end
+        if zoneInfo.guardWalkSpeed > 0 then
+            return playerWalkSpeed >= zoneInfo.guardWalkSpeed * 0.85 * safetyRatio
+        end
+        return true
+    end
+
+    local function scoreEggRecord(record, zoneInfo, rootPos)
+        local cf = record.BottomCFrame or record.BoundsCFrame
+        if not cf then return -math.huge end
+        local eggPos = cf.Position
+        local distFromPlayer = rootPos and Vector3.new(eggPos.X - rootPos.X, 0, eggPos.Z - rootPos.Z).Magnitude or 0
+        local escapePt = computePerpendicularEscapePoint(eggPos, 7.0)
+        local distToExit = escapePt and Vector3.new(eggPos.X - escapePt.X, 0, eggPos.Z - escapePt.Z).Magnitude or distFromPlayer
+
+        -- Check live Guard proximity in server-guarded zones
+        if zoneInfo.areaId ~= "Forest" and zoneInfo.guardPos then
+            local guardDistToEgg = Vector3.new(eggPos.X - zoneInfo.guardPos.X, 0, eggPos.Z - zoneInfo.guardPos.Z).Magnitude
+            if guardDistToEgg < 13 then
+                -- Guard is standing right on top of this egg; heavy penalty so we pick a safer egg first
+                return -1e9 - distFromPlayer
+            end
+        end
+
+        local targetMode = tostring(state.farm.targetZone or "Auto (Best For My Speed)")
+        if targetMode == "Auto (Nearest Safe Egg)" or state.farm.prioritizeRarity == false then
+            return -(distFromPlayer + distToExit * 0.6)
+        end
+
+        local earningRate = 1
+        local rarityRank = 1
+        if Assets and type(Assets.Directory) == "table" and record.AssetCategory then
+            local assetDef = Assets.Directory[record.AssetCategory]
+            if type(assetDef) == "table" then
+                earningRate = tonumber(assetDef.EarningRate) or 1
+                if type(assetDef.Rarity) == "table" and tonumber(assetDef.Rarity.Rank) then
+                    rarityRank = tonumber(assetDef.Rarity.Rank)
                 end
             end
         end
-        return best
+
+        local mutationCount = type(record.Mutations) == "table" and #record.Mutations or 0
+        local hasBaseMutation = (type(record.BaseMutation) == "string" and #record.BaseMutation > 0) and 1 or 0
+        local scaleBonus = math.max(tonumber(record.AssetScale) or 1, 1)
+
+        -- Score favors higher zone tier, higher asset earning rate & rarity, mutations, and shorter escape/travel distance
+        local valueScore = (zoneInfo.progression * 2500)
+            + (math.log10(math.max(earningRate, 1) + 1) * 1800)
+            + (rarityRank * 900)
+            + (mutationCount * 1200)
+            + (hasBaseMutation * 1500)
+            + ((scaleBonus - 1) * 400)
+
+        return valueScore - (distToExit * 3.2) - (distFromPlayer * 1.4)
     end
+
+    local function selectBestFieldEgg()
+        local snapshot = EggState.ReadFieldEggs()
+        local records = snapshot and snapshot.Records or {}
+        if #records == 0 then
+            return nil
+        end
+        local root = characterRoot()
+        local rootPos = root and root.Position or nil
+        local now = os.clock()
+        local playerSpeedPower, playerWalkSpeed = getPlayerSpeedMetrics()
+        runtime.speedSummary = string.format("Power: %.0f | WalkSpeed: %.1f", playerSpeedPower, playerWalkSpeed)
+
+        local zoneCache = {}
+        local function getZone(areaId)
+            areaId = tostring(areaId or "Forest")
+            if not zoneCache[areaId] then
+                zoneCache[areaId] = inspectZoneInfo(areaId)
+            end
+            return zoneCache[areaId]
+        end
+
+        local targetZoneSetting = tostring(state.farm.targetZone or "Auto (Best For My Speed)")
+        local specificZone = (targetZoneSetting ~= "Auto (Best For My Speed)" and targetZoneSetting ~= "Auto (Nearest Safe Egg)")
+            and targetZoneSetting
+            or nil
+
+        local bestRecord, bestScore, bestZoneInfo
+        local fallbackRecord, fallbackScore, fallbackZoneInfo
+
+        for _, record in ipairs(records) do
+            local cf = record.BottomCFrame or record.BoundsCFrame
+            if (record.State == "Slot" or record.State == "Dropped")
+                and cf
+                and now >= (carrySkipUntil[record.Uid] or 0) then
+
+                local reachable = true
+                if rootPos and SafeZoneBarriers and type(SafeZoneBarriers.Separates) == "function" then
+                    local okB, blocked = pcall(function()
+                        local fenced = type(SafeZoneBarriers.IsFencedUid) == "function" and SafeZoneBarriers.IsFencedUid(record.Uid) or false
+                        return SafeZoneBarriers.Separates(rootPos, cf.Position, fenced)
+                    end)
+                    if okB and blocked == true then
+                        reachable = false
+                    end
+                end
+
+                if reachable then
+                    local zInfo = getZone(record.AreaId)
+                    local safe = isZoneSafeForPlayer(zInfo, playerSpeedPower, playerWalkSpeed)
+                    local score = scoreEggRecord(record, zInfo, rootPos)
+
+                    if specificZone then
+                        if tostring(record.AreaId) == specificZone then
+                            if not bestScore or score > bestScore then
+                                bestRecord, bestScore, bestZoneInfo = record, score, zInfo
+                            end
+                        elseif safe and (not fallbackScore or score > fallbackScore) then
+                            fallbackRecord, fallbackScore, fallbackZoneInfo = record, score, zInfo
+                        end
+                    else
+                        if safe then
+                            if not bestScore or score > bestScore then
+                                bestRecord, bestScore, bestZoneInfo = record, score, zInfo
+                            end
+                        elseif zInfo.areaId == "Forest" and (not fallbackScore or score > fallbackScore) then
+                            fallbackRecord, fallbackScore, fallbackZoneInfo = record, score, zInfo
+                        end
+                    end
+                end
+            end
+        end
+
+        local chosen = bestRecord or fallbackRecord
+        local chosenZone = bestZoneInfo or fallbackZoneInfo
+        if chosen and chosenZone then
+            runtime.zoneSummary = string.format(
+                "%s (Req Power: %.0f)",
+                tostring(chosenZone.areaId),
+                tonumber(chosenZone.reqSpeedPower) or 0
+            )
+            runtime.targetEggSummary = string.format(
+                "%s [%s]",
+                tostring(chosen.AssetCategory or "Egg"),
+                tostring(chosen.AreaId or "?")
+            )
+        end
+        return chosen
+    end
+
+    Backends.SAE.zones = function()
+        local list = {
+            "Auto (Best For My Speed)",
+            "Auto (Nearest Safe Egg)",
+            "Forest",
+            "Desert",
+            "Snow",
+            "Jungle",
+            "Lake",
+            "Volcano",
+            "Cherry Blossom",
+            "Enchanted Forest",
+            "Prehistoric",
+            "Abyss Ocean",
+            "Stormlands",
+            "Light Dark",
+            "Alien",
+            "Cosmic",
+            "Titan Temple",
+        }
+        return list
+    end
+
+    Backends.SAE.selectBestFieldEgg = selectBestFieldEgg
 
     Backends.SAE.warmup = function()
         pcall(ensureModules)
@@ -1554,47 +1938,69 @@ do
         ensureModules()
         leaveTreadmillIfNeeded()
         unequipBlockingTools()
+
+        -- 1. If already carrying an egg, sprint immediately across SeparationLine
         local carry = EggState.ReadCarryState() or {}
         if carry.IsCarrying then
             return deliverCarriedEgg()
         end
+
+        -- 2. Only walk back to plant if autoPlant is ON AND the plot actually has a free slot!
         local now = os.clock()
-        local records = ownedEggs(true)
-        for uid, record in pairs(records) do
-            if record.Placement == nil and now >= (plantSkipUntil[uid] or 0) then
-                if plantOwnedEgg(uid) then
-                    return true
+        if state.farm.autoPlant ~= false then
+            local records = ownedEggs(true)
+            local okPlot, plot = pcall(localPlot)
+            if okPlot and plot and findFreePlotSlot(plot, records) then
+                for uid, record in pairs(records) do
+                    if record.Placement == nil and now >= (plantSkipUntil[uid] or 0) then
+                        if plantOwnedEgg(uid) then
+                            return true
+                        end
+                    end
                 end
             end
         end
+
+        -- 3. Refresh field snapshot periodically
         if now >= runtime.nextSync then
-            runtime.nextSync = now + 3.0
+            runtime.nextSync = now + 2.5
             pcall(EggState.SyncFieldEggs)
         end
-        local field = nearestFieldEgg()
+
+        -- 4. Select best field egg for current speed & zone
+        local field = selectBestFieldEgg()
         if not field then
             pcall(EggState.SyncFieldEggs)
-            field = nearestFieldEgg()
+            field = selectBestFieldEgg()
             if not field then
+                runtime.walkStatus = "Waiting for safe field egg..."
                 return false
             end
         end
+
         local fieldCf = field.BottomCFrame or field.BoundsCFrame
         if not fieldCf then
             return false
         end
-        if not walkToCFrame(fieldCf, 35) then
+
+        -- 5. Walk directly to egg within prompt pickup reach (4.6 studs, MaxActivationDistance is 8)
+        if not walkToCFrame(fieldCf, 32, { stopRadius = 4.6 }) then
             return false
         end
-        task.wait(0.15)
+
+        -- 6. Steal egg with ZERO delay and immediately begin escape sprint across SeparationLine
         local firstAreaKey
         if AreaEggSlotIdentity and field.Uid and AreaEggSlotIdentity.LooksLikeFirstAreaUid(field.Uid) then
             firstAreaKey = AreaEggSlotIdentity.SlotKey(field.AreaId, field.NestId)
         end
+
         local carried, carryError = EggState.CarryFieldEgg(field.Uid, firstAreaKey)
         if carried or (EggState.ReadCarryState() or {}).IsCarrying then
-            return deliverCarriedEgg()
+            triggerInstantEscapeSprint(fieldCf.Position)
+            return deliverCarriedEgg(fieldCf.Position)
         end
+
+        carrySkipUntil[field.Uid] = os.clock() + 3.5
         if carryError then
             notify("Carry: " .. tostring(carryError), THEME.Amber)
         end
@@ -2891,32 +3297,65 @@ local function buildUI(backend)
     -- Build Tabs (Exact Pet Sim 99 StephUI style)
     -- ========================================================================
     local farmTab = CreateTab("Farm")
-    farmTab:CreateSection("Egg Stealing & Hatching (Walk-to-Egg)")
-    farmTab:CreateParagraph(
-        "Walk-to-Egg Engine",
-        "All egg movement uses pathfind + SeparationLine crossing waypoints + stuck jump recovery instead of instant teleport."
+    farmTab:CreateSection("Speed & Zone Smart Egg Stealing")
+    local farmLiveParagraph = farmTab:CreateParagraph(
+        "Smart Speed/Zone Engine + Instant Escape",
+        "Checks your SpeedPower against each zone's GuardEscapeSpeeds sign, picks the highest-earning safe egg, and sprints straight across SeparationLine the instant an egg is stolen."
     )
     farmTab:CreateToggle("Enable Smart Egg Farm (Walk to Egg)", "farm.smart", function(value)
         if value then
             runtime.mode = "farm"
             runtime.runsSinceTraining = 0
-            notify("Smart Egg Farm started (Walk-to-Egg active)", THEME.Success)
+            notify("Smart Egg Farm started (Speed/Zone + Instant Escape active)", THEME.Success)
         else
             runtime.mode = state.training.only and "training" or "idle"
         end
     end)
+    if backend.key == "sae" then
+        local zoneOptions = (backend.zones and backend.zones()) or {
+            "Auto (Best For My Speed)",
+            "Auto (Nearest Safe Egg)",
+            "Forest",
+            "Desert",
+            "Snow",
+            "Jungle",
+            "Lake",
+            "Volcano",
+            "Cherry Blossom",
+            "Enchanted Forest",
+            "Prehistoric",
+            "Abyss Ocean",
+            "Stormlands",
+            "Light Dark",
+            "Alien",
+            "Cosmic",
+            "Titan Temple",
+        }
+        farmTab:CreateDropdown("Target Zone", "farm.targetZone", zoneOptions)
+        farmTab:CreateToggle("Respect Zone Speed Requirement", "farm.respectSpeed")
+        farmTab:CreateToggle("Prioritize High Rarity / Earning Eggs", "farm.prioritizeRarity")
+        farmTab:CreateSlider("Zone Speed Safety Margin", "farm.speedSafetyPct", 50, 120, 5, "%")
+        farmTab:CreateToggle("Auto-Plant Stolen Eggs (Only When Slot Free)", "farm.autoPlant")
+    end
     farmTab:CreateToggle("Auto-Hatch Ready Eggs", "farm.hatch")
     farmTab:CreateToggle(
         backend.key == "ps99" and "Auto-Upgrade Pet Slots (Cash)" or "Auto-Upgrade Treadmill (Cash)",
         "farm.treadmill"
     )
     farmTab:CreateSection("Quick Egg Walk Actions")
-    farmTab:CreateButton("Walk to Nearest Field Egg", function()
+    farmTab:CreateButton("Walk to Best Safe Field Egg", function()
         task.spawn(function()
-            notify("Walking to nearest field egg...", THEME.Accent)
-            local ok = backend.teleport("Nearest Field Egg")
+            notify("Walking to best safe field egg...", THEME.Accent)
+            local targetRecord = backend.selectBestFieldEgg and backend.selectBestFieldEgg()
+            local cf = targetRecord and (targetRecord.BottomCFrame or targetRecord.BoundsCFrame)
+            local ok = false
+            if cf then
+                ok = walkToCFrame(cf, 35, { stopRadius = 4.6 })
+            else
+                ok = backend.teleport("Nearest Field Egg")
+            end
             if ok then
-                notify("Arrived at nearest field egg", THEME.Success)
+                notify("Arrived at field egg", THEME.Success)
             else
                 notify("Could not reach field egg", THEME.Amber)
             end
@@ -2933,6 +3372,7 @@ local function buildUI(backend)
             end
         end)
     end)
+    runtime.farmLiveParagraph = farmLiveParagraph
 
     -- Training Tab
     local trainTab = CreateTab("Training")
@@ -3225,7 +3665,7 @@ local function startScheduler(backend)
         end
 
         if runtime.mode == "farm" and state.farm.smart then
-            runJob("farm", 0.65, function()
+            runJob("farm", 0.08, function()
                 local success = backend.farmStep()
                 if success then
                     runtime.runsSinceTraining = runtime.runsSinceTraining + 1
@@ -3233,7 +3673,7 @@ local function startScheduler(backend)
                 return success
             end)
         elseif runtime.mode == "training" then
-            runJob("training", 0.35, function()
+            runJob("training", 0.25, function()
                 return backend.trainingStep()
             end)
         end
@@ -3288,12 +3728,27 @@ local function startScheduler(backend)
             if anticheatParagraph then
                 anticheatParagraph.Set("Protection Status", acSummary)
             end
+            if runtime.farmLiveParagraph then
+                runtime.farmLiveParagraph.Set(
+                    "Live Speed & Target Zone",
+                    string.format(
+                        "%s\nActive Zone: %s | Target Egg: %s\nMovement: %s",
+                        tostring(runtime.speedSummary or "Power: 16"),
+                        tostring(runtime.zoneSummary or tostring(state.farm.targetZone or "Auto")),
+                        tostring(runtime.targetEggSummary or "Scanning..."),
+                        tostring(runtime.walkStatus or "Idle")
+                    )
+                )
+            end
             if statusParagraph then
                 statusParagraph.Set(
                     "Steph HUB v" .. VERSION .. "  |  " .. (gameKey == "sae" and "Steal an Egg" or "Pet Sim 99"),
                     string.format(
-                        "Mode: %s\nMovement: %s (Walk-to-Egg)\nAnti-Cheat: %s (Strikes Blocked: %d)",
+                        "Mode: %s\nSpeed: %s | Zone: %s\nTarget: %s | Movement: %s\nAnti-Cheat: %s (Strikes Blocked: %d)",
                         modeText,
+                        tostring(runtime.speedSummary or "Power: 16"),
+                        tostring(runtime.zoneSummary or "Auto"),
+                        tostring(runtime.targetEggSummary or "None"),
                         tostring(runtime.walkStatus or "Idle"),
                         state.anticheat.enabled and "ACTIVE" or "OFF",
                         runtime.acBlockedStrikes
