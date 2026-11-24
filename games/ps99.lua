@@ -1,5 +1,5 @@
 -- Legacy PS99 entry; all boot logic now lives in main.lua.
-local VERSION = "10.2"
+local VERSION = "10.3"
 
 local function _d(bytes)
     local out = table.create(#bytes)

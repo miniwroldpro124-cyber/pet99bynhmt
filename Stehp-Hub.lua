@@ -1,5 +1,5 @@
 -- Steph HUB compatibility entry for the universal loader.
-local VERSION = "10.2"
+local VERSION = "10.3"
 
 local function _d(bytes)
     local out = table.create(#bytes)

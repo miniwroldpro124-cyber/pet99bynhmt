@@ -1,5 +1,5 @@
--- STEPH_COMPONENT: ps99_engine 3.2.0
-local VERSION = "3.2.0"
+-- STEPH_COMPONENT: ps99_engine 3.3.0
+local VERSION = "3.3.0"
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local UIS = game:GetService("UserInputService")
@@ -494,10 +494,32 @@ local function invoke(name, ...)
 end
 
 local function looksLikeSave(value)
-    return type(value) == "table"
-        and type(rawget(value, "UnlockedZones")) == "table"
-        and type(rawget(value, "Rank")) == "number"
-        and type(rawget(value, "Rebirths")) == "number"
+    if type(value) ~= "table" then return false end
+    local uz = rawget(value, "UnlockedZones") or value.UnlockedZones
+    local rk = rawget(value, "Rank") or value.Rank
+    local rb = rawget(value, "Rebirths") or value.Rebirths
+    return type(uz) == "table" and type(rk) == "number" and type(rb) == "number"
+end
+
+local function probeSaveModule(mod)
+    if type(mod) ~= "table" then return nil end
+    if type(mod.Get) == "function" then
+        local ok, s = pcall(mod.Get, LocalPlayer)
+        if ok and looksLikeSave(s) then return s end
+        local ok2, s2 = pcall(mod.Get)
+        if ok2 and looksLikeSave(s2) then return s2 end
+    end
+    if type(mod.GetSaves) == "function" then
+        local ok, saves = pcall(mod.GetSaves)
+        if ok and type(saves) == "table" then
+            local s = rawget(saves, LocalPlayer) or saves[LocalPlayer]
+            if looksLikeSave(s) then
+                snap.cache = saves
+                return s
+            end
+        end
+    end
+    return nil
 end
 
 CFG.BootstrapDone = false
@@ -518,7 +540,12 @@ function CFG.BootstrapModules()
         if not child then return end
         local ok, mod = pcall(require, child)
         if ok and type(mod) == "table" then
-            modules[slot] = mod
+            if slot == "save" then
+                modules.save = mod
+                probeSaveModule(mod)
+            else
+                modules[slot] = mod
+            end
         end
     end
     tryReq("save", "Save")
@@ -539,36 +566,146 @@ function CFG.BootstrapModules()
     tryReq("instancing", "InstancingCmds")
     tryReq("mapCmds", "MapCmds")
     tryReq("pumpkinTycoon", "PumpkinTycoonCmds")
-    CFG.BootstrapDone = modules.save ~= nil
+    tryReq("rankCmds", "RankCmds")
+    tryReq("questCmds", "QuestCmds")
+
+    local liveSave = probeSaveModule(modules.save)
+    if not liveSave and not snap.cache then
+        local fgc = filtergc or env.filtergc
+        if type(fgc) == "function" then
+            pcall(function()
+                local hits = fgc("table", { Keys = { "UnlockedZones", "Rank", "Rebirths" } })
+                if type(hits) == "table" then
+                    for _, tbl in ipairs(hits) do
+                        if looksLikeSave(tbl) then
+                            snap.raw = tbl
+                            snap.at = os.clock()
+                            liveSave = tbl
+                            break
+                        end
+                    end
+                end
+            end)
+        end
+    end
+    if not liveSave and not snap.cache then
+        local senvReader = getsenv or env.getsenv
+        local dumpUpvalues = (debug and debug.getupvalues) or getupvalues or env.getupvalues
+        local readUpvalue = (debug and debug.getupvalue) or getupvalue or env.getupvalue
+        local ps = LocalPlayer:FindFirstChild("PlayerScripts")
+        if ps and type(senvReader) == "function" then
+            for _, scriptName in ipairs({ "Ranks", "GoalsFrontend", "Zone Quests", "NPC Quests" }) do
+                local scr = ps:FindFirstChild(scriptName, true)
+                if scr and scr:IsA("LocalScript") then
+                    local okEnv, senv = pcall(senvReader, scr)
+                    if okEnv and type(senv) == "table" then
+                        for _, fn in pairs(senv) do
+                            if type(fn) == "function" then
+                                if type(dumpUpvalues) == "function" then
+                                    local okU, ups = pcall(dumpUpvalues, fn)
+                                    if okU and type(ups) == "table" then
+                                        for _, up in pairs(ups) do
+                                            if type(up) == "table" then
+                                                if looksLikeSave(up) then
+                                                    snap.raw = up
+                                                    snap.at = os.clock()
+                                                    liveSave = up
+                                                    break
+                                                elseif looksLikeSave(rawget(up, LocalPlayer)) then
+                                                    snap.cache = up
+                                                    liveSave = rawget(up, LocalPlayer)
+                                                    break
+                                                elseif probeSaveModule(up) then
+                                                    modules.save = up
+                                                    liveSave = probeSaveModule(up)
+                                                    break
+                                                end
+                                            end
+                                        end
+                                    end
+                                elseif type(readUpvalue) == "function" then
+                                    for idx = 1, 20 do
+                                        local okU, upName, up = pcall(readUpvalue, fn, idx)
+                                        if not okU or upName == nil then break end
+                                        if type(up) == "table" then
+                                            if looksLikeSave(up) then
+                                                snap.raw = up
+                                                snap.at = os.clock()
+                                                liveSave = up
+                                                break
+                                            elseif looksLikeSave(rawget(up, LocalPlayer)) then
+                                                snap.cache = up
+                                                liveSave = rawget(up, LocalPlayer)
+                                                break
+                                            elseif probeSaveModule(up) then
+                                                modules.save = up
+                                                liveSave = probeSaveModule(up)
+                                                break
+                                            end
+                                        end
+                                    end
+                                end
+                                if liveSave then break end
+                            end
+                        end
+                    end
+                end
+                if liveSave then break end
+            end
+        end
+    end
+
+    CFG.BootstrapDone = liveSave ~= nil
     CFG.BootstrapRetryAt = now + (CFG.BootstrapDone and 5.0 or 1.0)
-    if not CFG.BootstrapDone then
+    if CFG.BootstrapDone then
+        notes.profile = "live save ready"
+    elseif not modules.save then
         notes.profile = "waiting for Client/Save"
     end
     return CFG.BootstrapDone
 end
 
 local function getSave()
-    if not modules.save then
-        CFG.BootstrapModules()
-    end
     if snap.cache then
-        local ok, value = pcall(function() return rawget(snap.cache, LocalPlayer) end)
+        local ok, value = pcall(function() return rawget(snap.cache, LocalPlayer) or snap.cache[LocalPlayer] end)
         if ok and looksLikeSave(value) then
             snap.source = "live"
+            notes.profile = "live cache"
             return value
         end
         if snap.source == "live" then snap.raw = nil end
     end
     if modules.save then
-        local ok, value = pcall(modules.save.Get, LocalPlayer)
-        if ok and looksLikeSave(value) then
+        local value = probeSaveModule(modules.save)
+        if looksLikeSave(value) then
             snap.source = "live"
+            notes.profile = "live module"
             return value
         end
         if snap.source == "live" then snap.raw = nil end
     end
-    if snap.raw and os.clock() - snap.at <= CFG.SnapshotTTL then
+    if not CFG.BootstrapDone then
+        CFG.BootstrapModules()
+        if snap.cache then
+            local ok, value = pcall(function() return rawget(snap.cache, LocalPlayer) or snap.cache[LocalPlayer] end)
+            if ok and looksLikeSave(value) then
+                snap.source = "live"
+                notes.profile = "live cache"
+                return value
+            end
+        end
+        if modules.save then
+            local value = probeSaveModule(modules.save)
+            if looksLikeSave(value) then
+                snap.source = "live"
+                notes.profile = "live module"
+                return value
+            end
+        end
+    end
+    if snap.raw and looksLikeSave(snap.raw) then
         snap.source = "snapshot"
+        notes.profile = "live snapshot"
         return snap.raw
     end
     snap.source = "waiting"
@@ -800,7 +937,9 @@ local function inspectObject(object)
             or type(rawget(object, "FetchPlayer")) == "function"
             or rawget(object, "LoadedStats") ~= nil
             or rawget(object, "StatsChanged") ~= nil) then
-        modules.save = object
+        if probeSaveModule(object) or not modules.save then
+            modules.save = object
+        end
     end
     -- The real Network module also exposes the unreliable pair and the
     -- observer setter; requiring them keeps a decoy table out.
@@ -813,7 +952,12 @@ local function inspectObject(object)
     end
     -- The Save module's live cache is a table keyed by Player -> save. Reading
     -- it directly needs no function signature and is always current.
-    if looksLikeSave(rawget(object, LocalPlayer)) then snap.cache = object end
+    if looksLikeSave(rawget(object, LocalPlayer)) then
+        snap.cache = object
+    elseif looksLikeSave(object) and not snap.cache then
+        snap.raw = object
+        snap.at = os.clock()
+    end
     if type(rawget(object, "CalculateSpeedMultiplier")) == "function"
         and type(rawget(object, "GetByPlayer")) == "function"
         and type(rawget(object, "GetByItemUID")) == "function" then
@@ -1021,7 +1165,7 @@ local function needsNative()
     -- The live Save cache is authoritative: the current game's "Get Stats" remote
     -- can exist yet return nil, so always discover the Save module when a profile
     -- is needed, regardless of whether a stats remote was found by name.
-    if (enabled.zoneTele or enabled.zoneBuy or enabled.autoQuest or enabled.autoDoQuest or enabled.autoRank or enabled.autoRebirth or enabled.autoEgg or enabled.worldTele or enabled.autoBuyPetSlots or enabled.autoBuyEggSlots or enabled.autoForeverPack or enabled.autoBuyUpgrades or enabled.autoEquipEnchant or enabled.worldAdvance) and not save then return true end
+    if (enabled.zoneTele or enabled.zoneBuy or enabled.autoQuest or enabled.autoDoQuest or enabled.autoRank or enabled.autoRankHud or enabled.autoSeasonPass or enabled.autoZoneGifts or enabled.autoRebirth or enabled.autoEgg or enabled.worldTele or enabled.autoBuyPetSlots or enabled.autoBuyEggSlots or enabled.autoForeverPack or enabled.autoBuyUpgrades or enabled.autoEquipEnchant or enabled.worldAdvance) and not save then return true end
     if not save and (enabled.autoKeys or enabled.autoGiftBags or enabled.autoFruits or enabled.autoPotions
         or enabled.autoFreeGifts or enabled.autoUltimate or enabled.autoDaycare or enabled.autoFlags
         or enabled.autoSecretRooms or enabled.autoRelics or enabled.autoTreehouse or enabled.autoFuse
@@ -4010,11 +4154,33 @@ function CFG.Quest.Log(msg)
     end
 end
 
+function CFG.Quest.FormatNum(n)
+    local val = tonumber(n) or 0
+    if val ~= val or val == math.huge or val == -math.huge then
+        return tostring(val)
+    end
+    local absVal = math.abs(val)
+    if absVal < 1000 then
+        return string.format("%.0f", math.floor(val))
+    end
+    local suffixes = { "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc" }
+    local exp = math.min(#suffixes, math.floor(math.log10(absVal) / 3))
+    if exp >= 1 then
+        local scaled = val / (10 ^ (exp * 3))
+        if math.abs(scaled - math.floor(scaled + 0.5)) < 0.05 then
+            return string.format("%.0f%s", scaled, suffixes[exp])
+        end
+        return string.format("%.2f%s", scaled, suffixes[exp]):gsub("%.?0+([A-Za-z]+)$", "%1")
+    end
+    return string.format("%.2e", val)
+end
+
 function CFG.Quest.GoalTitle(goal)
     if type(goal) ~= "table" then return "Unknown goal" end
     local okT, title = pcall(function()
-        local qc = require(RS.Library.Client.QuestCmds)
+        local qc = modules.questCmds or require(RS.Library.Client.QuestCmds)
         if type(qc) == "table" and type(qc.MakeTitle) == "function" then
+            modules.questCmds = qc
             return qc.MakeTitle(goal)
         end
         return nil
@@ -4024,8 +4190,18 @@ function CFG.Quest.GoalTitle(goal)
     end
     local gt = tonumber(goal.Type) or -1
     local rem = math.max(1, (tonumber(goal.Amount) or 1) - (tonumber(goal.Progress) or 0))
+    local remStr = CFG.Quest.FormatNum(rem)
+    if gt == 20 then
+        return rem > 1 and ("Hatch %s of your best eggs"):format(remStr) or "Hatch one of your best eggs"
+    elseif gt == 21 then
+        return rem > 1 and ("Break %s breakables in best area"):format(remStr) or "Break something in best area"
+    elseif gt == 40 then
+        return rem > 1 and ("Make %s golden pets from best egg"):format(remStr) or "Make a golden pet from best egg"
+    elseif gt == 41 then
+        return rem > 1 and ("Make %s rainbow pets from best egg"):format(remStr) or "Make a rainbow pet from best egg"
+    end
     local gname = CFG.Quest.TYPE_NAMES[gt] or ("Quest T" .. tostring(gt))
-    return ("%s x%d"):format(gname, math.floor(rem))
+    return ("%s x%s"):format(gname, remStr)
 end
 
 function CFG.Quest.PetsPerGold()
@@ -4221,7 +4397,12 @@ local function collectActiveGoals(save)
         local here = currentZone()
         local zq = here and save.ZoneQuests[here]
         if type(zq) == "table" and type(zq.Quests) == "table" then
-            for _, g in pairs(zq.Quests) do push(g, "zone:" .. tostring(here)) end
+            for _, g in pairs(zq.Quests) do
+                local inner = (type(g) == "table" and type(g.Goal) == "table") and g.Goal or g
+                if type(g) ~= "table" or g.Completed ~= true then
+                    push(inner, "zone:" .. tostring(here))
+                end
+            end
         end
     end
     table.sort(list, function(a, b)
@@ -7420,9 +7601,13 @@ function CFG.RankHUD.GetParent()
         return (gethui and gethui()) or (get_hidden_gui and get_hidden_gui())
     end)
     if okHui and typeof(hui) == "Instance" then return hui end
-    local okCore, cg = pcall(function() return game:GetService("CoreGui") end)
+    local okCore, cg = pcall(function()
+        local c = game:GetService("CoreGui")
+        local _ = c.Name
+        return c
+    end)
     if okCore and typeof(cg) == "Instance" then return cg end
-    return LocalPlayer:FindFirstChild("PlayerGui")
+    return LocalPlayer:FindFirstChild("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 5)
 end
 
 function CFG.RankHUD.Destroy()
@@ -7461,7 +7646,11 @@ function CFG.RankHUD.Build()
     gui.ResetOnSpawn = false
     gui.IgnoreGuiInset = true
     gui.DisplayOrder = 550
-    gui.Parent = parent
+    local okParent = pcall(function() gui.Parent = parent end)
+    if not okParent or not gui.Parent then
+        local pg = LocalPlayer:FindFirstChild("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 5)
+        if pg then pcall(function() gui.Parent = pg end) end
+    end
     CFG.RankHUD.gui = gui
 
     local frame = Instance.new("Frame")
@@ -7645,14 +7834,78 @@ function CFG.RankHUD.Build()
             dragging = false
         end
     end)
+
+    pcall(CFG.RankHUD.Update)
+end
+
+local function readRankGoalsFromGui()
+    local pg = LP and LP:FindFirstChildOfClass("PlayerGui")
+    if not pg then return nil, nil, nil end
+    local uiRank, uiStars, uiGoals = nil, nil, {}
+    pcall(function()
+        local goalsSide = pg:FindFirstChild("GoalsSide")
+        local frame = goalsSide and goalsSide:FindFirstChild("Frame")
+        if frame then
+            local top = frame:FindFirstChild("Top")
+            local title = top and top:FindFirstChild("Title")
+            if title and type(title.Text) == "string" then
+                local rNum = title.Text:match("(%d+)")
+                if rNum then uiRank = rNum end
+            end
+            local holder = frame:FindFirstChild("QuestsHolder")
+            if holder then
+                for _, tierKey in ipairs({ "Easy", "Medium", "Hard", "Extreme" }) do
+                    local row = holder:FindFirstChild(tierKey)
+                    if row and row.Visible then
+                        local descLbl = row:FindFirstChild("Desc")
+                        local progFrame = row:FindFirstChild("Progress")
+                        local amountLbl = progFrame and progFrame:FindFirstChild("Amount")
+                        local starsFrame = row:FindFirstChild("Stars")
+                        local starAmtLbl = starsFrame and starsFrame:FindFirstChild("Amount")
+                        local descText = (descLbl and type(descLbl.Text) == "string" and #descLbl.Text > 0) and descLbl.Text or tierKey
+                        local amtText = (amountLbl and type(amountLbl.Text) == "string" and #amountLbl.Text > 0) and amountLbl.Text or "?/?"
+                        local starText = (starAmtLbl and type(starAmtLbl.Text) == "string") and starAmtLbl.Text:gsub("[^%d]", "") or ""
+                        uiGoals[#uiGoals + 1] = ("%s [%s] (%s)%s"):format(
+                            descText,
+                            tierKey,
+                            amtText,
+                            (#starText > 0 and (" [*" .. starText .. "]") or "")
+                        )
+                    end
+                end
+            end
+        end
+    end)
+    pcall(function()
+        local rankGui = pg:FindFirstChild("Rank")
+        local frame = rankGui and rankGui:FindFirstChild("Frame")
+        if frame then
+            local side = frame:FindFirstChild("Side")
+            local bal = side and side:FindFirstChild("Balance")
+            local amt = bal and bal:FindFirstChild("Amount")
+            if amt and type(amt.Text) == "string" and #amt.Text > 0 then
+                uiStars = amt.Text
+            end
+            local rankNum = side and side:FindFirstChild("RankNum")
+            if not uiRank and rankNum and type(rankNum.Text) == "string" then
+                local r = rankNum.Text:match("(%d+)")
+                if r then uiRank = r end
+            end
+        end
+    end)
+    return uiRank, uiStars, uiGoals
 end
 
 function CFG.RankHUD.Update()
     if not CFG.RankHUD.gui or not CFG.RankHUD.gui.Parent then return end
     local save = getSave()
-    local rank = save and tostring(save.Rank or "?") or "?"
-    local stars = save and tostring(save.RankStars or "0") or "0"
-    local zone = tostring(currentZone() or "?")
+    local uiRank, uiStars, uiGoals = readRankGoalsFromGui()
+    local rank = (save and save.Rank ~= nil and tostring(save.Rank)) or uiRank or "?"
+    local stars = (save and save.RankStars ~= nil and tostring(save.RankStars)) or uiStars or "0"
+    local zone = "?"
+    pcall(function()
+        zone = tostring(currentZone() or "?")
+    end)
     local bestEgg = "?"
     if save then
         local okE, eId = pcall(CFG.Quest.BestEggInfo, save)
@@ -7662,40 +7915,79 @@ function CFG.RankHUD.Update()
         CFG.RankHUD.titleLabel.Text = ("Auto Rank | R%s | %s Stars"):format(rank, stars)
     end
     if CFG.RankHUD.metaLabel then
+        local doingStr = tostring(CFG.Quest.currentDoing or "Idle")
+        if doingStr == "Waiting for Save profile..." and (save or (uiGoals and #uiGoals > 0)) then
+            doingStr = (enabled.autoDoQuest and "Scanning active goals...") or "Ready"
+        end
         CFG.RankHUD.metaLabel.Text = ("Doing: %s\nZone: %s | Best Egg: %s | Claim: %s")
-            :format(tostring(CFG.Quest.currentDoing or "Idle"), zone, bestEgg, tostring(notes.rank or "off"))
+            :format(doingStr, zone, bestEgg, tostring(notes.rank or "off"))
     end
     if CFG.RankHUD.goalsLabel then
-        if not save then
-            CFG.RankHUD.goalsLabel.Text = ("Profile: %s\nDiscovery: %s\nRetrying automatically...")
-                :format(tostring(notes.profile or "waiting"), tostring(notes.heap or "idle"))
-        else
-            local active = collectActiveGoals(save)
-            if #active == 0 then
-                CFG.RankHUD.goalsLabel.Text = "No active incomplete goals."
-            else
+        local okG, errG = pcall(function()
+            if save then
+                local active = collectActiveGoals(save)
+                if #active == 0 then
+                    if type(save.Goals) == "table" and next(save.Goals) ~= nil then
+                        CFG.RankHUD.goalsLabel.Text = "All visible rank goals complete! Claiming rewards / waiting for new goal..."
+                    elseif uiGoals and #uiGoals > 0 then
+                        local lines = {}
+                        for i = 1, math.min(#uiGoals, 6) do
+                            local prefix = (i == 1) and "> " or "  "
+                            lines[#lines + 1] = prefix .. uiGoals[i]
+                        end
+                        CFG.RankHUD.goalsLabel.Text = table.concat(lines, "\n")
+                    else
+                        CFG.RankHUD.goalsLabel.Text = "No active incomplete goals (Rank " .. tostring(rank) .. ")."
+                    end
+                else
+                    local lines = {}
+                    local limit = math.min(#active, 6)
+                    for i = 1, limit do
+                        local e = active[i]
+                        local g = e.goal or {}
+                        local gt = tonumber(g.Type) or -1
+                        local okT, gtitle = pcall(CFG.Quest.GoalTitle, g)
+                        if not okT or type(gtitle) ~= "string" then
+                            gtitle = "Goal #" .. tostring(gt)
+                        end
+                        local prog = tonumber(g.Progress) or 0
+                        local amt = tonumber(g.Amount) or 0
+                        local tier = tonumber(g.Tier) or tonumber(e.slot) or 1
+                        local starsVal = tonumber(g.Stars)
+                        local prefix = (i == 1) and "> " or "  "
+                        local starTag = starsVal and ("*" .. tostring(starsVal)) or ("T" .. tostring(tier))
+                        lines[#lines + 1] = ("%s%s (%s/%s) [%s]"):format(
+                            prefix,
+                            gtitle,
+                            CFG.Quest.FormatNum(prog),
+                            CFG.Quest.FormatNum(amt),
+                            starTag
+                        )
+                    end
+                    CFG.RankHUD.goalsLabel.Text = table.concat(lines, "\n")
+                end
+            elseif uiGoals and #uiGoals > 0 then
                 local lines = {}
-                local limit = math.min(#active, 6)
-                for i = 1, limit do
-                    local e = active[i]
-                    local g = e.goal
-                    local gt = tonumber(g.Type) or -1
-                    local gtitle = CFG.Quest.GoalTitle(g)
-                    local prog = tonumber(g.Progress) or 0
-                    local amt = tonumber(g.Amount) or 0
+                for i = 1, math.min(#uiGoals, 6) do
                     local prefix = (i == 1) and "> " or "  "
-                    lines[#lines + 1] = ("%s%s (%d/%d) [*T%d]"):format(
-                        prefix, gtitle, math.floor(prog), math.floor(amt), gt
-                    )
+                    lines[#lines + 1] = prefix .. uiGoals[i]
                 end
                 CFG.RankHUD.goalsLabel.Text = table.concat(lines, "\n")
+            else
+                CFG.RankHUD.goalsLabel.Text = ("Syncing Save profile (%s | %s)...\nOpen Rank menu once or wait 2s for auto-hook.")
+                    :format(tostring(notes.profile or "probing"), tostring(notes.heap or "scanning"))
             end
+        end)
+        if not okG then
+            CFG.RankHUD.goalsLabel.Text = "Goals sync error: " .. tostring(errG)
         end
     end
     if CFG.RankHUD.logLabel then
         local logs = CFG.Quest.logs or {}
         if #logs == 0 then
-            CFG.RankHUD.logLabel.Text = "[Auto Rank log] idle"
+            local statusNote = tostring(notes.doQuest or "idle")
+            local rankNote = tostring(notes.rank or "off")
+            CFG.RankHUD.logLabel.Text = ("[Auto Rank] Quest: %s | Claim: %s"):format(statusNote, rankNote)
         else
             local startIdx = math.max(1, #logs - 7)
             local slice = {}
@@ -7715,71 +8007,10 @@ function CFG.RankHUD.Sync()
     if not CFG.RankHUD.gui or not CFG.RankHUD.gui.Parent then
         CFG.RankHUD.Build()
     end
+    pcall(CFG.RankHUD.Update)
     ensureWorker("rankHud", true, 0.5, CFG.RankHUD.Update)
 end
 
-syncWorkers = function()
-    if not alive then return end
-    syncAntiAfk()
-    syncEggFx()
-    syncNoclip()
-    syncFly()
-    syncGamepasses()
-    syncGates()
-    CFG.SyncFastFarmBeta()
-    CFG.SyncWhiteScreen()
-    CFG.SyncReduceCpuRam()
-    CFG.RankHUD.Sync()
-    local eventWanted = enabled.optPumpkinTycoon or enabled.ptAutoTeleBestEgg or enabled.ptAutoTeleNearestFarm or enabled.ptAutoBuyEgg
-        or enabled.ptAutoBuyButtons or enabled.ptAutoRebirth or enabled.ptAutoKeepPumpkins
-        or enabled.ptAutoBreakPumpkins or enabled.ptAutoBuyMerchant or enabled.ptAutoPlantPumpkins
-        or enabled.ptAutoBuyUpgrades or enabled.ptAutoBuyCocoa or enabled.ptAutoUseBoosts
-        or enabled.ptAutoFlannelGifts or enabled.ptAutoHuntWild or enabled.ptAutoCatchWild
-        or enabled.ptAutoBuyNets or enabled.ptAutoFightTurkey or enabled.ptAutoCatchRare
-    local ttWanted = enabled.autoTimeTrial or enabled.autoTimeTrialChests
-    local profileWanted = enabled.zoneTele or enabled.zoneBuy or enabled.autoQuest or enabled.autoDoQuest
-        or enabled.autoRank or enabled.autoRankHud or enabled.autoRebirth or enabled.autoEgg or enabled.worldTele
-        or enabled.autoBuyPetSlots or enabled.autoBuyEggSlots or enabled.autoForeverPack
-        or enabled.autoBuyUpgrades or enabled.autoEquipEnchant or enabled.worldAdvance or enabled.unlockGamepasses
-        or enabled.autoKeys or enabled.autoGiftBags or enabled.autoFruits or enabled.autoPotions
-        or enabled.autoFreeGifts or enabled.autoUltimate or enabled.autoSprinkler or enabled.autoDaycare or enabled.autoFlags
-        or enabled.autoSecretRooms or enabled.autoTreehouse or enabled.autoFuse or enabled.autoCards
-        or enabled.autoRelics or enabled.autoMailClaim or enabled.autoDice or enabled.autoTNT or enabled.autoTNTCrate
-        or enabled.autoSpinTickets or enabled.autoOpenChests
-        or eventWanted or ttWanted
-    local discoveryWanted = profileWanted or enabled.petSpeed or enabled.farm or enabled.fastFarmBeta or enabled.vacuum or enabled.tap or enabled.clickAura
-    ensureWorker("profile", profileWanted, CFG.ProfileInterval, profileTick)
-    ensureWorker("discovery", discoveryWanted, CFG.DiscoveryInterval, discoveryTick)
-    if not discoveryWanted then heapObjects, heapCursor, treeScan = nil, nil, nil end
-    local petWanted = enabled.petSpeed or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.ptAutoFightTurkey or enabled.autoTimeTrial or enabled.autoDoQuest
-    if not petWanted and petState.hook then restorePetSpeed() end
-    ensureWorker("pet", petWanted, CFG.PetInterval, petTick)
-    local tapRate = enabled.clickAura and CFG.AuraRate or (enabled.farm and CFG.FarmTapRate or CFG.TapRate)
-    if enabled.legitTap and not enabled.farm and not enabled.clickAura then tapRate = 8 end
-    ensureWorker("tap", enabled.tap or enabled.farm or enabled.clickAura, 1 / math.clamp(math.min(tapRate, CFG.MaxTapRate), 1, 120), tapTick)
-    if (enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.autoTimeTrial or enabled.autoDoQuest) and not orbState.hook then
-        if not orbBackfillNeeded then nextAt.heap = math.min(nextAt.heap, os.clock() + CFG.HeapRetryInterval) end
-        orbBackfillNeeded = true
-    end
-    ensureWorker("vacuum", enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.autoTimeTrial or enabled.autoDoQuest, CFG.VacuumRate, vacuumTick)
-    ensureWorker("tele", enabled.zoneTele, 0.5, teleTick, function() enabled.zoneTele = false end)
-    ensureWorker("buy", enabled.zoneBuy, 0.5, buyTick, function() enabled.zoneBuy = false end)
-    ensureWorker("quest", enabled.autoQuest, CFG.QuestInterval, questTick, function() enabled.autoQuest = false end)
-    ensureWorker("doQuest", enabled.autoDoQuest, CFG.DoQuestInterval, doQuestTick, function() enabled.autoDoQuest = false end)
-    ensureWorker("rank", enabled.autoRank, 1, rankTick, function() enabled.autoRank = false end)
-    ensureWorker("rebirth", enabled.autoRebirth, 1, rebirthTick, function() enabled.autoRebirth = false end)
-    ensureWorker("egg", enabled.autoEgg, 0.35, eggTick, function() enabled.autoEgg = false end)
-    ensureWorker("world", enabled.worldTele, 0.5, worldTeleTick, function() enabled.worldTele = false end)
-    ensureWorker("advance", enabled.worldAdvance, 1, CFG.AdvanceTick, function() enabled.worldAdvance = false end)
-    ensureWorker("petSlot", enabled.autoBuyPetSlots, 1, petSlotTick, function() enabled.autoBuyPetSlots = false end)
-    ensureWorker("eggSlot", enabled.autoBuyEggSlots, 1, CFG.EggSlotTick, function() enabled.autoBuyEggSlots = false end)
-    ensureWorker("foreverPack", enabled.autoForeverPack, 2, CFG.ForeverPackTick, function() enabled.autoForeverPack = false end)
-    ensureWorker("upgrade", enabled.autoBuyUpgrades, 1.5, CFG.UpgradeTick, function() enabled.autoBuyUpgrades = false end)
-    ensureWorker("enchant", enabled.autoEquipEnchant, 1.5, CFG.AutoEquipEnchantTick, function() enabled.autoEquipEnchant = false end)
-    ensureWorker("tnt", enabled.autoTNT, 1, CFG.TNTTick, function() enabled.autoTNT = false end)
-    ensureWorker("tntCrate", enabled.autoTNTCrate, 1, CFG.TNTCrateTick, function() enabled.autoTNTCrate = false end)
-    ensureWorker("keys", enabled.autoKeys, 1, keyTick, function() enabled.autoKeys = false end)
-    ensureWorker("bags", enabled.autoGiftBags, 1, bagTick, function() enabled.autoGiftBags = false end)
 -- Auto Season Pass (EventPass_Get + EventPass_Buy) & Auto Claim Free Zone Gifts (DailyRewards, Free Gifts, Free Vending, Forever Pack)
 function CFG.SeasonPassTick()
     local now = os.clock()
@@ -7894,6 +8125,68 @@ function CFG.ZoneGiftsTick()
     notes.zoneGifts = claimed > 0 and ("claimed " .. claimed .. " free zone gift(s)") or "checked free zone gifts"
 end
 
+syncWorkers = function()
+    if not alive then return end
+    syncAntiAfk()
+    syncEggFx()
+    syncNoclip()
+    syncFly()
+    syncGamepasses()
+    syncGates()
+    CFG.SyncFastFarmBeta()
+    CFG.SyncWhiteScreen()
+    CFG.SyncReduceCpuRam()
+    CFG.RankHUD.Sync()
+    local eventWanted = enabled.optPumpkinTycoon or enabled.ptAutoTeleBestEgg or enabled.ptAutoTeleNearestFarm or enabled.ptAutoBuyEgg
+        or enabled.ptAutoBuyButtons or enabled.ptAutoRebirth or enabled.ptAutoKeepPumpkins
+        or enabled.ptAutoBreakPumpkins or enabled.ptAutoBuyMerchant or enabled.ptAutoPlantPumpkins
+        or enabled.ptAutoBuyUpgrades or enabled.ptAutoBuyCocoa or enabled.ptAutoUseBoosts
+        or enabled.ptAutoFlannelGifts or enabled.ptAutoHuntWild or enabled.ptAutoCatchWild
+        or enabled.ptAutoBuyNets or enabled.ptAutoFightTurkey or enabled.ptAutoCatchRare
+    local ttWanted = enabled.autoTimeTrial or enabled.autoTimeTrialChests
+    local profileWanted = enabled.zoneTele or enabled.zoneBuy or enabled.autoQuest or enabled.autoDoQuest
+        or enabled.autoRank or enabled.autoRankHud or enabled.autoRebirth or enabled.autoEgg or enabled.worldTele
+        or enabled.autoBuyPetSlots or enabled.autoBuyEggSlots or enabled.autoForeverPack
+        or enabled.autoBuyUpgrades or enabled.autoEquipEnchant or enabled.worldAdvance or enabled.unlockGamepasses
+        or enabled.autoKeys or enabled.autoGiftBags or enabled.autoFruits or enabled.autoPotions
+        or enabled.autoFreeGifts or enabled.autoUltimate or enabled.autoSprinkler or enabled.autoDaycare or enabled.autoFlags
+        or enabled.autoSecretRooms or enabled.autoTreehouse or enabled.autoFuse or enabled.autoCards
+        or enabled.autoRelics or enabled.autoMailClaim or enabled.autoDice or enabled.autoTNT or enabled.autoTNTCrate
+        or enabled.autoSpinTickets or enabled.autoSeasonPass or enabled.autoZoneGifts or enabled.autoOpenChests
+        or eventWanted or ttWanted
+    local discoveryWanted = profileWanted or enabled.petSpeed or enabled.farm or enabled.fastFarmBeta or enabled.vacuum or enabled.tap or enabled.clickAura
+    ensureWorker("profile", profileWanted, CFG.ProfileInterval, profileTick)
+    ensureWorker("discovery", discoveryWanted, CFG.DiscoveryInterval, discoveryTick)
+    if not discoveryWanted then heapObjects, heapCursor, treeScan = nil, nil, nil end
+    local petWanted = enabled.petSpeed or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.ptAutoFightTurkey or enabled.autoTimeTrial or enabled.autoDoQuest
+    if not petWanted and petState.hook then restorePetSpeed() end
+    ensureWorker("pet", petWanted, CFG.PetInterval, petTick)
+    local tapRate = enabled.clickAura and CFG.AuraRate or (enabled.farm and CFG.FarmTapRate or CFG.TapRate)
+    if enabled.legitTap and not enabled.farm and not enabled.clickAura then tapRate = 8 end
+    ensureWorker("tap", enabled.tap or enabled.farm or enabled.clickAura, 1 / math.clamp(math.min(tapRate, CFG.MaxTapRate), 1, 120), tapTick)
+    if (enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.autoTimeTrial or enabled.autoDoQuest) and not orbState.hook then
+        if not orbBackfillNeeded then nextAt.heap = math.min(nextAt.heap, os.clock() + CFG.HeapRetryInterval) end
+        orbBackfillNeeded = true
+    end
+    ensureWorker("vacuum", enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.autoTimeTrial or enabled.autoDoQuest, CFG.VacuumRate, vacuumTick)
+    ensureWorker("tele", enabled.zoneTele, 0.5, teleTick, function() enabled.zoneTele = false end)
+    ensureWorker("buy", enabled.zoneBuy, 0.5, buyTick, function() enabled.zoneBuy = false end)
+    ensureWorker("quest", enabled.autoQuest, CFG.QuestInterval, questTick, function() enabled.autoQuest = false end)
+    ensureWorker("doQuest", enabled.autoDoQuest, CFG.DoQuestInterval, doQuestTick, function() enabled.autoDoQuest = false end)
+    ensureWorker("rank", enabled.autoRank, 1, rankTick, function() enabled.autoRank = false end)
+    ensureWorker("rebirth", enabled.autoRebirth, 1, rebirthTick, function() enabled.autoRebirth = false end)
+    ensureWorker("egg", enabled.autoEgg, 0.35, eggTick, function() enabled.autoEgg = false end)
+    ensureWorker("world", enabled.worldTele, 0.5, worldTeleTick, function() enabled.worldTele = false end)
+    ensureWorker("advance", enabled.worldAdvance, 1, CFG.AdvanceTick, function() enabled.worldAdvance = false end)
+    ensureWorker("petSlot", enabled.autoBuyPetSlots, 1, petSlotTick, function() enabled.autoBuyPetSlots = false end)
+    ensureWorker("eggSlot", enabled.autoBuyEggSlots, 1, CFG.EggSlotTick, function() enabled.autoBuyEggSlots = false end)
+    ensureWorker("foreverPack", enabled.autoForeverPack, 2, CFG.ForeverPackTick, function() enabled.autoForeverPack = false end)
+    ensureWorker("upgrade", enabled.autoBuyUpgrades, 1.5, CFG.UpgradeTick, function() enabled.autoBuyUpgrades = false end)
+    ensureWorker("enchant", enabled.autoEquipEnchant, 1.5, CFG.AutoEquipEnchantTick, function() enabled.autoEquipEnchant = false end)
+    ensureWorker("tnt", enabled.autoTNT, 1, CFG.TNTTick, function() enabled.autoTNT = false end)
+    ensureWorker("tntCrate", enabled.autoTNTCrate, 1, CFG.TNTCrateTick, function() enabled.autoTNTCrate = false end)
+    ensureWorker("keys", enabled.autoKeys, 1, keyTick, function() enabled.autoKeys = false end)
+    ensureWorker("bags", enabled.autoGiftBags, 1, bagTick, function() enabled.autoGiftBags = false end)
     ensureWorker("spin", enabled.autoSpinTickets, 0.15, spinTick, function() enabled.autoSpinTickets = false end)
     ensureWorker("seasonPass", enabled.autoSeasonPass, 5.0, CFG.SeasonPassTick, function() enabled.autoSeasonPass = false end)
     ensureWorker("zoneGifts", enabled.autoZoneGifts, 8.0, CFG.ZoneGiftsTick, function() enabled.autoZoneGifts = false end)
