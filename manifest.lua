@@ -1,3 +1,4 @@
+-- STEPH_COMPONENT: manifest 1.1.0
 -- manifest.lua
 -- Ordered module list for Steph HUB. main.lua downloads this file first,
 -- then fetches each tab module with live progress on the loading screen.

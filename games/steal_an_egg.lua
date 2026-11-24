@@ -1,7 +1,8 @@
 --!nolint
+-- STEPH_COMPONENT: sae_hub 1.3.0
 -- Stehp-Hub | Luau / Roblox executor | standalone two-game hub
 
-local VERSION = "1.2.0"
+local VERSION = "1.3.0"
 local HUB_NAME = "Steph HUB"
 local CONFIG_FOLDER = "StephHUB_SAE"
 local CONFIG_FILE = CONFIG_FOLDER .. "/config.json"
@@ -39,6 +40,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local HttpService = game:GetService("HttpService")
+local PathfindingService = game:GetService("PathfindingService")
 local LocalPlayer = Players.LocalPlayer
 local hubEnv = (type(getgenv) == "function" and getgenv()) or _G
 if type(hubEnv.StehpHubCleanup) == "function" then
@@ -47,18 +49,18 @@ end
 local cleanupConnections = {}
 
 local C = {
-    bg = Color3.fromRGB(18, 15, 27),
-    sidebar = Color3.fromRGB(24, 19, 36),
-    card = Color3.fromRGB(31, 25, 45),
-    cardAlt = Color3.fromRGB(37, 30, 54),
-    accent = Color3.fromRGB(139, 92, 246),
-    accentDark = Color3.fromRGB(104, 65, 196),
-    text = Color3.fromRGB(241, 237, 250),
-    muted = Color3.fromRGB(157, 148, 178),
-    line = Color3.fromRGB(55, 45, 76),
-    green = Color3.fromRGB(74, 222, 128),
-    red = Color3.fromRGB(248, 113, 113),
-    amber = Color3.fromRGB(251, 191, 36),
+    bg = Color3.fromRGB(13, 15, 20),
+    sidebar = Color3.fromRGB(17, 20, 27),
+    card = Color3.fromRGB(22, 26, 35),
+    cardAlt = Color3.fromRGB(29, 34, 46),
+    accent = Color3.fromRGB(125, 212, 236),
+    accentDark = Color3.fromRGB(42, 84, 102),
+    text = Color3.fromRGB(232, 237, 244),
+    muted = Color3.fromRGB(146, 156, 173),
+    line = Color3.fromRGB(44, 51, 68),
+    green = Color3.fromRGB(74, 212, 134),
+    red = Color3.fromRGB(238, 112, 112),
+    amber = Color3.fromRGB(250, 224, 120),
 }
 
 local DEFAULTS = {
@@ -311,6 +313,8 @@ local pageSubtitle
 local refreshPlayers
 local buildPages
 local economyStartButton
+local shuttingDown = false
+local syncAntiAfk
 local runtime = {
     mode = "idle",
     runsSinceTraining = 0,
@@ -858,11 +862,11 @@ local function buildUI(backend)
     main = new("Frame", {
         BackgroundColor3 = C.bg,
         BorderSizePixel = 0,
-        Size = UDim2.new(0, 840, 0, 560),
+        Size = UDim2.new(0, 720, 0, 440),
         Position = UDim2.new(0.5, 0, 0.5, 0),
         AnchorPoint = Vector2.new(0.5, 0.5),
     }, gui)
-    corner(main, 14)
+    corner(main, 10)
     stroke(main, C.line, 1)
     uiScale = new("UIScale", { Scale = state.settings.uiScale }, main)
     local shadow = new("ImageLabel", {
@@ -878,53 +882,58 @@ local function buildUI(backend)
         PaddingLeft = UDim.new(0, 0),
     }, shadow)
 
+    local topbar = new("Frame", {
+        BackgroundColor3 = C.sidebar,
+        BorderSizePixel = 0,
+        Size = UDim2.new(1, 0, 0, 42),
+        Active = true,
+    }, main)
+    local topTitle = new("TextLabel", {
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, -210, 1, 0),
+        Position = UDim2.fromOffset(16, 0),
+        Text = HUB_NAME .. "  |  " .. (gameKey == "sae" and "Steal an Egg" or "Pet Sim 99"),
+        TextColor3 = C.text,
+        TextSize = 14,
+        Font = Enum.Font.GothamBold,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, topbar)
+    local topHint = new("TextLabel", {
+        BackgroundTransparency = 1,
+        Size = UDim2.new(0, 190, 1, 0),
+        Position = UDim2.new(1, -228, 0, 0),
+        Text = gameKey == "sae" and "RightShift / RightControl" or "RightControl",
+        TextColor3 = C.muted,
+        TextSize = 10,
+        Font = Enum.Font.Gotham,
+        TextXAlignment = Enum.TextXAlignment.Right,
+    }, topbar)
+    local topMinimize = new("TextButton", {
+        AutoButtonColor = false,
+        BackgroundColor3 = C.cardAlt,
+        BorderSizePixel = 0,
+        Size = UDim2.fromOffset(28, 26),
+        Position = UDim2.new(1, -36, 0.5, -13),
+        Text = "−",
+        TextColor3 = C.muted,
+        TextSize = 16,
+        Font = Enum.Font.GothamBold,
+    }, topbar)
+    corner(topMinimize, 6)
+    topMinimize.MouseButton1Click:Connect(function()
+        gui.Enabled = false
+    end)
+
     local sidebar = new("Frame", {
         BackgroundColor3 = C.sidebar,
         BorderSizePixel = 0,
-        Size = UDim2.new(0, 190, 1, 0),
+        Size = UDim2.new(0, 168, 1, -42),
+        Position = UDim2.fromOffset(0, 42),
     }, main)
-    corner(sidebar, 14)
-    local brand = new("Frame", {
-        BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 92),
-        Position = UDim2.new(0, 0, 0, 0),
-    }, sidebar)
-    local logo = new("TextLabel", {
-        BackgroundColor3 = C.accent,
-        BorderSizePixel = 0,
-        Size = UDim2.new(0, 42, 0, 42),
-        Position = UDim2.new(0, 18, 0, 22),
-        Text = "S",
-        TextColor3 = C.text,
-        TextSize = 20,
-        Font = Enum.Font.GothamBold,
-    }, brand)
-    corner(logo, 12)
-    local brandText = new("TextLabel", {
-        BackgroundTransparency = 1,
-        Size = UDim2.new(1, -76, 0, 25),
-        Position = UDim2.new(0, 72, 0, 24),
-        Text = HUB_NAME,
-        TextColor3 = C.text,
-        TextSize = 17,
-        Font = Enum.Font.GothamBold,
-        TextXAlignment = Enum.TextXAlignment.Left,
-    }, brand)
-    local brandSub = new("TextLabel", {
-        BackgroundTransparency = 1,
-        Size = UDim2.new(1, -76, 0, 20),
-        Position = UDim2.new(0, 72, 0, 49),
-        Text = gameKey == "sae" and "Steal an Egg" or "Pet Sim 99",
-        TextColor3 = C.muted,
-        TextSize = 11,
-        Font = Enum.Font.Gotham,
-        TextXAlignment = Enum.TextXAlignment.Left,
-    }, brand)
-
     local navFrame = new("Frame", {
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, -20, 1, -112),
-        Position = UDim2.new(0, 10, 0, 96),
+        Size = UDim2.new(1, -16, 1, -16),
+        Position = UDim2.fromOffset(8, 8),
     }, sidebar)
     local navLayout = new("UIListLayout", {
         FillDirection = Enum.FillDirection.Vertical,
@@ -937,8 +946,8 @@ local function buildUI(backend)
         { key = "Teleports", label = "Teleports" },
         { key = "Economy", label = "Economy" },
         { key = "Selling", label = "Selling" },
-        { key = "Players", label = "Người chơi" },
-        { key = "Settings", label = "Cài đặt" },
+        { key = "Players", label = "Players" },
+        { key = "Settings", label = "Settings" },
         { key = "Credits", label = "Credits" },
     }
     for index, item in ipairs(tabs) do
@@ -946,15 +955,15 @@ local function buildUI(backend)
             AutoButtonColor = false,
             BackgroundColor3 = C.sidebar,
             BorderSizePixel = 0,
-            Size = UDim2.new(1, 0, 0, 40),
-            Text = "   " .. item.label,
+            Size = UDim2.new(1, 0, 0, 34),
+            Text = "  " .. item.label,
             TextColor3 = C.muted,
-            TextSize = 13,
+            TextSize = 12,
             Font = Enum.Font.GothamMedium,
             TextXAlignment = Enum.TextXAlignment.Left,
             LayoutOrder = index,
         }, navFrame)
-        corner(button, 7)
+        corner(button, 6)
         navButtons[item.key] = button
         button.MouseButton1Click:Connect(function()
             selectTab(item.key)
@@ -963,39 +972,39 @@ local function buildUI(backend)
 
     local content = new("Frame", {
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, -190, 1, 0),
-        Position = UDim2.new(0, 190, 0, 0),
+        Size = UDim2.new(1, -168, 1, -42),
+        Position = UDim2.fromOffset(168, 42),
     }, main)
     local header = new("Frame", {
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 88),
+        Size = UDim2.new(1, 0, 0, 72),
         Position = UDim2.new(0, 0, 0, 0),
     }, content)
     pageTitle = new("TextLabel", {
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, -350, 0, 28),
-        Position = UDim2.new(0, 24, 0, 18),
+        Size = UDim2.new(1, -270, 0, 26),
+        Position = UDim2.fromOffset(20, 12),
         Text = "Farm",
         TextColor3 = C.text,
-        TextSize = 22,
+        TextSize = 20,
         Font = Enum.Font.GothamBold,
         TextXAlignment = Enum.TextXAlignment.Left,
     }, header)
     pageSubtitle = new("TextLabel", {
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, -350, 0, 20),
-        Position = UDim2.new(0, 24, 0, 48),
+        Size = UDim2.new(1, -270, 0, 18),
+        Position = UDim2.fromOffset(20, 40),
         Text = "",
         TextColor3 = C.muted,
-        TextSize = 11,
+        TextSize = 10,
         Font = Enum.Font.Gotham,
         TextXAlignment = Enum.TextXAlignment.Left,
     }, header)
     searchBox = new("TextBox", {
         BackgroundColor3 = C.card,
         BorderSizePixel = 0,
-        Size = UDim2.new(0, 230, 0, 34),
-        Position = UDim2.new(1, -254, 0, 22),
+        Size = UDim2.new(0, 190, 0, 30),
+        Position = UDim2.new(1, -214, 0, 18),
         Text = "",
         PlaceholderText = "Search anything",
         PlaceholderColor3 = C.muted,
@@ -1007,27 +1016,11 @@ local function buildUI(backend)
     corner(searchBox, 8)
     stroke(searchBox)
     new("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }, searchBox)
-    local closeButton = new("TextButton", {
-        AutoButtonColor = false,
-        BackgroundColor3 = C.card,
-        BorderSizePixel = 0,
-        Size = UDim2.new(0, 30, 0, 30),
-        Position = UDim2.new(1, -42, 0, 24),
-        Text = "×",
-        TextColor3 = C.muted,
-        TextSize = 18,
-        Font = Enum.Font.GothamBold,
-    }, header)
-    corner(closeButton, 7)
-    closeButton.MouseButton1Click:Connect(function()
-        gui.Enabled = false
-    end)
-
     pagesHost = new("ScrollingFrame", {
         BackgroundTransparency = 1,
         BorderSizePixel = 0,
-        Size = UDim2.new(1, -36, 1, -102),
-        Position = UDim2.new(0, 18, 0, 96),
+        Size = UDim2.new(1, -32, 1, -84),
+        Position = UDim2.fromOffset(16, 76),
         CanvasSize = UDim2.new(0, 0, 0, 0),
         AutomaticCanvasSize = Enum.AutomaticSize.Y,
         ScrollBarThickness = 4,
@@ -1037,8 +1030,8 @@ local function buildUI(backend)
     toastLabel = new("TextLabel", {
         BackgroundColor3 = C.cardAlt,
         BorderSizePixel = 0,
-        Size = UDim2.new(0, 320, 0, 40),
-        Position = UDim2.new(1, -340, 1, -54),
+        Size = UDim2.new(0, 300, 0, 36),
+        Position = UDim2.new(1, -316, 1, -50),
         Text = "",
         TextColor3 = C.text,
         TextSize = 12,
@@ -1052,9 +1045,9 @@ local function buildUI(backend)
     local dragBar = new("Frame", {
         BackgroundTransparency = 1,
         BorderSizePixel = 0,
-        Size = UDim2.new(1, -300, 0, 72),
+        Size = UDim2.new(1, -250, 1, 0),
         Active = true,
-    }, header)
+    }, topbar)
     local dragging = false
     local dragStart
     local startPosition
@@ -1407,7 +1400,9 @@ end
 
 local function startScheduler(backend)
     local heartbeat = RunService.Heartbeat:Connect(function()
+        if shuttingDown then return end
         local now = os.clock()
+        syncAntiAfk()
         if uiScale then
             uiScale.Scale = state.settings.uiScale
         end
@@ -1477,11 +1472,6 @@ local function startScheduler(backend)
         if state.selling.explicit and state.selling.autoSell then
             runJob("sell", 0.75, function()
                 return backend.sellStep(rarityEnabled)
-            end)
-        end
-        if state.settings.antiAfk then
-            runJob("afk", 55.0, function()
-                return backend.antiAfk()
             end)
         end
         if backend.sync then
@@ -1591,6 +1581,73 @@ local function teleportToCFrame(cframe)
         root.CFrame = cframe
     end)
     return ok
+end
+
+local function walkToCFrame(cframe, timeout)
+    local character = LocalPlayer.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not root or not humanoid or not cframe then
+        return false
+    end
+    local hipHeight = math.max(tonumber(humanoid.HipHeight) or 2, 1)
+    local destination = cframe.Position + Vector3.new(0, hipHeight + 0.5, 0)
+    local deadline = os.clock() + (tonumber(timeout) or 20)
+    local function horizontalDistance(target)
+        local offset = root.Position - target
+        return Vector3.new(offset.X, 0, offset.Z).Magnitude
+    end
+    local function atDestination()
+        return root.Parent ~= nil and horizontalDistance(destination) <= 3.0
+            and math.abs(root.Position.Y - destination.Y) <= 6.0
+    end
+    if atDestination() then
+        return true
+    end
+
+    local waypoints
+    pcall(function()
+        local path = PathfindingService:CreatePath({
+            AgentRadius = 2,
+            AgentHeight = 5,
+            CanJump = true,
+        })
+        path:ComputeAsync(root.Position, destination)
+        if path.Status == Enum.PathStatus.Success then
+            waypoints = path:GetWaypoints()
+        end
+    end)
+
+    local function follow(target)
+        local lastMove = -math.huge
+        while os.clock() < deadline do
+            if shuttingDown or not root.Parent or not humanoid.Parent or humanoid.Health <= 0 then
+                return false
+            end
+            if (root.Position - target).Magnitude <= 2.5 then
+                return true
+            end
+            local now = os.clock()
+            if now - lastMove >= 0.5 then
+                humanoid:MoveTo(target)
+                lastMove = now
+            end
+            task.wait(0.1)
+        end
+        return false
+    end
+
+    if waypoints and #waypoints > 0 then
+        for _, waypoint in ipairs(waypoints) do
+            if os.clock() >= deadline or not follow(waypoint.Position) then
+                break
+            end
+        end
+    end
+    if atDestination() then
+        return true
+    end
+    return follow(destination)
 end
 
 local function parseNumber(value)
@@ -1809,17 +1866,76 @@ local function teleportNamed(name, aliases, maxDistance)
 end
 
 local function defaultAntiAfk()
+    local camera = workspace.CurrentCamera
     local ok, virtualUser = pcall(function()
         return game:GetService("VirtualUser")
     end)
-    if not ok or not virtualUser then
-        return false
+    if ok and virtualUser then
+        local clicked = pcall(function()
+            virtualUser:CaptureController()
+            if camera then
+                virtualUser:ClickButton2(Vector2.new(0, 0), camera.CFrame)
+            else
+                virtualUser:ClickButton2(Vector2.new(0, 0))
+            end
+        end)
+        if clicked then
+            return true
+        end
     end
-    local clicked = pcall(function()
-        virtualUser:CaptureController()
-        virtualUser:ClickButton2(Vector2.new(0, 0))
+    return pcall(function()
+        local input = game:GetService("VirtualInputManager")
+        input:SendKeyEvent(true, Enum.KeyCode.RightShift, false, game)
+        task.wait(0.05)
+        input:SendKeyEvent(false, Enum.KeyCode.RightShift, false, game)
     end)
-    return clicked
+end
+
+local antiAfkRuntime = { conn = nil, thread = nil, disabled = {} }
+syncAntiAfk = function()
+    local st = antiAfkRuntime
+    if shuttingDown or not state.settings.antiAfk then
+        if st.conn then
+            pcall(function() st.conn:Disconnect() end)
+            st.conn = nil
+        end
+        if st.thread then
+            pcall(task.cancel, st.thread)
+            st.thread = nil
+        end
+        for _, connection in ipairs(st.disabled) do
+            pcall(function()
+                if type(connection.Enable) == "function" then connection:Enable() end
+            end)
+        end
+        table.clear(st.disabled)
+        return
+    end
+    if st.conn or st.thread then return end
+    if type(getconnections) == "function" then
+        pcall(function()
+            for _, connection in ipairs(getconnections(LocalPlayer.Idled)) do
+                if type(connection.Disable) == "function" then
+                    pcall(connection.Disable, connection)
+                    st.disabled[#st.disabled + 1] = connection
+                end
+            end
+        end)
+    end
+    local okIdle, idled = pcall(function() return LocalPlayer.Idled end)
+    if okIdle and idled then
+        st.conn = idled:Connect(function()
+            if not shuttingDown and state.settings.antiAfk then
+                defaultAntiAfk()
+            end
+        end)
+    end
+    st.thread = task.spawn(function()
+        while not shuttingDown and state.settings.antiAfk do
+            defaultAntiAfk()
+            task.wait(55)
+        end
+    end)
 end
 
 local function finishBackend(backend)
@@ -2059,6 +2175,7 @@ do
     local wornTrailHooked = false
     local onTreadmill = false
     local plantSkipUntil = {}
+    local hatchSkipUntil = {}
     local pendingFinish = {}
     local stopped = false
 
@@ -2159,9 +2276,17 @@ do
         local center = plot.CenterPoint
         local area = plot.PetArea
         assert(center and area, "Your egg area is not ready")
-        teleportToCFrame(center.CFrame * CFrame.new(0, 4, 0))
-        task.wait(0.12)
-        pcall(EggState.WearEggTool, uid)
+        if not walkToCFrame(center.CFrame, 12) then
+            return false
+        end
+        local wore, wearError = EggState.WearEggTool(uid)
+        if wore ~= true then
+            plantSkipUntil[uid] = os.clock() + 3.0
+            if wearError then
+                notify("Wear: " .. tostring(wearError), C.amber)
+            end
+            return false
+        end
         task.wait(0.08)
         local spacing = 4
         local columns = math.max(1, math.floor(area.Size.X / spacing))
@@ -2192,6 +2317,10 @@ do
             plantSkipUntil[uid] = os.clock() + 12.0
             return false
         end
+        if not walkToCFrame(center.CFrame * chosen, 8) then
+            pcall(EggState.DoffEggTool, uid)
+            return false
+        end
         local planted, errText = EggState.PlantEgg(uid, chosen)
         if planted == true then
             plantSkipUntil[uid] = nil
@@ -2214,10 +2343,9 @@ do
         local sep = areas and areas:FindFirstChild("SeparationLine")
         if sep and sep:IsA("BasePart") then
             local root = characterRoot()
-            local exitPos = sep.Position + Vector3.new(0, 3, 0) - sep.CFrame.LookVector.Unit * 4
-            if root then
-                exitPos = Vector3.new(exitPos.X, exitPos.Y, root.Position.Z)
-            end
+            local groundY = root and root.Position.Y or sep.Position.Y
+            local exitPos = sep.Position - sep.CFrame.LookVector * 6
+            exitPos = Vector3.new(exitPos.X, groundY, exitPos.Z)
             return CFrame.new(exitPos)
         end
         return nil
@@ -2227,15 +2355,16 @@ do
         leaveTreadmillIfNeeded()
         local plot = localPlot()
         local exitCf = separationExitCFrame()
-        if exitCf then
-            teleportToCFrame(exitCf)
-            task.wait(0.10)
+        if exitCf and not walkToCFrame(exitCf, 12) then
+            return false
         end
         local targetCFrame = (plot.CenterPoint and plot.CenterPoint.CFrame) or plot.RespawnPointCFrame
         if not targetCFrame then
             return false
         end
-        teleportToCFrame(targetCFrame * CFrame.new(0, 3.5, 0))
+        if not walkToCFrame(targetCFrame, 16) then
+            return false
+        end
         for _ = 1, 10 do
             task.wait(0.12)
             local carry = EggState.ReadCarryState() or {}
@@ -2309,15 +2438,20 @@ do
         if not fieldCf then
             return false
         end
-        teleportToCFrame(fieldCf * CFrame.new(0, 2.5, 0))
+        if not walkToCFrame(fieldCf, 16) then
+            return false
+        end
         task.wait(0.15)
         local firstAreaKey
         if AreaEggSlotIdentity and field.Uid and AreaEggSlotIdentity.LooksLikeFirstAreaUid(field.Uid) then
             firstAreaKey = AreaEggSlotIdentity.SlotKey(field.AreaId, field.NestId)
         end
-        local carried = EggState.CarryFieldEgg(field.Uid, firstAreaKey)
+        local carried, carryError = EggState.CarryFieldEgg(field.Uid, firstAreaKey)
         if carried or (EggState.ReadCarryState() or {}).IsCarrying then
             return deliverCarriedEgg()
+        end
+        if carryError then
+            notify("Carry: " .. tostring(carryError), C.amber)
         end
         return false
     end
@@ -2332,34 +2466,43 @@ do
         end
         local records = ownedEggs(false)
         for uid in pairs(records) do
-            if not pendingFinish[uid] and EggState.IsReadyToHatch(uid) then
-                if PlacedEggRenderer and PlacedEggRenderer.ActivateLocalEgg then
-                    local okAct, activated = pcall(PlacedEggRenderer.ActivateLocalEgg, uid)
+            if not pendingFinish[uid] and now >= (hatchSkipUntil[uid] or 0) and EggState.IsReadyToHatch(uid) then
+                if PlacedEggRenderer and type(PlacedEggRenderer.ActivateLocalEgg) == "function" then
+                    local okAct, activated, activateError = pcall(PlacedEggRenderer.ActivateLocalEgg, uid)
                     if okAct and activated == true then
                         pendingFinish[uid] = true
-                        task.delay(4.5, function()
+                        task.delay(6.0, function()
                             pendingFinish[uid] = nil
                         end)
                         return true
                     end
-                end
-                local began, errorText, result = EggState.BeginHatch(uid)
-                if began then
-                    pendingFinish[uid] = true
-                    local delay = result == "MechaUpgraded" and 5.0 or 1.1
-                    task.delay(delay, function()
-                        if not stopped then
-                            pcall(EggState.FinishHatch, uid)
-                            if PlacedEggRenderer and type(PlacedEggRenderer.Refresh) == "function" then
-                                pcall(PlacedEggRenderer.Refresh)
+                    hatchSkipUntil[uid] = now + 1.0
+                    if not okAct or activateError then
+                        notify("Hatch: " .. tostring(activateError or activated), C.red)
+                    end
+                    if type(PlacedEggRenderer.Refresh) == "function" then
+                        pcall(PlacedEggRenderer.Refresh)
+                    end
+                else
+                    local began, errorText, result = EggState.BeginHatch(uid)
+                    if began then
+                        pendingFinish[uid] = true
+                        local delay = result == "MechaUpgraded" and 5.0 or 1.1
+                        task.delay(delay, function()
+                            if not stopped then
+                                pcall(EggState.FinishHatch, uid)
+                                if PlacedEggRenderer and type(PlacedEggRenderer.Refresh) == "function" then
+                                    pcall(PlacedEggRenderer.Refresh)
+                                end
                             end
-                        end
-                        pendingFinish[uid] = nil
-                    end)
-                    return true
-                end
-                if errorText then
-                    notify(errorText, C.red)
+                            pendingFinish[uid] = nil
+                        end)
+                        return true
+                    end
+                    hatchSkipUntil[uid] = now + 2.0
+                    if errorText then
+                        notify(errorText, C.red)
+                    end
                 end
             end
         end
@@ -2373,10 +2516,12 @@ do
         local target = firstDescendant(plot.PlotFolder, "TreadmillBottom")
         local cframe = instanceCFrame(target)
         assert(cframe, "TreadmillBottom is missing")
-        teleportToCFrame(cframe * CFrame.new(0, 4, 0))
+        if not walkToCFrame(cframe, 16) then
+            return false
+        end
         local treadmill = Remotes.Treadmill
         assert(treadmill and treadmill.AskWearStill, "Treadmill remote is missing")
-        local ok = invokeServer(treadmill.AskWearStill) ~= nil
+        local ok = invokeServer(treadmill.AskWearStill) == true
         if ok then
             onTreadmill = true
         end
@@ -2420,14 +2565,8 @@ do
                 local ok, cost = pcall(Bases.GetCost, LocalPlayer, level + 1)
                 if ok and cashValue() - (tonumber(cost) or math.huge) >= state.economy.reserve then
                     if BaseUpgrade and type(BaseUpgrade.PurchaseNextTier) == "function" then
-                        local okUp, resUp = pcall(BaseUpgrade.PurchaseNextTier)
-                        if okUp and resUp then
-                            return true
-                        end
-                    end
-                    local homestead = Remotes.Homestead
-                    if homestead and homestead.AskBaseTierRaise then
-                        return fireServer(homestead.AskBaseTierRaise)
+                        local okUp, queued = pcall(BaseUpgrade.PurchaseNextTier)
+                        return okUp and queued == true
                     end
                 end
             end
@@ -2477,8 +2616,8 @@ do
         if type(summary) ~= "table" then
             return false
         end
-        local claimable = tonumber(summary.TotalAmount) or tonumber(summary.ClaimableAmount) or 0
-        if claimable <= 0 then
+        local claimable = math.max(tonumber(summary.TotalAmount) or 0, 0)
+        if claimable < 5 then
             return false
         end
         return invokeServer(away.AskCollect, { Kind = "Claim" }) == true
@@ -2523,19 +2662,20 @@ do
         if #sellUids == 0 then
             return false
         end
-        local sent = false
         if petSatchel.SellEveryPet then
-            sent = fireServer(petSatchel.SellEveryPet, sellUids) or sent
+            return fireServer(petSatchel.SellEveryPet, sellUids)
         end
         if petSatchel.SellSelection then
+            local sent = false
             for i = 1, #sellUids, 512 do
                 local batch = {}
                 local last = math.min(i + 511, #sellUids)
                 table.move(sellUids, i, last, 1, batch)
                 sent = fireServer(petSatchel.SellSelection, { Assets = batch, Eggs = {} }) or sent
             end
+            return sent
         end
-        return sent
+        return false
     end
 
     Backends.SAE.sellStep = function(rarityEnabled)
@@ -2837,6 +2977,8 @@ local function hideHub()
 end
 
 local function cleanupHub()
+    shuttingDown = true
+    syncAntiAfk()
     flushConfig()
     if toastConnection then
         pcall(task.cancel, toastConnection)

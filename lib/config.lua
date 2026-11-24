@@ -1,3 +1,4 @@
+-- STEPH_COMPONENT: config 1.1.0
 -- lib/config.lua
 -- JSON config persistence for Steph HUB (toggles, numeric/string knobs, event options, picks).
 return function(engine, ui)

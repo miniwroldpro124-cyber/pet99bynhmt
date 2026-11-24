@@ -1,3 +1,5 @@
+-- STEPH_COMPONENT: ps99_engine 3.2.0
+local VERSION = "3.2.0"
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local UIS = game:GetService("UserInputService")
@@ -499,12 +501,17 @@ local function looksLikeSave(value)
 end
 
 CFG.BootstrapDone = false
+CFG.BootstrapRetryAt = 0
 function CFG.BootstrapModules()
-    if CFG.BootstrapDone then return end
-    CFG.BootstrapDone = true
+    local now = os.clock()
+    if now < (CFG.BootstrapRetryAt or 0) then return CFG.BootstrapDone end
     local lib = RS:FindFirstChild("Library")
     local cli = lib and lib:FindFirstChild("Client")
-    if not cli then return end
+    if not cli then
+        CFG.BootstrapRetryAt = now + 1.0
+        notes.profile = "waiting for Library/Client"
+        return false
+    end
     local function tryReq(slot, name)
         if modules[slot] then return end
         local child = cli:FindFirstChild(name)
@@ -532,10 +539,16 @@ function CFG.BootstrapModules()
     tryReq("instancing", "InstancingCmds")
     tryReq("mapCmds", "MapCmds")
     tryReq("pumpkinTycoon", "PumpkinTycoonCmds")
+    CFG.BootstrapDone = modules.save ~= nil
+    CFG.BootstrapRetryAt = now + (CFG.BootstrapDone and 5.0 or 1.0)
+    if not CFG.BootstrapDone then
+        notes.profile = "waiting for Client/Save"
+    end
+    return CFG.BootstrapDone
 end
 
 local function getSave()
-    if not modules.save and not CFG.BootstrapDone then
+    if not modules.save then
         CFG.BootstrapModules()
     end
     if snap.cache then
@@ -1154,7 +1167,7 @@ function petState.isAttacking(record)
 end
 
 local function petTick()
-    if not modules.pet and not CFG.BootstrapDone then
+    if not modules.pet then
         CFG.BootstrapModules()
     end
     local mod = modules.pet
@@ -2789,7 +2802,7 @@ function CFG.UpgradeTick()
     if not save then notes.upgrade = "waiting for profile"; return end
     local upCmds = modules.upgrades
     if not upCmds or type(upCmds.All) ~= "function" then
-        if not CFG.BootstrapDone then CFG.BootstrapModules() end
+        if not upCmds then CFG.BootstrapModules() end
         upCmds = modules.upgrades
     end
     if not upCmds or type(upCmds.All) ~= "function" then
@@ -5107,7 +5120,7 @@ function CFG.SyncFastFarmBeta()
         return
     end
     if st.conn then return end
-    if not CFG.BootstrapDone then CFG.BootstrapModules() end
+    if not modules.save or not modules.network then CFG.BootstrapModules() end
     notes.betaFarm = "running [BETA no-limit bypass]"
     st.conn = game:GetService("RunService").Heartbeat:Connect(function()
         if not alive or not enabled.fastFarmBeta then return end
@@ -7654,7 +7667,8 @@ function CFG.RankHUD.Update()
     end
     if CFG.RankHUD.goalsLabel then
         if not save then
-            CFG.RankHUD.goalsLabel.Text = "Waiting for Save profile..."
+            CFG.RankHUD.goalsLabel.Text = ("Profile: %s\nDiscovery: %s\nRetrying automatically...")
+                :format(tostring(notes.profile or "waiting"), tostring(notes.heap or "idle"))
         else
             local active = collectActiveGoals(save)
             if #active == 0 then
@@ -7724,7 +7738,7 @@ syncWorkers = function()
         or enabled.ptAutoBuyNets or enabled.ptAutoFightTurkey or enabled.ptAutoCatchRare
     local ttWanted = enabled.autoTimeTrial or enabled.autoTimeTrialChests
     local profileWanted = enabled.zoneTele or enabled.zoneBuy or enabled.autoQuest or enabled.autoDoQuest
-        or enabled.autoRank or enabled.autoRebirth or enabled.autoEgg or enabled.worldTele
+        or enabled.autoRank or enabled.autoRankHud or enabled.autoRebirth or enabled.autoEgg or enabled.worldTele
         or enabled.autoBuyPetSlots or enabled.autoBuyEggSlots or enabled.autoForeverPack
         or enabled.autoBuyUpgrades or enabled.autoEquipEnchant or enabled.worldAdvance or enabled.unlockGamepasses
         or enabled.autoKeys or enabled.autoGiftBags or enabled.autoFruits or enabled.autoPotions
@@ -8020,6 +8034,7 @@ cleanup = function()
 end
 
 local controller = {
+    Version = VERSION,
     SetEnabled = setEnabled,
     ClaimRankRewards = claimRankRewards,
     AllOff = allOff,
@@ -8168,7 +8183,7 @@ local controller = {
         return out
     end,
     GetStatus = function()
-        getSave()
+        updateStatus()
         return {
             running = alive,
             enabled = table.clone(enabled),

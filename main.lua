@@ -1,5 +1,5 @@
 --[[
-    Steph HUB v10.1 - Dual-Game Loader (Pet Sim 99 + Steal an Egg)
+    Steph HUB v10.2 - Dual-Game Loader (Pet Sim 99 + Steal an Egg)
     Smooth boot: keeps the menu hidden until every component and config is ready.
     Protected source: no repository links are displayed in the UI or logs.
 ]]
@@ -12,7 +12,15 @@ local Tween = game:GetService("TweenService")
 local player = Players.LocalPlayer
 assert(player, "[Steph HUB] run this on the client")
 
-local VERSION = "10.1"
+local VERSION = "10.2"
+local COMPONENT_VERSIONS = {
+    ["games/steal_an_egg.lua"] = "1.3.0",
+    ["ps99_engine_v3.lua"] = "3.2.0",
+    ["lib/menu.lua"] = "2.0.0",
+    ["lib/ui.lua"] = "1.1.0",
+    ["lib/config.lua"] = "1.1.0",
+    ["manifest.lua"] = "1.1.0",
+}
 
 local function _d(bytes)
     local out = table.create(#bytes)
@@ -326,19 +334,35 @@ end
 
 local SESSION_BUST = tostring(os.time())
 
+local function componentVersion(source)
+    return source:match("%-%- STEPH_COMPONENT: [^%s]+ ([%d%.]+)")
+        or source:match('local%s+VERSION%s*=%s*"([%d%.]+)"')
+end
+
+local function validComponent(source, relative)
+    local expected = COMPONENT_VERSIONS[relative]
+    if not expected then
+        return true
+    end
+    if source:find("AnchorPoint%s*=%s*UDim2") then
+        return false
+    end
+    return componentVersion(source) == expected
+end
+
 local function httpGet(relative)
     local query = relative:find("?", 1, true) and "&" or "?"
     local bust = query .. "v=" .. VERSION .. "&t=" .. SESSION_BUST
     for _, root in ipairs({ BASE, MIRROR }) do
         local body = getOnce(root .. relative .. bust)
-        if body then
+        if body and validComponent(body, relative) then
             return body
         end
     end
     if type(readfile) == "function" then
         for _, candidate in ipairs({ relative, "stephhub-src/" .. relative, "pet99/" .. relative }) do
             local ok, content = pcall(readfile, candidate)
-            if ok and type(content) == "string" and #content > 32 then
+            if ok and type(content) == "string" and #content > 32 and validComponent(content, relative) then
                 return content
             end
         end
@@ -349,7 +373,9 @@ end
 local function fetch(relative, label)
     local body = httpGet(relative)
     if not body then
-        error("[Steph HUB] failed to load component: " .. tostring(label or "module"), 0)
+        local expected = COMPONENT_VERSIONS[relative]
+        local suffix = expected and (" (required v" .. expected .. ")") or ""
+        error("[Steph HUB] failed to load component: " .. tostring(label or relative) .. suffix, 0)
     end
     return body
 end
@@ -373,11 +399,19 @@ end
 
 ------------------------------------------------------------------ Steal an Egg boot
 
+local function cleanupStealAnEgg()
+    local cleanup = hostGlobal("StehpHubCleanup")
+    if type(cleanup) == "function" then
+        pcall(cleanup)
+    end
+    publishGlobal("StehpHubCleanup", nil)
+end
+
 local function bootStealAnEgg()
     titleLabel.Text = ("Steph HUB  -  Steal an Egg  v%s"):format(VERSION)
     hintLabel.Text = "RightShift / RightControl toggle menu"
     setStage("loading Steal an Egg hub", 0.24)
-    local source = httpGet("games/steal_an_egg.lua") or fetch("Stehp-Hub.lua", "sae_hub")
+    local source = fetch("games/steal_an_egg.lua", "Steal an Egg hub")
 
     setStage("compiling Steal an Egg hub", 0.55)
     local chunk = compile(source, "sae_hub")
@@ -387,7 +421,12 @@ local function bootStealAnEgg()
     local ok, hub = pcall(chunk)
     publishGlobal("__STEPH_DEFER_SHOW", nil)
     if not ok then
+        cleanupStealAnEgg()
         error("[Steph HUB] Steal an Egg init failed: " .. tostring(hub), 0)
+    end
+    if type(hub) ~= "table" or type(hub.Show) ~= "function" then
+        cleanupStealAnEgg()
+        error("[Steph HUB] Steal an Egg hub published no menu controller", 0)
     end
 
     setStage("ready", 1.0)
@@ -397,8 +436,10 @@ local function bootStealAnEgg()
         loading:Destroy()
     end
 
-    if type(hub) == "table" and type(hub.Show) == "function" then
-        pcall(hub.Show)
+    local shown, showErr = pcall(hub.Show)
+    if not shown then
+        cleanupStealAnEgg()
+        error("[Steph HUB] Steal an Egg menu show failed: " .. tostring(showErr), 0)
     end
 
     return hub
@@ -445,8 +486,8 @@ local function bootPS99()
         end
     end
     local win = type(lib) == "table" and lib.Window or nil
-    if type(win) ~= "table" then
-        error("[Steph HUB] UI loaded but published no window", 0)
+    if type(win) ~= "table" or type(lib.Show) ~= "function" or type(lib.Destroy) ~= "function" then
+        error("[Steph HUB] UI loaded but published an incomplete controller", 0)
     end
 
     setStage("loading UI helpers", 0.48)
@@ -457,19 +498,16 @@ local function bootPS99()
     local ui = builder(lib, engine)
 
     setStage("loading config manager", 0.52)
-    local config = nil
-    local cfgSrc = httpGet("lib/config.lua")
-    if cfgSrc then
-        local okCfg, cfgMod = pcall(compile(cfgSrc, "lib/config"))
-        if okCfg and type(cfgMod) == "function" then
-            local okInst, inst = pcall(cfgMod, engine, ui)
-            if okInst and type(inst) == "table" then
-                config = inst
-                if type(ui.setConfig) == "function" then
-                    ui.setConfig(config)
-                end
-            end
-        end
+    local configModule = compile(fetch("lib/config.lua", "config"), "lib/config")()
+    if type(configModule) ~= "function" then
+        error("[Steph HUB] config manager did not return a builder", 0)
+    end
+    local config = configModule(engine, ui)
+    if type(config) ~= "table" or type(config.load) ~= "function" then
+        error("[Steph HUB] config manager published an incomplete controller", 0)
+    end
+    if type(ui.setConfig) == "function" then
+        ui.setConfig(config)
     end
 
     setStage("loading tab manifest", 0.56)
@@ -482,6 +520,7 @@ local function bootPS99()
     local span = 0.36 / math.max(#manifest, 1)
 
     local unloaded = false
+    local unloadConnection
     local unload
 
     for index, entry in ipairs(manifest) do
@@ -523,6 +562,12 @@ local function bootPS99()
         task.wait()
     end
 
+    if #failed > 0 then
+        pcall(engine.Stop)
+        pcall(lib.Destroy, lib)
+        error("[Steph HUB] PS99 tabs failed: " .. table.concat(failed, ", "), 0)
+    end
+
     setStage("building status tab", 0.94)
     local statusTab = win:CreateTab("Status", "rbxassetid://12130070198")
 
@@ -541,13 +586,6 @@ local function bootPS99()
         Content = ("Steph HUB %s - %d/%d tabs loaded"):format(VERSION, loaded, #manifest),
     })
 
-    if #failed > 0 then
-        statusTab:CreateParagraph({
-            Title = "Failed tabs",
-            Content = table.concat(failed, "\n"),
-        })
-    end
-
     statusTab:CreateButton({
         Name = "Unload Menu",
         Callback = function()
@@ -558,10 +596,12 @@ local function bootPS99()
     unload = function()
         if unloaded then return end
         unloaded = true
-        pcall(engine.Stop)
-        if type(lib.Destroy) == "function" then
-            pcall(lib.Destroy, lib)
+        if unloadConnection then
+            pcall(function() unloadConnection:Disconnect() end)
+            unloadConnection = nil
         end
+        pcall(engine.Stop)
+        pcall(lib.Destroy, lib)
         if loading and loading.Parent then
             loading:Destroy()
         end
@@ -575,36 +615,65 @@ local function bootPS99()
         return n
     end
 
+    local function refreshStatus()
+        local ok, state = pcall(engine.GetStatus)
+        if not ok or type(state) ~= "table" then
+            pcall(function()
+                if type(engineParagraph.Set) == "function" then
+                    engineParagraph.Set({ Title = "Engine", Content = "status error: " .. tostring(state) })
+                end
+            end)
+            return
+        end
+        local notes = state.notes or {}
+        local detail = tostring(notes.profile or notes.heap or "no profile yet")
+        local line = ("world %s  -  profile %s  -  %d feature(s) on  -  %s")
+            :format(tostring(state.world), tostring(state.profile), count(state.enabled), detail)
+        pcall(function()
+            if type(engineParagraph.Set) == "function" then
+                engineParagraph.Set({ Title = "Engine", Content = line })
+            end
+        end)
+
+        local info = state.info or {}
+        local worldLine = ("zone %s  -  best %s  -  %s zone(s) seen  -  rank %s/%s  -  rebirths %s")
+            :format(tostring(info.here or "?"), tostring(info.best or "?"),
+                tostring(info.zones or "?"), tostring(info.rank or "?"),
+                tostring(info.stars or "?"), tostring(info.rebirths or "?"))
+        pcall(function()
+            if type(worldParagraph.Set) == "function" then
+                worldParagraph.Set({ Title = "World", Content = worldLine })
+            end
+        end)
+    end
+
+    refreshStatus()
     task.spawn(function()
         while not unloaded do
-            local ok, state = pcall(engine.GetStatus)
-            if ok and type(state) == "table" then
-                local line = ("world %s  -  profile %s  -  %d feature(s) on")
-                    :format(tostring(state.world), tostring(state.profile), count(state.enabled))
-                pcall(function()
-                    if type(engineParagraph.Set) == "function" then
-                        engineParagraph.Set({ Title = "Engine", Content = line })
-                    end
-                end)
-
-                local info = state.info or {}
-                local worldLine = ("zone %s  -  best %s  -  %s zone(s) seen  -  rank %s/%s  -  rebirths %s")
-                    :format(tostring(info.here or "?"), tostring(info.best or "?"),
-                        tostring(info.zones or "?"), tostring(info.rank or "?"),
-                        tostring(info.stars or "?"), tostring(info.rebirths or "?"))
-                pcall(function()
-                    if type(worldParagraph.Set) == "function" then
-                        worldParagraph.Set({ Title = "World", Content = worldLine })
-                    end
-                end)
-            end
             task.wait(3)
+            if not unloaded then refreshStatus() end
         end
     end)
 
     setStage("applying saved config", 0.98)
-    if config and type(config.load) == "function" then
-        pcall(config.load)
+    local configNote = ""
+    local okLoad, loadedConfig, loadReason = pcall(config.load)
+    if not okLoad then
+        pcall(engine.Stop)
+        pcall(lib.Destroy, lib)
+        error("[Steph HUB] config load failed: " .. tostring(loadedConfig), 0)
+    end
+    if loadedConfig ~= true then
+        local reason = tostring(loadReason or "unknown")
+        if reason ~= "no saved config found" and reason ~= "executor has no readfile" then
+            local okReset, resetResult = pcall(config.reset)
+            if not okReset or resetResult ~= true then
+                pcall(engine.Stop)
+                pcall(lib.Destroy, lib)
+                error("[Steph HUB] config reset failed: " .. tostring(resetResult), 0)
+            end
+            configNote = " Saved config reset: " .. reason .. "."
+        end
     end
 
     setStage("ready", 1.0)
@@ -614,17 +683,21 @@ local function bootPS99()
         loading:Destroy()
     end
 
-    if type(lib.Show) == "function" then
-        pcall(lib.Show, lib)
+    local shown, showErr = pcall(lib.Show, lib)
+    if not shown then
+        unload()
+        error("[Steph HUB] menu show failed: " .. tostring(showErr), 0)
     end
 
-    pcall(lib.CreateNotification, lib, {
-        Title = "Steph HUB | PS99 " .. VERSION,
-        Content = ("%d/%d tabs ready. RightControl toggle, X unload."):format(loaded, #manifest),
-        Duration = 5,
-    })
+    if type(lib.CreateNotification) == "function" then
+        pcall(lib.CreateNotification, lib, {
+            Title = "Steph HUB | PS99 " .. VERSION,
+            Content = ("%d/%d tabs ready. RightControl toggle, X unload.%s"):format(loaded, #manifest, configNote),
+            Duration = 5,
+        })
+    end
 
-    UIS.InputBegan:Connect(function(input, processed)
+    unloadConnection = UIS.InputBegan:Connect(function(input, processed)
         if processed then return end
         if input.KeyCode == Enum.KeyCode.X then
             unload()
@@ -636,7 +709,25 @@ end
 
 ---------------------------------------------------------------------- dispatch
 
+local function cleanupPS99()
+    local engine = hostGlobal("__PS99CLEAN")
+    if type(engine) == "table" and type(engine.Stop) == "function" then
+        pcall(engine.Stop, engine)
+    end
+    local lib = hostGlobal("StephLib")
+    if type(lib) == "table" and type(lib.Destroy) == "function" then
+        pcall(lib.Destroy, lib)
+    end
+    publishGlobal("__PS99CLEAN", nil)
+    publishGlobal("StephLib", nil)
+end
+
 local function handleBootError(err)
+    if gameKey == "sae" then
+        cleanupStealAnEgg()
+    elseif gameKey == "ps99" then
+        cleanupPS99()
+    end
     local message = tostring(err)
     stageLabel.Text = "failed"
     stageLabel.TextColor3 = Color3.fromRGB(238, 128, 128)

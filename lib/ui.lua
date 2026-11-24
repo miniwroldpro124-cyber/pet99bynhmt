@@ -1,3 +1,4 @@
+-- STEPH_COMPONENT: ui_builder 1.1.0
 -- lib/ui.lua
 -- Element factories bound to one library + engine pair. Every module talks to
 -- Steph HUB's UI wrapper through this table, so a module never repeats the SetEnabled plumbing

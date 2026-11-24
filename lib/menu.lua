@@ -1,5 +1,6 @@
+-- STEPH_COMPONENT: steph_ui 2.0.0
 --[[
-    StephUI 1.0 - Clean PS99 Interface (no ZapLib)
+    StephUI 2.0 - Clean PS99 Interface (no ZapLib)
     Drop-in replacement for the old menu library with the exact same surface:
       lib.Window, win:CreateTab, tab:CreateSection, tab:CreateParagraph,
       tab:CreateLabel, tab:CreateToggle, tab:CreateSlider, tab:CreateButton,
