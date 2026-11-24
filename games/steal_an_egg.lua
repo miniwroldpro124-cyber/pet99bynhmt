@@ -1,8 +1,8 @@
 --!nolint
--- STEPH_COMPONENT: sae_hub 1.5.0
+-- STEPH_COMPONENT: sae_hub 1.6.0
 -- Stehp-Hub | Luau / Roblox executor | Steal an Egg + PS99 StephUI Edition
 
-local VERSION = "1.5.0"
+local VERSION = "1.6.0"
 local HUB_NAME = "Steph HUB"
 local CONFIG_FOLDER = "StephHUB_SAE"
 local CONFIG_FILE = CONFIG_FOLDER .. "/config.json"
@@ -42,6 +42,7 @@ local TweenService = game:GetService("TweenService")
 local HttpService = game:GetService("HttpService")
 local PathfindingService = game:GetService("PathfindingService")
 local ContextActionService = game:GetService("ContextActionService")
+local CollectionService = game:GetService("CollectionService")
 local CoreGui = game:GetService("CoreGui")
 local LocalPlayer = Players.LocalPlayer
 
@@ -78,16 +79,17 @@ local THEME = {
 local DEFAULTS = {
     farm = {
         smart = false,
-        hatch = false,
+        hatch = true,
         treadmill = false,
         targetZone = "Auto (Best For My Speed)",
+        priorityMode = "Best Earning & Rarity",
         respectSpeed = true,
         prioritizeRarity = true,
         speedSafetyPct = 90,
         autoPlant = true,
     },
     training = {
-        between = true,
+        between = false,
         only = false,
         seconds = 8.0,
         farmRuns = 3.0,
@@ -213,7 +215,7 @@ if not gameKey then
     error(HUB_NAME .. ": unsupported game (PlaceId " .. tostring(game.PlaceId) .. ")", 0)
 end
 
-local config = { version = 1, games = {} }
+local config = { version = 2, games = {} }
 if type(readfile) == "function" and type(isfile) == "function" then
     local ok, raw = pcall(function()
         if isfile(CONFIG_FILE) then
@@ -231,6 +233,9 @@ if type(readfile) == "function" and type(isfile) == "function" then
     end
 end
 
+local migratedFromV1 = (tonumber(config.version) or 1) < 2
+config.version = 2
+
 if type(config.games) ~= "table" then
     config.games = {}
 end
@@ -240,6 +245,10 @@ if type(config.games[placeKey]) ~= "table" then
 end
 mergeDefaults(config.games[placeKey], DEFAULTS)
 local state = config.games[placeKey]
+if migratedFromV1 and type(state.training) == "table" then
+    state.training.between = false
+    state.training.only = false
+end
 
 local function coerceState(target, defaults)
     for key, value in pairs(defaults) do
@@ -374,6 +383,9 @@ local runtime = {
     speedSummary = "Scanning speed...",
     zoneSummary = "Auto",
     targetEggSummary = "None",
+    stolenCount = 0,
+    plantedCount = 0,
+    hatchedCount = 0,
 }
 
 local function notify(message, _color, title)
@@ -1333,12 +1345,44 @@ do
     local wornTrailId = nil
     local wornTrailHooked = false
     local carryHooked = false
+    local beltHooked = false
     local onTreadmill = false
+    local plotFullUntil = 0
     local plantSkipUntil = {}
     local carrySkipUntil = {}
     local hatchSkipUntil = {}
     local pendingFinish = {}
     local stopped = false
+
+    local function formatCompactNumber(n)
+        n = tonumber(n) or 0
+        local absN = math.abs(n)
+        if absN >= 1e15 then
+            return string.format("%.2fQa", n / 1e15)
+        elseif absN >= 1e12 then
+            return string.format("%.2fT", n / 1e12)
+        elseif absN >= 1e9 then
+            return string.format("%.2fB", n / 1e9)
+        elseif absN >= 1e6 then
+            return string.format("%.2fM", n / 1e6)
+        elseif absN >= 1e3 then
+            return string.format("%.1fK", n / 1e3)
+        end
+        return string.format("%.0f", n)
+    end
+
+    local function isCharacterOnTreadmill()
+        if onTreadmill then
+            return true
+        end
+        local okTag, tagged = pcall(function()
+            return CollectionService:GetTagged("ActiveTreadmill")
+        end)
+        if okTag and type(tagged) == "table" and #tagged > 0 then
+            return true
+        end
+        return false
+    end
 
     -- Triggers an immediate MoveTo across SeparationLine the exact frame CarryChanged fires IsCarrying = true
     local function triggerInstantEscapeSprint(fromPos)
@@ -1388,14 +1432,38 @@ do
                 track(conn)
             end
         end
+
+        if not beltHooked and Remotes and Remotes.Treadmill and Remotes.Treadmill.AssignedBeltShifted then
+            beltHooked = true
+            local okB, connB = pcall(function()
+                return Remotes.Treadmill.AssignedBeltShifted.OnClientEvent:Connect(function(beltId)
+                    onTreadmill = (beltId ~= nil)
+                end)
+            end)
+            if okB and connB then
+                track(connB)
+            end
+        end
     end
 
-    local function leaveTreadmillIfNeeded()
-        if onTreadmill and Remotes and Remotes.Treadmill and Remotes.Treadmill.AskDoff then
+    local function leaveTreadmillIfNeeded(force)
+        if (force or isCharacterOnTreadmill()) and Remotes and Remotes.Treadmill and Remotes.Treadmill.AskDoff then
             pcall(invokeServer, Remotes.Treadmill.AskDoff)
             onTreadmill = false
-            task.wait(0.04)
+            pcall(function()
+                local char = LocalPlayer.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if hum then
+                    if hum.Sit then hum.Sit = false end
+                    hum.Jump = true
+                end
+            end)
+            task.wait(0.05)
         end
+    end
+    Backends.SAE.leaveTreadmill = function()
+        pcall(ensureModules)
+        leaveTreadmillIfNeeded(true)
     end
 
     local function unequipBlockingTools()
@@ -1467,28 +1535,46 @@ do
 
     -- Checks if the player's plot has an available slot BEFORE walking back to base (prevents useless trips when plot is full)
     local function findFreePlotSlot(plot, records)
+        if os.clock() < plotFullUntil then
+            return nil
+        end
         local center = plot and plot.CenterPoint
         local area = plot and plot.PetArea
         if not center or not area then
             return nil
         end
-        -- Check base upgrade capacity if available
+        -- Check base upgrade capacity (Bases.BASES[level].MaxAssets)
         if Bases and Bases.BASES and Save then
             local okP, data = pcall(Save.Await, LocalPlayer)
-            local level = (okP and type(data) == "table" and tonumber(data.BaseUpgradeLevel)) or nil
-            local baseDef = level and Bases.BASES[level]
-            local maxSlots = type(baseDef) == "table" and (tonumber(baseDef.MaxEggs) or tonumber(baseDef.MaxPets) or tonumber(baseDef.Slots)) or nil
+            local level = (okP and type(data) == "table" and tonumber(data.BaseUpgradeLevel)) or 0
+            local baseDef = Bases.BASES[level]
+            local maxSlots = type(baseDef) == "table"
+                and (tonumber(baseDef.MaxAssets) or tonumber(baseDef.MaxEggs) or tonumber(baseDef.MaxPets) or tonumber(baseDef.Slots))
+                or nil
             if maxSlots and maxSlots > 0 then
-                local placedCount = 0
+                local placedEggs = 0
                 for _, rec in pairs(records or {}) do
                     if rec.Placement ~= nil then
-                        placedCount = placedCount + 1
+                        placedEggs = placedEggs + 1
                     end
                 end
-                if placedCount >= maxSlots then
+                local equippedPets = (okP and type(data) == "table" and type(data.EquippedAssets) == "table") and #data.EquippedAssets or 0
+                if placedEggs >= maxSlots or (placedEggs + equippedPets) >= maxSlots then
+                    plotFullUntil = os.clock() + 10.0
                     return nil
                 end
             end
+        end
+        local rayParams
+        if PlacedEggRenderer and type(PlacedEggRenderer.AppendRaycastTargets) == "function" then
+            pcall(function()
+                local targets = { area }
+                PlacedEggRenderer.AppendRaycastTargets(targets, LocalPlayer.UserId)
+                rayParams = RaycastParams.new()
+                rayParams.FilterType = Enum.RaycastFilterType.Include
+                rayParams.FilterDescendantsInstances = targets
+                rayParams.IgnoreWater = true
+            end)
         end
         local spacing = 4
         local columns = math.max(1, math.floor(area.Size.X / spacing))
@@ -1508,10 +1594,17 @@ do
                     break
                 end
             end
+            if not occupied and rayParams then
+                local hit = workspace:Raycast(worldPoint.Position + Vector3.new(0, 12, 0), Vector3.new(0, -20, 0), rayParams)
+                if hit and hit.Instance ~= area then
+                    occupied = true
+                end
+            end
             if not occupied then
                 return localPoint, center.CFrame * localPoint
             end
         end
+        plotFullUntil = os.clock() + 12.0
         return nil
     end
 
@@ -1522,7 +1615,7 @@ do
         local records = EggState.ReadOwnerEggs(LocalPlayer.UserId) or {}
         local chosenLocal, chosenWorldCf = findFreePlotSlot(plot, records)
         if not chosenLocal or not chosenWorldCf then
-            plantSkipUntil[uid] = os.clock() + 10.0
+            plantSkipUntil[uid] = os.clock() + 12.0
             return false
         end
         leaveTreadmillIfNeeded()
@@ -1531,7 +1624,7 @@ do
         end
         local wore, wearError = EggState.WearEggTool(uid)
         if wore ~= true then
-            plantSkipUntil[uid] = os.clock() + 5.0
+            plantSkipUntil[uid] = os.clock() + 8.0
             if wearError then
                 notify("Wear: " .. tostring(wearError), THEME.Amber)
             end
@@ -1541,6 +1634,7 @@ do
         local planted, errText = EggState.PlantEgg(uid, chosenLocal)
         if planted == true then
             plantSkipUntil[uid] = nil
+            runtime.plantedCount = (runtime.plantedCount or 0) + 1
             if PlacedEggRenderer and type(PlacedEggRenderer.Refresh) == "function" then
                 pcall(PlacedEggRenderer.Refresh)
             end
@@ -1548,7 +1642,9 @@ do
             return true
         end
         pcall(EggState.DoffEggTool, uid)
-        plantSkipUntil[uid] = os.clock() + 12.0
+        plantSkipUntil[uid] = os.clock() + 15.0
+        -- Pause all planting attempts for 15s so we don't try 20 other inventory eggs when plot is full
+        plotFullUntil = os.clock() + 15.0
         if errText then
             notify("Plant: " .. tostring(errText), THEME.Amber)
         end
@@ -1779,7 +1875,8 @@ do
         end
 
         local targetMode = tostring(state.farm.targetZone or "Auto (Best For My Speed)")
-        if targetMode == "Auto (Nearest Safe Egg)" or state.farm.prioritizeRarity == false then
+        local priorityMode = tostring(state.farm.priorityMode or "Best Earning & Rarity")
+        if targetMode == "Auto (Nearest Safe Egg)" or priorityMode == "Fastest / Closest Exit" or state.farm.prioritizeRarity == false then
             return -(distFromPlayer + distToExit * 0.6)
         end
 
@@ -1797,7 +1894,18 @@ do
 
         local mutationCount = type(record.Mutations) == "table" and #record.Mutations or 0
         local hasBaseMutation = (type(record.BaseMutation) == "string" and #record.BaseMutation > 0) and 1 or 0
+        local hasParasite = record.HasParasite == true and 1 or 0
         local scaleBonus = math.max(tonumber(record.AssetScale) or 1, 1)
+
+        if priorityMode == "Mutations & Rare First" then
+            local mutScore = (mutationCount * 4000)
+                + (hasBaseMutation * 5000)
+                + (hasParasite * 3500)
+                + (rarityRank * 1800)
+                + (zoneInfo.progression * 1500)
+                + (math.log10(math.max(earningRate, 1) + 1) * 1200)
+            return mutScore - (distToExit * 2.5) - (distFromPlayer * 1.1)
+        end
 
         -- Score favors higher zone tier, higher asset earning rate & rarity, mutations, and shorter escape/travel distance
         local valueScore = (zoneInfo.progression * 2500)
@@ -1805,6 +1913,7 @@ do
             + (rarityRank * 900)
             + (mutationCount * 1200)
             + (hasBaseMutation * 1500)
+            + (hasParasite * 1200)
             + ((scaleBonus - 1) * 400)
 
         return valueScore - (distToExit * 3.2) - (distFromPlayer * 1.4)
@@ -1820,7 +1929,7 @@ do
         local rootPos = root and root.Position or nil
         local now = os.clock()
         local playerSpeedPower, playerWalkSpeed = getPlayerSpeedMetrics()
-        runtime.speedSummary = string.format("Power: %.0f | WalkSpeed: %.1f", playerSpeedPower, playerWalkSpeed)
+        runtime.speedSummary = string.format("Power: %s | WalkSpeed: %.1f", formatCompactNumber(playerSpeedPower), playerWalkSpeed)
 
         local zoneCache = {}
         local function getZone(areaId)
@@ -1886,13 +1995,20 @@ do
         local chosenZone = bestZoneInfo or fallbackZoneInfo
         if chosen and chosenZone then
             runtime.zoneSummary = string.format(
-                "%s (Req Power: %.0f)",
+                "%s (Req: %s)",
                 tostring(chosenZone.areaId),
-                tonumber(chosenZone.reqSpeedPower) or 0
+                formatCompactNumber(tonumber(chosenZone.reqSpeedPower) or 0)
             )
+            local mutTag = ""
+            if type(chosen.BaseMutation) == "string" and #chosen.BaseMutation > 0 then
+                mutTag = " (" .. chosen.BaseMutation .. ")"
+            elseif type(chosen.Mutations) == "table" and #chosen.Mutations > 0 then
+                mutTag = " (" .. tostring(chosen.Mutations[1]) .. ")"
+            end
             runtime.targetEggSummary = string.format(
-                "%s [%s]",
+                "%s%s [%s]",
                 tostring(chosen.AssetCategory or "Egg"),
+                mutTag,
                 tostring(chosen.AreaId or "?")
             )
         end
@@ -1933,6 +2049,25 @@ do
         end
     end
 
+    Backends.SAE.plantOne = function()
+        if stopped then return false end
+        ensureModules()
+        plotFullUntil = 0
+        local now = os.clock()
+        local records = ownedEggs(true)
+        local okPlot, plot = pcall(localPlot)
+        if okPlot and plot and findFreePlotSlot(plot, records) then
+            for uid, record in pairs(records) do
+                if record.Placement == nil and now >= (plantSkipUntil[uid] or 0) then
+                    if plantOwnedEgg(uid) then
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end
+
     Backends.SAE.farmStep = function()
         if stopped then return false end
         ensureModules()
@@ -1942,20 +2077,25 @@ do
         -- 1. If already carrying an egg, sprint immediately across SeparationLine
         local carry = EggState.ReadCarryState() or {}
         if carry.IsCarrying then
-            return deliverCarriedEgg()
+            if deliverCarriedEgg() then
+                runtime.stolenCount = (runtime.stolenCount or 0) + 1
+                return "stolen"
+            end
+            return false
         end
 
         -- 2. Only walk back to plant if autoPlant is ON AND the plot actually has a free slot!
         local now = os.clock()
-        if state.farm.autoPlant ~= false then
+        if state.farm.autoPlant ~= false and now >= plotFullUntil then
             local records = ownedEggs(true)
             local okPlot, plot = pcall(localPlot)
             if okPlot and plot and findFreePlotSlot(plot, records) then
                 for uid, record in pairs(records) do
                     if record.Placement == nil and now >= (plantSkipUntil[uid] or 0) then
                         if plantOwnedEgg(uid) then
-                            return true
+                            return "planted"
                         end
+                        break
                     end
                 end
             end
@@ -1997,7 +2137,11 @@ do
         local carried, carryError = EggState.CarryFieldEgg(field.Uid, firstAreaKey)
         if carried or (EggState.ReadCarryState() or {}).IsCarrying then
             triggerInstantEscapeSprint(fieldCf.Position)
-            return deliverCarriedEgg(fieldCf.Position)
+            if deliverCarriedEgg(fieldCf.Position) then
+                runtime.stolenCount = (runtime.stolenCount or 0) + 1
+                return "stolen"
+            end
+            return false
         end
 
         carrySkipUntil[field.Uid] = os.clock() + 3.5
@@ -2022,6 +2166,8 @@ do
                     local okAct, activated, activateError = pcall(PlacedEggRenderer.ActivateLocalEgg, uid)
                     if okAct and activated == true then
                         pendingFinish[uid] = true
+                        plotFullUntil = 0
+                        runtime.hatchedCount = (runtime.hatchedCount or 0) + 1
                         task.delay(6.0, function()
                             pendingFinish[uid] = nil
                         end)
@@ -2038,6 +2184,8 @@ do
                     local began, errorText, result = EggState.BeginHatch(uid)
                     if began then
                         pendingFinish[uid] = true
+                        plotFullUntil = 0
+                        runtime.hatchedCount = (runtime.hatchedCount or 0) + 1
                         local delay = result == "MechaUpgraded" and 5.0 or 1.1
                         task.delay(delay, function()
                             if not stopped then
@@ -2061,13 +2209,27 @@ do
     end
 
     Backends.SAE.trainingStep = function()
-        if stopped then return false end
+        if stopped or runtime.mode ~= "training" then
+            return false
+        end
         ensureModules()
+        if isCharacterOnTreadmill() then
+            runtime.walkStatus = "Training on Treadmill"
+            return true
+        end
         local plot = localPlot()
         local target = firstDescendant(plot.PlotFolder, "TreadmillBottom")
         local cframe = instanceCFrame(target)
         assert(cframe, "TreadmillBottom is missing")
-        if not walkToCFrame(cframe, 25) then
+        if not walkToCFrame(cframe, 25, {
+            stopRadius = 3.8,
+            abortIf = function()
+                return runtime.mode ~= "training"
+            end,
+        }) then
+            return false
+        end
+        if stopped or runtime.mode ~= "training" then
             return false
         end
         local treadmill = Remotes.Treadmill
@@ -2075,6 +2237,7 @@ do
         local ok = invokeServer(treadmill.AskWearStill) == true
         if ok then
             onTreadmill = true
+            runtime.walkStatus = "Training on Treadmill"
         end
         return ok
     end
@@ -2968,10 +3131,19 @@ local function buildUI(backend)
                 }):Play()
             end
 
+            local prevControl = controlMap[path]
+            local prevApply = prevControl and prevControl._apply
+            local function applyAll(val)
+                apply(val)
+                if type(prevApply) == "function" then
+                    pcall(prevApply, val)
+                end
+            end
+
             local function setValue(value, persist)
                 value = value == true
                 setPath(state, path, value)
-                apply(value)
+                applyAll(value)
                 if callback then
                     pcall(callback, value)
                 end
@@ -2984,7 +3156,11 @@ local function buildUI(backend)
                 setValue(getPath(state, path) ~= true)
             end))
 
-            controlMap[path] = { set = setValue, get = function() return getPath(state, path) end }
+            controlMap[path] = {
+                set = setValue,
+                get = function() return getPath(state, path) end,
+                _apply = applyAll,
+            }
             return controlMap[path]
         end
 
@@ -3297,15 +3473,25 @@ local function buildUI(backend)
     -- Build Tabs (Exact Pet Sim 99 StephUI style)
     -- ========================================================================
     local farmTab = CreateTab("Farm")
-    farmTab:CreateSection("Speed & Zone Smart Egg Stealing")
+    farmTab:CreateSection("Live Speed, Zone & Egg Monitor")
     local farmLiveParagraph = farmTab:CreateParagraph(
         "Smart Speed/Zone Engine + Instant Escape",
         "Checks your SpeedPower against each zone's GuardEscapeSpeeds sign, picks the highest-earning safe egg, and sprints straight across SeparationLine the instant an egg is stolen."
     )
+    runtime.farmLiveParagraph = farmLiveParagraph
+
+    farmTab:CreateSection("Smart Egg Stealing & Zone Selection")
     farmTab:CreateToggle("Enable Smart Egg Farm (Walk to Egg)", "farm.smart", function(value)
         if value then
+            if state.training.only then
+                state.training.only = false
+                refreshControl("training.only")
+            end
             runtime.mode = "farm"
             runtime.runsSinceTraining = 0
+            if backend.leaveTreadmill then
+                task.spawn(backend.leaveTreadmill)
+            end
             notify("Smart Egg Farm started (Speed/Zone + Instant Escape active)", THEME.Success)
         else
             runtime.mode = state.training.only and "training" or "idle"
@@ -3332,19 +3518,82 @@ local function buildUI(backend)
             "Titan Temple",
         }
         farmTab:CreateDropdown("Target Zone", "farm.targetZone", zoneOptions)
+        farmTab:CreateDropdown("Egg Priority Mode", "farm.priorityMode", {
+            "Best Earning & Rarity",
+            "Mutations & Rare First",
+            "Fastest / Closest Exit",
+        })
         farmTab:CreateToggle("Respect Zone Speed Requirement", "farm.respectSpeed")
-        farmTab:CreateToggle("Prioritize High Rarity / Earning Eggs", "farm.prioritizeRarity")
         farmTab:CreateSlider("Zone Speed Safety Margin", "farm.speedSafetyPct", 50, 120, 5, "%")
+    end
+
+    farmTab:CreateSection("Plot Eggs, Hatching & Base Automation")
+    if backend.key == "sae" then
         farmTab:CreateToggle("Auto-Plant Stolen Eggs (Only When Slot Free)", "farm.autoPlant")
     end
     farmTab:CreateToggle("Auto-Hatch Ready Eggs", "farm.hatch")
+    farmTab:CreateToggle("Auto-Equip Best Pets", "economy.autoEquip")
+    farmTab:CreateToggle("Auto-Collect Plot / Away Earnings", "economy.autoCollect")
     farmTab:CreateToggle(
         backend.key == "ps99" and "Auto-Upgrade Pet Slots (Cash)" or "Auto-Upgrade Treadmill (Cash)",
         "farm.treadmill"
     )
-    farmTab:CreateSection("Quick Egg Walk Actions")
+    farmTab:CreateToggle(
+        backend.key == "ps99" and "Auto-Upgrade Egg Slots (Cash)" or "Auto-Upgrade Base Slots (Cash)",
+        "economy.upgradeSlots",
+        function(val)
+            if val then
+                state.economy.running = true
+                refreshControl("economy.running")
+            end
+        end
+    )
+
+    farmTab:CreateSection("Quick Farm Actions (1-Click)")
+    if backend.key == "sae" then
+        farmTab:CreateButton("Steal 1 Best Safe Egg Now", function()
+            task.spawn(function()
+                if backend.leaveTreadmill then pcall(backend.leaveTreadmill) end
+                notify("Running 1 Smart Egg Steal cycle...", THEME.Accent)
+                local ok, res = pcall(backend.farmStep)
+                if ok and res then
+                    notify("Completed action: " .. tostring(res), THEME.Success)
+                else
+                    notify("Steal cycle did not complete", THEME.Amber)
+                end
+            end)
+        end)
+        farmTab:CreateButton("Plant 1 Inventory Egg Now", function()
+            task.spawn(function()
+                if backend.leaveTreadmill then pcall(backend.leaveTreadmill) end
+                notify("Checking plot for free slot & planting...", THEME.Accent)
+                local ok, res = pcall(backend.plantOne)
+                if ok and res then
+                    notify("Planted egg on your plot!", THEME.Success)
+                else
+                    notify("No unplaced egg or plot is currently full", THEME.Amber)
+                end
+            end)
+        end)
+        farmTab:CreateButton("Hatch All Ready Plot Eggs Now", function()
+            task.spawn(function()
+                local count = 0
+                for _ = 1, 12 do
+                    local ok, res = pcall(backend.hatchStep)
+                    if ok and res then
+                        count = count + 1
+                        task.wait(0.15)
+                    else
+                        break
+                    end
+                end
+                notify(count > 0 and ("Triggered hatch on " .. tostring(count) .. " egg(s)") or "No grown eggs ready to hatch yet", THEME.Success)
+            end)
+        end)
+    end
     farmTab:CreateButton("Walk to Best Safe Field Egg", function()
         task.spawn(function()
+            if backend.leaveTreadmill then pcall(backend.leaveTreadmill) end
             notify("Walking to best safe field egg...", THEME.Accent)
             local targetRecord = backend.selectBestFieldEgg and backend.selectBestFieldEgg()
             local cf = targetRecord and (targetRecord.BottomCFrame or targetRecord.BoundsCFrame)
@@ -3363,6 +3612,7 @@ local function buildUI(backend)
     end)
     farmTab:CreateButton("Walk to My Egg Area", function()
         task.spawn(function()
+            if backend.leaveTreadmill then pcall(backend.leaveTreadmill) end
             notify("Walking to your egg area...", THEME.Accent)
             local ok = backend.teleport("My Egg Area")
             if ok then
@@ -3372,23 +3622,50 @@ local function buildUI(backend)
             end
         end)
     end)
-    runtime.farmLiveParagraph = farmLiveParagraph
 
     -- Training Tab
     local trainTab = CreateTab("Training")
     trainTab:CreateSection("Treadmill Speed Progression")
-    trainTab:CreateToggle("Train Between Egg Runs", "training.between")
+    trainTab:CreateParagraph(
+        "Optional Treadmill Training",
+        "Keep both toggles OFF if you want pure non-stop Egg Farming. Enable 'Train Between Egg Runs' only if you want to alternate egg steals with treadmill sessions."
+    )
+    trainTab:CreateToggle("Train Between Egg Runs", "training.between", function(value)
+        if not value and runtime.mode == "training" and not state.training.only then
+            runtime.mode = state.farm.smart and "farm" or "idle"
+            runtime.runsSinceTraining = 0
+            if backend.leaveTreadmill then
+                task.spawn(backend.leaveTreadmill)
+            end
+        end
+    end)
     trainTab:CreateToggle("Training Only Mode", "training.only", function(value)
         if value then
             runtime.mode = "training"
             runtime.trainingUntil = os.clock() + state.training.seconds
         else
             runtime.mode = state.farm.smart and "farm" or "idle"
+            if backend.leaveTreadmill then
+                task.spawn(backend.leaveTreadmill)
+            end
         end
     end)
     trainTab:CreateSlider("Seconds Per Training Session", "training.seconds", 1, 60, 1, "s")
-    trainTab:CreateSlider("Farm Runs Between Training", "training.farmRuns", 1, 20, 1, " runs")
-    trainTab:CreateButton("Stop Farm & Training", function()
+    trainTab:CreateSlider("Stolen Eggs Between Training", "training.farmRuns", 1, 20, 1, " eggs")
+    trainTab:CreateButton("Dismount Treadmill & Stop Training", function()
+        state.training.only = false
+        state.training.between = false
+        runtime.mode = state.farm.smart and "farm" or "idle"
+        runtime.runsSinceTraining = 0
+        refreshControl("training.only")
+        refreshControl("training.between")
+        if backend.leaveTreadmill then
+            task.spawn(backend.leaveTreadmill)
+        end
+        saveConfig()
+        notify("Training disabled & dismounted treadmill", THEME.Success)
+    end)
+    trainTab:CreateButton("Stop Both Farm & Training", function()
         state.farm.smart = false
         state.training.only = false
         state.training.between = false
@@ -3397,6 +3674,9 @@ local function buildUI(backend)
         refreshControl("farm.smart")
         refreshControl("training.only")
         refreshControl("training.between")
+        if backend.leaveTreadmill then
+            task.spawn(backend.leaveTreadmill)
+        end
         saveConfig()
         notify("Farm and training stopped", THEME.Amber)
     end)
@@ -3659,28 +3939,36 @@ local function startScheduler(backend)
             elseif runtime.mode == "training" and now >= runtime.trainingUntil then
                 runtime.mode = "farm"
                 runtime.runsSinceTraining = 0
+                if backend.leaveTreadmill then
+                    task.spawn(backend.leaveTreadmill)
+                end
+            elseif runtime.mode ~= "training" then
+                runtime.mode = "farm"
             end
         else
+            if runtime.mode == "training" and backend.leaveTreadmill then
+                task.spawn(backend.leaveTreadmill)
+            end
             runtime.mode = state.farm.smart and "farm" or "idle"
         end
 
         if runtime.mode == "farm" and state.farm.smart then
             runJob("farm", 0.08, function()
-                local success = backend.farmStep()
-                if success then
+                local outcome = backend.farmStep()
+                if outcome == "stolen" or outcome == true then
                     runtime.runsSinceTraining = runtime.runsSinceTraining + 1
                 end
-                return success
+                return outcome
             end)
         elseif runtime.mode == "training" then
-            runJob("training", 0.25, function()
+            runJob("training", 0.35, function()
                 return backend.trainingStep()
             end)
         end
 
-        if state.economy.running or state.economy.autoCollect then
+        if state.economy.running or state.economy.upgradeSlots or state.economy.autoBuyTrail then
             runJob("economy", 0.9, function()
-                return backend.economyStep(false)
+                return backend.economyStep(true)
             end)
         end
         if state.economy.autoEquip then
@@ -3730,13 +4018,16 @@ local function startScheduler(backend)
             end
             if runtime.farmLiveParagraph then
                 runtime.farmLiveParagraph.Set(
-                    "Live Speed & Target Zone",
+                    "Live Speed, Zone & Egg Monitor  |  " .. modeText,
                     string.format(
-                        "%s\nActive Zone: %s | Target Egg: %s\nMovement: %s",
+                        "%s\nActive Zone: %s | Target Egg: %s\nMovement: %s | Session: %d Stolen • %d Planted • %d Hatched",
                         tostring(runtime.speedSummary or "Power: 16"),
                         tostring(runtime.zoneSummary or tostring(state.farm.targetZone or "Auto")),
                         tostring(runtime.targetEggSummary or "Scanning..."),
-                        tostring(runtime.walkStatus or "Idle")
+                        tostring(runtime.walkStatus or "Idle"),
+                        tonumber(runtime.stolenCount) or 0,
+                        tonumber(runtime.plantedCount) or 0,
+                        tonumber(runtime.hatchedCount) or 0
                     )
                 )
             end
