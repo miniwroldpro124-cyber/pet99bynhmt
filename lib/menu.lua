@@ -1,4 +1,4 @@
--- STEPH_COMPONENT: steph_ui 2.0.0
+-- STEPH_COMPONENT: steph_ui 2.0.1
 --[[
     StephUI 2.0 - Clean PS99 Interface (no ZapLib)
     Drop-in replacement for the old menu library with the exact same surface:
@@ -40,16 +40,6 @@ local function make(className, props, parent)
 end
 
 local function getGuiParent()
-    local okHui, hui = pcall(function()
-        return (gethui and gethui()) or (get_hidden_gui and get_hidden_gui())
-    end)
-    if okHui and typeof(hui) == "Instance" then
-        return hui
-    end
-    local okCore = pcall(function() return CoreGui.Name end)
-    if okCore then
-        return CoreGui
-    end
     return LocalPlayer:WaitForChild("PlayerGui")
 end
 
@@ -69,18 +59,24 @@ end
 local guiParent = getGuiParent()
 do
     local containers = { guiParent }
+    local okHui, hui = pcall(function()
+        return (gethui and gethui()) or (get_hidden_gui and get_hidden_gui())
+    end)
+    if okHui and typeof(hui) == "Instance" and hui ~= guiParent then
+        containers[#containers + 1] = hui
+    end
     local okCore = pcall(function() return CoreGui.Name end)
     if okCore and CoreGui ~= guiParent then containers[#containers + 1] = CoreGui end
-    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
-    if pg and pg ~= guiParent then containers[#containers + 1] = pg end
     local oldNames = { "StephHUB_UI", "StephHUB_AutoRankHUD", "ZapLib", "KaitunZapLib", "ZapLibKey" }
     for _, container in ipairs(containers) do
         for _, name in ipairs(oldNames) do
-            for _, child in ipairs(container:GetChildren()) do
-                if child.Name == name then
-                    pcall(function() child:Destroy() end)
+            pcall(function()
+                local found = container:FindFirstChild(name)
+                while found do
+                    found:Destroy()
+                    found = container:FindFirstChild(name)
                 end
-            end
+            end)
         end
     end
 end

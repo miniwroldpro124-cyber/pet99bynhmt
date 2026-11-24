@@ -1,5 +1,5 @@
--- STEPH_COMPONENT: ps99_engine 3.3.0
-local VERSION = "3.3.0"
+-- STEPH_COMPONENT: ps99_engine 3.3.1
+local VERSION = "3.3.1"
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local UIS = game:GetService("UserInputService")
@@ -7597,16 +7597,6 @@ CFG.RankHUD = {
 }
 
 function CFG.RankHUD.GetParent()
-    local okHui, hui = pcall(function()
-        return (gethui and gethui()) or (get_hidden_gui and get_hidden_gui())
-    end)
-    if okHui and typeof(hui) == "Instance" then return hui end
-    local okCore, cg = pcall(function()
-        local c = game:GetService("CoreGui")
-        local _ = c.Name
-        return c
-    end)
-    if okCore and typeof(cg) == "Instance" then return cg end
     return LocalPlayer:FindFirstChild("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 5)
 end
 
@@ -7616,17 +7606,22 @@ function CFG.RankHUD.Destroy()
         CFG.RankHUD.gui = nil
     end
     local containers = {}
+    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+    if pg then containers[#containers + 1] = pg end
     local okHui, hui = pcall(function()
         return (gethui and gethui()) or (get_hidden_gui and get_hidden_gui())
     end)
     if okHui and typeof(hui) == "Instance" then containers[#containers + 1] = hui end
     local okCore, cg = pcall(function() return game:GetService("CoreGui") end)
     if okCore and typeof(cg) == "Instance" then containers[#containers + 1] = cg end
-    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
-    if pg then containers[#containers + 1] = pg end
     for _, c in ipairs(containers) do
-        local old = c:FindFirstChild("StephHUB_AutoRankHUD")
-        if old then pcall(function() old:Destroy() end) end
+        pcall(function()
+            local old = c:FindFirstChild("StephHUB_AutoRankHUD")
+            while old do
+                old:Destroy()
+                old = c:FindFirstChild("StephHUB_AutoRankHUD")
+            end
+        end)
     end
     CFG.RankHUD.titleLabel = nil
     CFG.RankHUD.metaLabel = nil

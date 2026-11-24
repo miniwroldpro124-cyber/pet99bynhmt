@@ -1,5 +1,5 @@
 --[[
-    Steph HUB v10.3 - Dual-Game Loader (Pet Sim 99 + Steal an Egg)
+    Steph HUB v10.4 - Dual-Game Loader (Pet Sim 99 + Steal an Egg)
     Smooth boot: keeps the menu hidden until every component and config is ready.
     Protected source: no repository links are displayed in the UI or logs.
 ]]
@@ -12,11 +12,11 @@ local Tween = game:GetService("TweenService")
 local player = Players.LocalPlayer
 assert(player, "[Steph HUB] run this on the client")
 
-local VERSION = "10.3"
+local VERSION = "10.4"
 local COMPONENT_VERSIONS = {
-    ["games/steal_an_egg.lua"] = "1.4.0",
-    ["ps99_engine_v3.lua"] = "3.3.0",
-    ["lib/menu.lua"] = "2.0.0",
+    ["games/steal_an_egg.lua"] = "1.4.1",
+    ["ps99_engine_v3.lua"] = "3.3.1",
+    ["lib/menu.lua"] = "2.0.1",
     ["lib/ui.lua"] = "1.1.0",
     ["lib/config.lua"] = "1.1.0",
     ["manifest.lua"] = "1.1.0",
@@ -83,17 +83,35 @@ local gameKey, gameTitle = detectGame()
 local playerGui = player:WaitForChild("PlayerGui", 30)
 assert(playerGui, "[Steph HUB] PlayerGui never appeared")
 
-local function getGuiParent()
-    local okHui, hui = pcall(function()
-        return (gethui and gethui()) or (get_hidden_gui and get_hidden_gui())
+local INITIAL_IDENTITY = 8
+pcall(function()
+    local getter = (type(getthreadidentity) == "function" and getthreadidentity)
+        or (type(getidentity) == "function" and getidentity)
+        or (type(getthreadcontext) == "function" and getthreadcontext)
+        or (type(syn) == "table" and type(syn.get_thread_identity) == "function" and syn.get_thread_identity)
+    if getter then
+        local id = tonumber(getter())
+        if id and id >= 3 then
+            INITIAL_IDENTITY = id
+        end
+    end
+end)
+
+local function elevateThread()
+    pcall(function()
+        local setter = (type(setthreadidentity) == "function" and setthreadidentity)
+            or (type(setidentity) == "function" and setidentity)
+            or (type(setthreadcontext) == "function" and setthreadcontext)
+            or (type(syn) == "table" and type(syn.set_thread_identity) == "function" and syn.set_thread_identity)
+        if setter then
+            setter(INITIAL_IDENTITY)
+        end
     end)
-    if okHui and typeof(hui) == "Instance" then
-        return hui
-    end
-    local okCore, coreGui = pcall(function() return game:GetService("CoreGui") end)
-    if okCore and typeof(coreGui) == "Instance" then
-        return coreGui
-    end
+end
+
+-- Always parent ScreenGuis to PlayerGui so threads whose identity is dropped by game ModuleScript require()
+-- never throw "The current thread cannot access 'Instance' (lacking capability Plugin)".
+local function getGuiParent()
     return playerGui
 end
 
@@ -120,10 +138,12 @@ local function publishGlobal(name, value)
 end
 
 local function destroyOldMenus()
+    elevateThread()
     local prevCleanup = hostGlobal("StehpHubCleanup")
     if type(prevCleanup) == "function" then
         pcall(prevCleanup)
     end
+    elevateThread()
 
     local containers = { playerGui }
     local okCore, coreGui = pcall(function() return game:GetService("CoreGui") end)
@@ -143,11 +163,13 @@ local function destroyOldMenus()
     }
     for _, container in ipairs(containers) do
         for _, guiName in ipairs(oldNames) do
-            for _, child in ipairs(container:GetChildren()) do
-                if child.Name == guiName then
-                    pcall(function() child:Destroy() end)
+            pcall(function()
+                local found = container:FindFirstChild(guiName)
+                while found do
+                    found:Destroy()
+                    found = container:FindFirstChild(guiName)
                 end
-            end
+            end)
         end
     end
 
@@ -158,6 +180,7 @@ local function destroyOldMenus()
         end
         publishGlobal(globalName, nil)
     end
+    elevateThread()
 end
 
 destroyOldMenus()
@@ -723,23 +746,28 @@ local function cleanupPS99()
 end
 
 local function handleBootError(err)
-    if gameKey == "sae" then
-        cleanupStealAnEgg()
-    elseif gameKey == "ps99" then
-        cleanupPS99()
-    end
+    elevateThread()
     local message = tostring(err)
-    stageLabel.Text = "failed"
-    stageLabel.TextColor3 = Color3.fromRGB(238, 128, 128)
-    subtitleLabel.Text = message
-    subtitleLabel.TextColor3 = Color3.fromRGB(238, 128, 128)
-    percentLabel.Text = "--"
     warn("[Steph HUB] " .. message)
+    if gameKey == "sae" then
+        pcall(cleanupStealAnEgg)
+    elseif gameKey == "ps99" then
+        pcall(cleanupPS99)
+    end
+    pcall(function()
+        stageLabel.Text = "failed"
+        stageLabel.TextColor3 = Color3.fromRGB(238, 128, 128)
+        subtitleLabel.Text = message
+        subtitleLabel.TextColor3 = Color3.fromRGB(238, 128, 128)
+        percentLabel.Text = "--"
+    end)
     task.delay(8, function()
-        if loading and loading.Parent then
-            fadeLoader(false)
-            loading:Destroy()
-        end
+        pcall(function()
+            if loading and loading.Parent then
+                fadeLoader(false)
+                loading:Destroy()
+            end
+        end)
     end)
 end
 

@@ -1,8 +1,8 @@
 --!nolint
--- STEPH_COMPONENT: sae_hub 1.4.0
+-- STEPH_COMPONENT: sae_hub 1.4.1
 -- Stehp-Hub | Luau / Roblox executor | Steal an Egg + PS99 StephUI Edition
 
-local VERSION = "1.4.0"
+local VERSION = "1.4.1"
 local HUB_NAME = "Steph HUB"
 local CONFIG_FOLDER = "StephHUB_SAE"
 local CONFIG_FILE = CONFIG_FOLDER .. "/config.json"
@@ -290,6 +290,32 @@ local function saveConfig()
     end)
 end
 
+local INITIAL_IDENTITY = 8
+pcall(function()
+    local getter = (type(getthreadidentity) == "function" and getthreadidentity)
+        or (type(getidentity) == "function" and getidentity)
+        or (type(getthreadcontext) == "function" and getthreadcontext)
+        or (type(syn) == "table" and type(syn.get_thread_identity) == "function" and syn.get_thread_identity)
+    if getter then
+        local id = tonumber(getter())
+        if id and id >= 3 then
+            INITIAL_IDENTITY = id
+        end
+    end
+end)
+
+local function elevateThread()
+    pcall(function()
+        local setter = (type(setthreadidentity) == "function" and setthreadidentity)
+            or (type(setidentity) == "function" and setidentity)
+            or (type(setthreadcontext) == "function" and setthreadcontext)
+            or (type(syn) == "table" and type(syn.set_thread_identity) == "function" and syn.set_thread_identity)
+        if setter then
+            setter(INITIAL_IDENTITY)
+        end
+    end)
+end
+
 local function make(className, props, parent)
     local inst = Instance.new(className)
     for k, v in pairs(props or {}) do
@@ -302,16 +328,6 @@ local function make(className, props, parent)
 end
 
 local function getGuiParent()
-    local okHui, hui = pcall(function()
-        return (type(gethui) == "function" and gethui()) or (type(get_hidden_gui) == "function" and get_hidden_gui())
-    end)
-    if okHui and typeof(hui) == "Instance" then
-        return hui
-    end
-    local okCore = pcall(function() return CoreGui.Name end)
-    if okCore then
-        return CoreGui
-    end
     return LocalPlayer:WaitForChild("PlayerGui")
 end
 
@@ -423,12 +439,19 @@ end
 -- ============================================================================
 -- Helper & Memory / Remote Utilities
 -- ============================================================================
+local requireCache = {}
 local function safeRequire(instance)
     if not instance then
         return nil
     end
+    if requireCache[instance] ~= nil then
+        return requireCache[instance]
+    end
+    elevateThread()
     local ok, result = pcall(require, instance)
-    if ok then
+    elevateThread()
+    if ok and result ~= nil then
+        requireCache[instance] = result
         return result
     end
     return nil
@@ -1277,17 +1300,17 @@ Backends.SAE = finishBackend({
 })
 
 do
-    local EggState = safeRequire(remoteAt("Client/EggState"))
-    local PlacedEggRenderer = safeRequire(remoteAt("Shared/Eggs/PlacedEggRenderer"))
-    local PlotState = safeRequire(remoteAt("Client/PlotState"))
-    local Save = safeRequire(remoteAt("Shared/Save"))
-    local Treadmills = safeRequire(remoteAt("Data/Treadmills"))
-    local Trails = safeRequire(remoteAt("Data/Trails"))
-    local Bases = safeRequire(remoteAt("Data/Bases"))
-    local BaseUpgrade = safeRequire(remoteAt("Client/BaseUpgrade"))
-    local AssetItems = safeRequire(remoteAt("Shared/Util/AssetItems"))
-    local AreaEggSlotIdentity = safeRequire(remoteAt("Shared/Util/AreaEggSlotIdentity"))
-    local Remotes = safeRequire(remoteAt("Shared/Remotes"))
+    local EggState
+    local PlacedEggRenderer
+    local PlotState
+    local Save
+    local Treadmills
+    local Trails
+    local Bases
+    local BaseUpgrade
+    local AssetItems
+    local AreaEggSlotIdentity
+    local Remotes
     local nextOwnedSync = 0
     local nextHatchSync = 0
     local nextWearBest = 0
@@ -2083,20 +2106,29 @@ end
 -- Pet Sim 99 StephUI 2.0 Interface Builder for Steal an Egg
 -- ============================================================================
 local function buildUI(backend)
+    elevateThread()
     local guiParent = getGuiParent()
     do
         local containers = { guiParent }
+        local okHui, hui = pcall(function()
+            return (type(gethui) == "function" and gethui()) or (type(get_hidden_gui) == "function" and get_hidden_gui())
+        end)
+        if okHui and typeof(hui) == "Instance" and hui ~= guiParent then
+            containers[#containers + 1] = hui
+        end
         local okCore = pcall(function() return CoreGui.Name end)
-        if okCore and CoreGui ~= guiParent then containers[#containers + 1] = CoreGui end
-        local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
-        if pg and pg ~= guiParent then containers[#containers + 1] = pg end
+        if okCore and CoreGui ~= guiParent then
+            containers[#containers + 1] = CoreGui
+        end
         for _, container in ipairs(containers) do
             for _, name in ipairs({ "StephHUB_UI", HUB_NAME }) do
-                for _, child in ipairs(container:GetChildren()) do
-                    if child.Name == name then
-                        pcall(function() child:Destroy() end)
+                pcall(function()
+                    local found = container:FindFirstChild(name)
+                    while found do
+                        found:Destroy()
+                        found = container:FindFirstChild(name)
                     end
-                end
+                end)
             end
         end
     end
@@ -2972,8 +3004,17 @@ local function buildUI(backend)
         end
     end)
     if backend.supportsTrails ~= false then
-        ecoTab:CreateDropdown("Cash Trail To Buy", "economy.trail", backend.trails and backend.trails() or { "None" })
+        local trailDropdown = ecoTab:CreateDropdown("Cash Trail To Buy", "economy.trail", { state.economy.trail or "None" })
         ecoTab:CreateToggle("Auto-Buy Selected Trail (Cash)", "economy.autoBuyTrail")
+        task.spawn(function()
+            task.wait(0.2)
+            if backend.trails then
+                local okT, list = pcall(backend.trails)
+                if okT and type(list) == "table" and #list > 0 and trailDropdown and trailDropdown.setOptions then
+                    pcall(trailDropdown.setOptions, list)
+                end
+            end
+        end)
     end
     ecoTab:CreateInput("Keep Minimum Cash Reserve", "economy.reserve", "0", true)
     ecoTab:CreateToggle("Run Selected Auto Economy Actions", "economy.running", function(val)
@@ -3268,11 +3309,13 @@ local backendKey = gameKey == "sae" and "SAE" or "PS99"
 local backend = Backends[backendKey]
 assert(backend, HUB_NAME .. ": backend failed to initialize")
 finishBackend(backend)
-if type(backend.warmup) == "function" then
-    pcall(backend.warmup)
-end
 buildUI(backend)
-pcall(syncAntiCheat)
+task.spawn(function()
+    if type(backend.warmup) == "function" then
+        pcall(backend.warmup)
+    end
+    pcall(syncAntiCheat)
+end)
 startScheduler(backend)
 
 local function showHub()
