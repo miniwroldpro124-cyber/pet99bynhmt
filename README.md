@@ -1,51 +1,30 @@
-# Steph HUB — PS99 (v9.5)
+# Steph HUB — Multi-Game Loader (v9.7)
 
-Modular Pet Simulator 99 script: one loader (`main.lua`), one headless engine (`ps99_engine_v3.lua`), the Steph HUB UI (`lib/menu.lua`), and one file per tab under `modules/*.lua`.
+One universal loader (`main.lua`) automatically detects the current game and boots the matching script:
 
 ```lua
 loadstring(game:HttpGet("https://raw.githubusercontent.com/miniwroldpro124-cyber/pet99bynhmt/main/main.lua"))()
 ```
 
-`RightControl` toggles the Steph HUB window · `X` unloads everything.
+## Supported Games
 
-## Load order
+| Game | Detection | Entry File | Controls |
+|---|---|---|---|
+| **Pet Simulator 99** | `GameId 3317771874` / World 1–4 & Trading Plaza PlaceIds | `games/ps99.lua` | `RightControl` toggle · `X` unload |
+| **Steal an Egg** | `PlaceId 107778070777162` / `GameId 10563114921` | `games/steal_an_egg.lua` | `RightShift` or `RightControl` toggle |
 
-`main.lua` → loading screen → `ps99_engine_v3.lua` → `lib/menu.lua` (Steph HUB UI) → `lib/ui.lua` → `lib/config.lua` → `manifest.lua` → `modules/*.lua` → Status tab.
+If launched in an unrecognized place, `main.lua` displays manual buttons to boot either **Pet Simulator 99** or **Steal an Egg**.
 
 ## Repository layout
 
 | file | role |
 |---|---|
-| `main.lua` | loader — progress bar, engine bootstrap, Steph HUB UI, module loader, Status tab, unload (`X`) |
-| `ps99_engine_v3.lua` | headless farm, teleport (World 1–4 / Zones 1–279), Time Trial (World 4 / Zone 279), enchant mastery, flag/ultimate/TNT, perf & Pumpkin Tycoon engine on `_G.__PS99CLEAN` |
-| `lib/menu.lua` | Steph HUB UI runtime (`_G.StephLib`) |
-| `lib/ui.lua` | UI element helpers bound to `lib` + `engine` |
-| `lib/config.lua` | JSON config auto-save / auto-load / reset (`StephHUB/config.json`) |
-| `manifest.lua` | ordered tab manifest (`Pumpkin Tycoon` → `Config`) |
-| `modules/timetrial.lua` | Auto Time Trial (World 4 / Zone 279 Hollow Veil Castle minigame), daily limit guard, Auto Open Time Trial Chests |
-| `modules/event.lua` | Current Event tab (**Pumpkin Tycoon** Part 1 & Part 2, Movement Mode, Optimizer, Turkey, Wild Pets, Nets, Cocoa, Boosts, Gifts) |
-| `modules/farm.lua` | Fast Auto Farm, Fast Farm v2_Beta, Auto Tap (Real Game Speed), Flag selector + active check, Ultimate, Sprinkler, TNT / TNT Crate, Auto Equip Enchants (Mastery-aware) |
-| `modules/pets.lua` | Pet Speed, Re-route rate, Auto Hatch, Hide Egg FX, Route All Pets, Bulk Join |
-| `modules/world.lua` | World 1–4 & Zone 1–279 teleport (Best Zone, Snap To Centre, Buy Next Zone, Spawn / Void 200 / Fantasy 240 quick teleports) |
-| `modules/player.lua` | Walk Speed, Jump Power, Infinite Jump, Keep Movement |
-| `modules/progress.lua` | Quests, Ranks, Rebirth, Player Upgrades, Pet Equip Slots, Egg Bundle Slots, Forever Free Pack, Auto Equip Enchants |
-| `modules/consume.lua` | Keys, Gift Bags, Fruits, Potions, Free Gifts, Forever Free Pack, Dice |
-| `modules/picks.lua` | Per-item filter selections for keys / bags / fruits / potions / gifts / dice / cards |
-| `modules/cheat.lua` | Chest / Balloon / Lucky Block / Coin Jar / Comet / Meteoric / Pinata / Digsite / Fishing / Claw targets |
-| `modules/machines.lua` | Daycare, Secret Rooms, Treehouse, Fuse, Cards, Shiny Relics, Mailbox |
-| `modules/render.lua` | White Screen (3D render off), Reduce CPU & RAM mode, FPS Cap, Breakable/Pet FX toggles, Anti-AFK |
-| `modules/server.lua` | Auto Server Hop, World 1–4 teleport, All Features Off, Unload, Copy Source URL |
-
-## Engine controller (`_G.__PS99CLEAN`)
-
-| call | use |
-|---|---|
-| `SetEnabled(key, bool)` | toggle any feature; returns `ok, err` |
-| `SetConfig(key, value)` | set numeric or string option (e.g. `SelectedFlag`, `EventMoveMode`) |
-| `AllOff()` | disable every feature |
-| `SetWorld(n)` | switch/teleport World `1`–`4` |
-| `EnterPumpkinTycoon()` | enter Pumpkin Tycoon event |
-| `SetEventOpt(key, val)` / `GetEventOpts()` | configure selected Pumpkin Tycoon merchant items, boosts, and upgrades |
-| `SetPick(category, id, bool)` | filter specific consumable IDs |
-| `GetStatus()` | returns `running, enabled, world, profile, notes, info` |
-| `Stop()` | clean teardown (restores rendering, FPS cap, White Screen, clears loops) |
+| `main.lua` | universal 2-game loader — detects game, downloads & launches `games/ps99.lua` or `games/steal_an_egg.lua` |
+| `games/steal_an_egg.lua` | Steal an Egg hub — Smart Farm, Auto-hatch, Treadmill training & upgrades, Teleports, Economy (slots, Equip Best, trails, earnings, index), Explicit/Auto Selling, Players, Settings (verified against `ReplicatedStorage` client dump) |
+| `games/ps99.lua` | Pet Simulator 99 bootstrap — progress bar, engine, Steph HUB UI, module loader, Status tab, unload (`X`) |
+| `ps99_engine_v3.lua` | PS99 headless farm, teleport (World 1–4 / Zones 1–279), Time Trial (World 4 / Zone 279), enchant mastery, flag/ultimate/TNT, perf & Pumpkin Tycoon engine on `_G.__PS99CLEAN` |
+| `lib/menu.lua` | PS99 Steph HUB UI runtime (`_G.StephLib`) |
+| `lib/ui.lua` | PS99 UI element helpers bound to `lib` + `engine` |
+| `lib/config.lua` | PS99 JSON config auto-save / auto-load / reset (`StephHUB/config.json`) |
+| `manifest.lua` | PS99 ordered tab manifest (`Pumpkin Tycoon` → `Config`) |
+| `modules/*.lua` | PS99 modular tab files (`timetrial`, `event`, `farm`, `pets`, `world`, `player`, `progress`, `consume`, `picks`, `cheat`, `machines`, `render`, `server`) |

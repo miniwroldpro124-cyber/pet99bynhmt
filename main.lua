@@ -348,7 +348,17 @@ local function fetch(relative, label)
     if not body then
         error("[Steph HUB] failed to load component: " .. tostring(label or "module"), 0)
     end
-    return body
+
+    -- Structural fallback if Roblox adds a new sub-place ID
+    local clientFolder = ReplicatedStorage:FindFirstChild("Client")
+    if clientFolder and clientFolder:FindFirstChild("EggState") then
+        return GAMES.sae
+    end
+    local libraryFolder = ReplicatedStorage:FindFirstChild("Library")
+    if libraryFolder and libraryFolder:FindFirstChild("Client") then
+        return GAMES.ps99
+    end
+    return nil
 end
 
 local function compile(source, label)
@@ -356,8 +366,6 @@ local function compile(source, label)
     if not chunk then
         error("[Steph HUB] compile error in " .. tostring(label) .. ": " .. tostring(err), 0)
     end
-    return chunk
-end
 
 local function runChunk(source, label)
     local chunk = compile(source, label)
@@ -656,4 +664,22 @@ if not ok then
     return nil
 end
 
-return result
+local closeBtn = make("TextButton", {
+    Size = UDim2.new(1, -28, 0, 28),
+    Position = UDim2.fromOffset(14, 166),
+    BackgroundColor3 = Color3.fromRGB(37, 30, 54),
+    BorderSizePixel = 0,
+    Font = Enum.Font.Gotham,
+    Text = "Close",
+    TextColor3 = Color3.fromRGB(157, 148, 178),
+    TextSize = 12,
+    AutoButtonColor = false,
+}, card)
+make("UICorner", { CornerRadius = UDim.new(0, 6) }, closeBtn)
+closeBtn.MouseButton1Click:Connect(function()
+    if routerGui and routerGui.Parent then
+        routerGui:Destroy()
+    end
+end)
+
+return nil
