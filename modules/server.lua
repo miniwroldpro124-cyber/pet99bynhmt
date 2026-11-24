@@ -67,21 +67,6 @@ return function(ctx)
         ctx.unload()
     end)
 
-    ui.section(tab, "Source")
-    ui.paragraph(tab, "GitHub", tostring(ctx.repo or ctx.base or ""))
-    ui.button(tab, "Copy Source URL", function()
-        local env = getfenv and getfenv() or {}
-        local text = tostring(ctx.repo or ctx.base or "")
-        for _, name in ipairs({ "setclipboard", "toclipboard" }) do
-            local fn = env[name] or rawget(_G, name)
-            if type(fn) == "function" and pcall(fn, text) then
-                ui.notify("Source", "URL copied.")
-                return
-            end
-        end
-        ui.notify("Source", text)
-    end)
-
     ui.paragraph(tab, "Keys", "X unload. RightControl toggles the Steph HUB window.")
 
     refresh()

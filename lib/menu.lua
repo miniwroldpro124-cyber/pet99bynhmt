@@ -86,6 +86,7 @@ end
 
 local screen = make("ScreenGui", {
     Name = "StephHUB_UI",
+    Enabled = false,
     ResetOnSpawn = false,
     IgnoreGuiInset = true,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
@@ -305,6 +306,27 @@ function lib:CreateNotification(opts)
             card:Destroy()
         end
     end)
+end
+
+function lib:Show()
+    if screen and screen.Parent then
+        screen.Enabled = true
+        mainFrame.Visible = true
+    end
+end
+
+function lib:Hide()
+    if screen and screen.Parent then
+        screen.Enabled = false
+    end
+end
+
+function lib:SetVisible(visible)
+    if visible then
+        lib:Show()
+    else
+        lib:Hide()
+    end
 end
 
 function lib:Destroy()
