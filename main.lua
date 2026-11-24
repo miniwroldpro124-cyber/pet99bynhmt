@@ -1,5 +1,5 @@
 --[[
-    Steph HUB v10.0 - Dual-Game Loader (Pet Sim 99 + Steal an Egg)
+    Steph HUB v10.1 - Dual-Game Loader (Pet Sim 99 + Steal an Egg)
     Smooth boot: keeps the menu hidden until every component and config is ready.
     Protected source: no repository links are displayed in the UI or logs.
 ]]
@@ -12,7 +12,7 @@ local Tween = game:GetService("TweenService")
 local player = Players.LocalPlayer
 assert(player, "[Steph HUB] run this on the client")
 
-local VERSION = "10.0"
+local VERSION = "10.1"
 
 local function _d(bytes)
     local out = table.create(#bytes)
@@ -35,12 +35,15 @@ local MIRROR = _d({
 
 local STEAL_AN_EGG_PLACE_ID = 107778070777162
 local STEAL_AN_EGG_GAME_ID = 10563114921
+local PS99_GAME_ID = 3317771874
 local PS99_PLACE_IDS = {
     [8737899170] = true,
     [16498369169] = true,
     [17503543197] = true,
     [140403681187145] = true,
     [7709344486] = true,
+    [15502339080] = true,
+    [15588442388] = true,
 }
 
 local function detectGame()
@@ -56,7 +59,7 @@ local function detectGame()
         return "sae", "Steal an Egg"
     end
 
-    if PS99_PLACE_IDS[placeId] or name:find("pet sim 99", 1, true) or name:find("pet simulator 99", 1, true) then
+    if PS99_PLACE_IDS[placeId] or gameId == PS99_GAME_ID or name:find("pet sim 99", 1, true) or name:find("pet simulator 99", 1, true) then
         return "ps99", "Pet Sim 99"
     end
     local libraryFolder = ReplicatedStorage:FindFirstChild("Library")
@@ -64,7 +67,7 @@ local function detectGame()
         return "ps99", "Pet Sim 99"
     end
 
-    return nil, "Unsupported Game"
+    return nil, "Select Game"
 end
 
 local gameKey, gameTitle = detectGame()
@@ -128,7 +131,7 @@ local function destroyOldMenus()
 
     local oldNames = {
         "StephHUB_UI", "STEPHHUB_LOADING", "StephHUB_AutoRankHUD",
-        "Steph HUB", "Stehp-Hub", "ZapLib", "KaitunZapLib", "ZapLibKey",
+        "StephHUB_Router", "Steph HUB", "Stehp-Hub", "ZapLib", "KaitunZapLib", "ZapLibKey",
     }
     for _, container in ipairs(containers) do
         for _, guiName in ipairs(oldNames) do
@@ -256,7 +259,7 @@ local hintLabel = make("TextLabel", {
     Position = UDim2.fromOffset(16, 114),
     BackgroundTransparency = 1,
     Font = Enum.Font.Gotham,
-    Text = gameKey == "sae" and "RightShift toggle menu" or "RightControl toggle menu  -  X unload",
+    Text = gameKey == "sae" and "RightShift / RightControl toggle menu" or "RightControl toggle menu  -  X unload",
     TextColor3 = Color3.fromRGB(92, 102, 120),
     TextTransparency = 1,
     TextSize = 11,
@@ -295,7 +298,7 @@ local function setStage(text, value)
     end
     fillTween = Tween:Create(
         fill,
-        TweenInfo.new(0.24, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+        TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
         { Size = UDim2.new(progress, 0, 1, 0) }
     )
     fillTween:Play()
@@ -348,17 +351,7 @@ local function fetch(relative, label)
     if not body then
         error("[Steph HUB] failed to load component: " .. tostring(label or "module"), 0)
     end
-
-    -- Structural fallback if Roblox adds a new sub-place ID
-    local clientFolder = ReplicatedStorage:FindFirstChild("Client")
-    if clientFolder and clientFolder:FindFirstChild("EggState") then
-        return GAMES.sae
-    end
-    local libraryFolder = ReplicatedStorage:FindFirstChild("Library")
-    if libraryFolder and libraryFolder:FindFirstChild("Client") then
-        return GAMES.ps99
-    end
-    return nil
+    return body
 end
 
 local function compile(source, label)
@@ -366,6 +359,8 @@ local function compile(source, label)
     if not chunk then
         error("[Steph HUB] compile error in " .. tostring(label) .. ": " .. tostring(err), 0)
     end
+    return chunk
+end
 
 local function runChunk(source, label)
     local chunk = compile(source, label)
@@ -379,8 +374,10 @@ end
 ------------------------------------------------------------------ Steal an Egg boot
 
 local function bootStealAnEgg()
-    setStage("loading Steal an Egg hub", 0.25)
-    local source = fetch("Stehp-Hub.lua", "sae_hub")
+    titleLabel.Text = ("Steph HUB  -  Steal an Egg  v%s"):format(VERSION)
+    hintLabel.Text = "RightShift / RightControl toggle menu"
+    setStage("loading Steal an Egg hub", 0.24)
+    local source = httpGet("games/steal_an_egg.lua") or fetch("Stehp-Hub.lua", "sae_hub")
 
     setStage("compiling Steal an Egg hub", 0.55)
     local chunk = compile(source, "sae_hub")
@@ -394,7 +391,7 @@ local function bootStealAnEgg()
     end
 
     setStage("ready", 1.0)
-    task.wait(0.28)
+    task.wait(0.26)
     fadeLoader(false)
     if loading and loading.Parent then
         loading:Destroy()
@@ -410,6 +407,8 @@ end
 ------------------------------------------------------------------ Pet Sim 99 boot
 
 local function bootPS99()
+    titleLabel.Text = ("Steph HUB  -  Pet Sim 99  v%s"):format(VERSION)
+    hintLabel.Text = "RightControl toggle menu  -  X unload"
     local engine = hostGlobal("__PS99CLEAN")
     if type(engine) == "table" and type(engine.Stop) == "function" then
         pcall(engine.Stop)
@@ -491,7 +490,7 @@ local function bootPS99()
         if not modSource then
             failed[#failed + 1] = tostring(entry.name) .. " (download)"
         else
-            local chunk, err = loadstring(modSource, "=" .. entry.file)
+            local chunk = loadstring(modSource, "=" .. entry.file)
             if not chunk then
                 failed[#failed + 1] = tostring(entry.name) .. " (compile)"
             else
@@ -609,7 +608,7 @@ local function bootPS99()
     end
 
     setStage("ready", 1.0)
-    task.wait(0.28)
+    task.wait(0.26)
     fadeLoader(false)
     if loading and loading.Parent then
         loading:Destroy()
@@ -637,18 +636,8 @@ end
 
 ---------------------------------------------------------------------- dispatch
 
-local function boot()
-    if gameKey == "sae" then
-        return bootStealAnEgg()
-    elseif gameKey == "ps99" then
-        return bootPS99()
-    end
-    error(("Unsupported game (PlaceId %s)"):format(tostring(game.PlaceId)), 0)
-end
-
-local ok, result = pcall(boot)
-if not ok then
-    local message = tostring(result)
+local function handleBootError(err)
+    local message = tostring(err)
     stageLabel.Text = "failed"
     stageLabel.TextColor3 = Color3.fromRGB(238, 128, 128)
     subtitleLabel.Text = message
@@ -661,25 +650,108 @@ if not ok then
             loading:Destroy()
         end
     end)
-    return nil
 end
 
-local closeBtn = make("TextButton", {
-    Size = UDim2.new(1, -28, 0, 28),
-    Position = UDim2.fromOffset(14, 166),
-    BackgroundColor3 = Color3.fromRGB(37, 30, 54),
-    BorderSizePixel = 0,
-    Font = Enum.Font.Gotham,
-    Text = "Close",
-    TextColor3 = Color3.fromRGB(157, 148, 178),
-    TextSize = 12,
-    AutoButtonColor = false,
-}, card)
-make("UICorner", { CornerRadius = UDim.new(0, 6) }, closeBtn)
-closeBtn.MouseButton1Click:Connect(function()
-    if routerGui and routerGui.Parent then
-        routerGui:Destroy()
-    end
-end)
+local function promptGameChoice()
+    setStage("choose script to run", 0.10)
+    subtitleLabel.Visible = false
+    hintLabel.Visible = false
+    shell.Size = UDim2.fromOffset(390, 174)
 
-return nil
+    local btnHost = make("Frame", {
+        Size = UDim2.new(1, -32, 0, 74),
+        Position = UDim2.fromOffset(16, 88),
+        BackgroundTransparency = 1,
+    }, shell)
+
+    local saeBtn = make("TextButton", {
+        Size = UDim2.new(0.48, 0, 0, 34),
+        Position = UDim2.new(0, 0, 0, 0),
+        BackgroundColor3 = Color3.fromRGB(139, 92, 246),
+        BorderSizePixel = 0,
+        Font = Enum.Font.GothamBold,
+        Text = "Steal an Egg",
+        TextColor3 = Color3.fromRGB(241, 237, 250),
+        TextSize = 13,
+        AutoButtonColor = true,
+    }, btnHost)
+    make("UICorner", { CornerRadius = UDim.new(0, 8) }, saeBtn)
+
+    local ps99Btn = make("TextButton", {
+        Size = UDim2.new(0.48, 0, 0, 34),
+        Position = UDim2.new(0.52, 0, 0, 0),
+        BackgroundColor3 = Color3.fromRGB(42, 84, 102),
+        BorderSizePixel = 0,
+        Font = Enum.Font.GothamBold,
+        Text = "Pet Sim 99",
+        TextColor3 = Color3.fromRGB(232, 238, 248),
+        TextSize = 13,
+        AutoButtonColor = true,
+    }, btnHost)
+    make("UICorner", { CornerRadius = UDim.new(0, 8) }, ps99Btn)
+
+    local closeBtn = make("TextButton", {
+        Size = UDim2.new(1, 0, 0, 28),
+        Position = UDim2.new(0, 0, 0, 42),
+        BackgroundColor3 = Color3.fromRGB(30, 35, 46),
+        BorderSizePixel = 0,
+        Font = Enum.Font.GothamMedium,
+        Text = "Cancel",
+        TextColor3 = Color3.fromRGB(148, 158, 176),
+        TextSize = 12,
+        AutoButtonColor = true,
+    }, btnHost)
+    make("UICorner", { CornerRadius = UDim.new(0, 7) }, closeBtn)
+
+    local chosen = false
+    local function launchChoice(fn)
+        if chosen then return end
+        chosen = true
+        btnHost:Destroy()
+        shell.Size = UDim2.fromOffset(390, 146)
+        subtitleLabel.Visible = true
+        hintLabel.Visible = true
+        task.spawn(function()
+            local ok, res = pcall(fn)
+            if not ok then
+                handleBootError(res)
+            end
+        end)
+    end
+
+    saeBtn.MouseButton1Click:Connect(function()
+        gameKey = "sae"
+        launchChoice(bootStealAnEgg)
+    end)
+    ps99Btn.MouseButton1Click:Connect(function()
+        gameKey = "ps99"
+        launchChoice(bootPS99)
+    end)
+    closeBtn.MouseButton1Click:Connect(function()
+        if chosen then return end
+        chosen = true
+        fadeLoader(false)
+        if loading and loading.Parent then
+            loading:Destroy()
+        end
+    end)
+end
+
+if gameKey == "sae" then
+    local ok, result = pcall(bootStealAnEgg)
+    if not ok then
+        handleBootError(result)
+        return nil
+    end
+    return result
+elseif gameKey == "ps99" then
+    local ok, result = pcall(bootPS99)
+    if not ok then
+        handleBootError(result)
+        return nil
+    end
+    return result
+else
+    promptGameChoice()
+    return nil
+end

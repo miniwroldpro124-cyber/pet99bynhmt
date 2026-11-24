@@ -1,11 +1,12 @@
 --!nolint
 -- Stehp-Hub | Luau / Roblox executor | standalone two-game hub
 
-local VERSION = "1.1.0"
+local VERSION = "1.2.0"
 local HUB_NAME = "Steph HUB"
 local CONFIG_FOLDER = "StephHUB_SAE"
 local CONFIG_FILE = CONFIG_FOLDER .. "/config.json"
 local TOGGLE_KEY = Enum.KeyCode.RightShift
+local TOGGLE_KEY_ALT = Enum.KeyCode.RightControl
 local SAVE_DEBOUNCE = 0.20
 
 local function _d(bytes)
@@ -859,7 +860,7 @@ local function buildUI(backend)
         BorderSizePixel = 0,
         Size = UDim2.new(0, 840, 0, 560),
         Position = UDim2.new(0.5, 0, 0.5, 0),
-        AnchorPoint = UDim2.new(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
     }, gui)
     corner(main, 14)
     stroke(main, C.line, 1)
@@ -1082,7 +1083,7 @@ local function buildUI(backend)
         applySearch(searchBox.Text)
     end)
     local keyConnection = UserInputService.InputBegan:Connect(function(input, processed)
-        if not processed and input.KeyCode == TOGGLE_KEY then
+        if not processed and (input.KeyCode == TOGGLE_KEY or input.KeyCode == TOGGLE_KEY_ALT) then
             gui.Enabled = not gui.Enabled
         end
     end)
@@ -1938,7 +1939,7 @@ Backends.SAE = finishBackend({
         local entries = {}
         if module and module.Directory then
             for id, definition in pairs(module.Directory) do
-                if id ~= "AdminTrail" then
+                if id ~= "AdminTrail" and definition.DisplayInShop ~= false then
                     entries[#entries + 1] = {
                         id = id,
                         name = definition.DisplayName or id,
@@ -1962,15 +1963,24 @@ Backends.SAE = finishBackend({
     teleport = function(destination)
         local PlotState = safeRequire(remoteAt("Client/PlotState"))
         local EggState = safeRequire(remoteAt("Client/EggState"))
+        local Remotes = safeRequire(remoteAt("Shared/Remotes"))
+        if Remotes and Remotes.Treadmill and Remotes.Treadmill.AskDoff then
+            pcall(invokeServer, Remotes.Treadmill.AskDoff)
+        end
         if destination == "Nearest Field Egg" and EggState then
             local snapshot = EggState.ReadFieldEggs()
+            if not snapshot or not snapshot.Records or #snapshot.Records == 0 then
+                pcall(EggState.SyncFieldEggs)
+                snapshot = EggState.ReadFieldEggs()
+            end
             local root = characterRoot()
             local best, bestDistance
-            for _, record in ipairs(snapshot.Records or {}) do
-                if (record.State == "Slot" or record.State == "Dropped") and record.BoundsCFrame then
+            for _, record in ipairs(snapshot and snapshot.Records or {}) do
+                local cf = record.BottomCFrame or record.BoundsCFrame
+                if (record.State == "Slot" or record.State == "Dropped") and cf then
                     local distance = 0
                     if root then
-                        distance = (record.BoundsCFrame.Position - root.Position).Magnitude
+                        distance = (cf.Position - root.Position).Magnitude
                     end
                     if not bestDistance or distance < bestDistance then
                         best, bestDistance = record, distance
@@ -1978,7 +1988,8 @@ Backends.SAE = finishBackend({
                 end
             end
             if best then
-                return teleportToCFrame(best.BoundsCFrame * CFrame.new(0, 3, 0))
+                local cf = best.BottomCFrame or best.BoundsCFrame
+                return teleportToCFrame(cf * CFrame.new(0, 3, 0))
             end
             return false
         end
@@ -2036,11 +2047,18 @@ do
     local Treadmills = safeRequire(remoteAt("Data/Treadmills"))
     local Trails = safeRequire(remoteAt("Data/Trails"))
     local Bases = safeRequire(remoteAt("Data/Bases"))
+    local BaseUpgrade = safeRequire(remoteAt("Client/BaseUpgrade"))
+    local AssetItems = safeRequire(remoteAt("Shared/Util/AssetItems"))
     local AreaEggSlotIdentity = safeRequire(remoteAt("Shared/Util/AreaEggSlotIdentity"))
     local Remotes = safeRequire(remoteAt("Shared/Remotes"))
     local nextOwnedSync = 0
     local nextHatchSync = 0
     local nextWearBest = 0
+    local nextWornTrailSync = 0
+    local wornTrailId = nil
+    local wornTrailHooked = false
+    local onTreadmill = false
+    local plantSkipUntil = {}
     local pendingFinish = {}
     local stopped = false
 
@@ -2052,9 +2070,32 @@ do
         Treadmills = Treadmills or safeRequire(remoteAt("Data/Treadmills"))
         Trails = Trails or safeRequire(remoteAt("Data/Trails"))
         Bases = Bases or safeRequire(remoteAt("Data/Bases"))
+        BaseUpgrade = BaseUpgrade or safeRequire(remoteAt("Client/BaseUpgrade"))
+        AssetItems = AssetItems or safeRequire(remoteAt("Shared/Util/AssetItems"))
         AreaEggSlotIdentity = AreaEggSlotIdentity or safeRequire(remoteAt("Shared/Util/AreaEggSlotIdentity"))
         Remotes = Remotes or safeRequire(remoteAt("Shared/Remotes"))
         assert(EggState and PlotState and Save and Remotes, "Steal an Egg modules are not ready")
+    end
+
+    local function leaveTreadmillIfNeeded()
+        if onTreadmill and Remotes and Remotes.Treadmill and Remotes.Treadmill.AskDoff then
+            pcall(invokeServer, Remotes.Treadmill.AskDoff)
+            onTreadmill = false
+            task.wait(0.08)
+        end
+    end
+
+    local function unequipBlockingTools()
+        local character = LocalPlayer.Character
+        if not character then return end
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if not humanoid then return end
+        for _, child in ipairs(character:GetChildren()) do
+            if child:IsA("Tool") and child:GetAttribute("ItemType") == "MutationConsumable" then
+                pcall(function() humanoid:UnequipTools() end)
+                break
+            end
+        end
     end
 
     local function profile()
@@ -2064,7 +2105,35 @@ do
 
     local function cashValue()
         local data = profile()
-        return parseNumber(data and (data.Cash or data.Money or data.Coins))
+        return parseNumber(data and (data.Money or data.Cash or data.Coins))
+    end
+
+    local function syncWornTrail()
+        if not Remotes or not Remotes.Trailwear then
+            return wornTrailId
+        end
+        if not wornTrailHooked and Remotes.Trailwear.WornTrailShifted then
+            wornTrailHooked = true
+            local okConn, conn = pcall(function()
+                return Remotes.Trailwear.WornTrailShifted.OnClientEvent:Connect(function(plr, trailId)
+                    if plr == LocalPlayer then
+                        wornTrailId = trailId
+                    end
+                end)
+            end)
+            if okConn and conn then
+                cleanupConnections[#cleanupConnections + 1] = conn
+            end
+        end
+        local now = os.clock()
+        if now >= nextWornTrailSync and Remotes.Trailwear.AskWornSnapshot then
+            nextWornTrailSync = now + 8.0
+            local snap = invokeServer(Remotes.Trailwear.AskWornSnapshot)
+            if type(snap) == "table" then
+                wornTrailId = snap[LocalPlayer.UserId] or snap[tostring(LocalPlayer.UserId)]
+            end
+        end
+        return wornTrailId
     end
 
     local function localPlot()
@@ -2078,13 +2147,14 @@ do
         local now = os.clock()
         if sync and now >= nextOwnedSync then
             nextOwnedSync = now + 2.0
-            EggState.SyncOwnedEggs()
+            pcall(EggState.SyncOwnedEggs)
         end
         return EggState.ReadOwnerEggs(LocalPlayer.UserId) or {}
     end
 
     local function plantOwnedEgg(uid)
         assert(type(uid) == "string" and uid ~= "", "Invalid egg UID")
+        leaveTreadmillIfNeeded()
         local plot = localPlot()
         local center = plot.CenterPoint
         local area = plot.PetArea
@@ -2092,6 +2162,7 @@ do
         teleportToCFrame(center.CFrame * CFrame.new(0, 4, 0))
         task.wait(0.12)
         pcall(EggState.WearEggTool, uid)
+        task.wait(0.08)
         local spacing = 4
         local columns = math.max(1, math.floor(area.Size.X / spacing))
         local rows = math.max(1, math.floor(area.Size.Z / spacing))
@@ -2102,7 +2173,7 @@ do
         for index = 0, columns * rows - 1 do
             local column = index % columns
             local row = math.floor(index / columns)
-            local worldPoint = area.CFrame * CFrame.new(originX + column * spacing, area.Size.Y / 2, originZ + row * spacing)
+            local worldPoint = area.CFrame * CFrame.new(originX + column * spacing, area.Size.Y * 0.5, originZ + row * spacing)
             local localPoint = center.CFrame:ToObjectSpace(CFrame.new(worldPoint.Position))
             local occupied = false
             for _, record in pairs(records) do
@@ -2117,22 +2188,55 @@ do
                 break
             end
         end
-        assert(chosen, "No free egg slots were found")
-        local planted, errText = EggState.PlantEgg(uid, chosen)
-        if not planted and errText then
-            notify("Plant failed: " .. tostring(errText), C.amber)
+        if not chosen then
+            plantSkipUntil[uid] = os.clock() + 12.0
+            return false
         end
-        return planted == true
+        local planted, errText = EggState.PlantEgg(uid, chosen)
+        if planted == true then
+            plantSkipUntil[uid] = nil
+            if PlacedEggRenderer and type(PlacedEggRenderer.Refresh) == "function" then
+                pcall(PlacedEggRenderer.Refresh)
+            end
+            pcall(EggState.DoffEggTool, uid)
+            return true
+        end
+        plantSkipUntil[uid] = os.clock() + 10.0
+        if errText then
+            notify("Plant: " .. tostring(errText), C.amber)
+        end
+        return false
+    end
+
+    local function separationExitCFrame()
+        local world = workspace:FindFirstChild("World")
+        local areas = world and world:FindFirstChild("Areas")
+        local sep = areas and areas:FindFirstChild("SeparationLine")
+        if sep and sep:IsA("BasePart") then
+            local root = characterRoot()
+            local exitPos = sep.Position + Vector3.new(0, 3, 0) - sep.CFrame.LookVector.Unit * 4
+            if root then
+                exitPos = Vector3.new(exitPos.X, exitPos.Y, root.Position.Z)
+            end
+            return CFrame.new(exitPos)
+        end
+        return nil
     end
 
     local function deliverCarriedEgg()
+        leaveTreadmillIfNeeded()
         local plot = localPlot()
+        local exitCf = separationExitCFrame()
+        if exitCf then
+            teleportToCFrame(exitCf)
+            task.wait(0.10)
+        end
         local targetCFrame = (plot.CenterPoint and plot.CenterPoint.CFrame) or plot.RespawnPointCFrame
         if not targetCFrame then
             return false
         end
         teleportToCFrame(targetCFrame * CFrame.new(0, 3.5, 0))
-        for _ = 1, 8 do
+        for _ = 1, 10 do
             task.wait(0.12)
             local carry = EggState.ReadCarryState() or {}
             if not carry.IsCarrying then
@@ -2148,11 +2252,12 @@ do
         local snapshot = EggState.ReadFieldEggs()
         local root = characterRoot()
         local best, bestDistance
-        for _, record in ipairs(snapshot.Records or {}) do
-            if (record.State == "Slot" or record.State == "Dropped") and record.BoundsCFrame then
+        for _, record in ipairs(snapshot and snapshot.Records or {}) do
+            local cf = record.BottomCFrame or record.BoundsCFrame
+            if (record.State == "Slot" or record.State == "Dropped") and cf then
                 local distance = 0
                 if root then
-                    distance = (record.BoundsCFrame.Position - root.Position).Magnitude
+                    distance = (cf.Position - root.Position).Magnitude
                 end
                 if not bestDistance or distance < bestDistance then
                     best, bestDistance = record, distance
@@ -2173,17 +2278,21 @@ do
     Backends.SAE.farmStep = function()
         if stopped then return false end
         ensureModules()
+        leaveTreadmillIfNeeded()
+        unequipBlockingTools()
         local carry = EggState.ReadCarryState() or {}
         if carry.IsCarrying then
             return deliverCarriedEgg()
         end
+        local now = os.clock()
         local records = ownedEggs(true)
         for uid, record in pairs(records) do
-            if record.Placement == nil then
-                return plantOwnedEgg(uid)
+            if record.Placement == nil and now >= (plantSkipUntil[uid] or 0) then
+                if plantOwnedEgg(uid) then
+                    return true
+                end
             end
         end
-        local now = os.clock()
         if now >= runtime.nextSync then
             runtime.nextSync = now + 3.0
             pcall(EggState.SyncFieldEggs)
@@ -2196,14 +2305,18 @@ do
                 return false
             end
         end
-        teleportToCFrame(field.BoundsCFrame * CFrame.new(0, 2.5, 0))
+        local fieldCf = field.BottomCFrame or field.BoundsCFrame
+        if not fieldCf then
+            return false
+        end
+        teleportToCFrame(fieldCf * CFrame.new(0, 2.5, 0))
         task.wait(0.15)
         local firstAreaKey
         if AreaEggSlotIdentity and field.Uid and AreaEggSlotIdentity.LooksLikeFirstAreaUid(field.Uid) then
             firstAreaKey = AreaEggSlotIdentity.SlotKey(field.AreaId, field.NestId)
         end
         local carried = EggState.CarryFieldEgg(field.Uid, firstAreaKey)
-        if carried then
+        if carried or (EggState.ReadCarryState() or {}).IsCarrying then
             return deliverCarriedEgg()
         end
         return false
@@ -2215,14 +2328,14 @@ do
         local now = os.clock()
         if now >= nextHatchSync then
             nextHatchSync = now + 1.5
-            EggState.SyncOwnedEggs()
+            pcall(EggState.SyncOwnedEggs)
         end
         local records = ownedEggs(false)
         for uid in pairs(records) do
             if not pendingFinish[uid] and EggState.IsReadyToHatch(uid) then
                 if PlacedEggRenderer and PlacedEggRenderer.ActivateLocalEgg then
-                    local activated = PlacedEggRenderer.ActivateLocalEgg(uid)
-                    if activated then
+                    local okAct, activated = pcall(PlacedEggRenderer.ActivateLocalEgg, uid)
+                    if okAct and activated == true then
                         pendingFinish[uid] = true
                         task.delay(4.5, function()
                             pendingFinish[uid] = nil
@@ -2236,7 +2349,10 @@ do
                     local delay = result == "MechaUpgraded" and 5.0 or 1.1
                     task.delay(delay, function()
                         if not stopped then
-                            EggState.FinishHatch(uid)
+                            pcall(EggState.FinishHatch, uid)
+                            if PlacedEggRenderer and type(PlacedEggRenderer.Refresh) == "function" then
+                                pcall(PlacedEggRenderer.Refresh)
+                            end
                         end
                         pendingFinish[uid] = nil
                     end)
@@ -2260,18 +2376,23 @@ do
         teleportToCFrame(cframe * CFrame.new(0, 4, 0))
         local treadmill = Remotes.Treadmill
         assert(treadmill and treadmill.AskWearStill, "Treadmill remote is missing")
-        return treadmill.AskWearStill:InvokeServer() ~= nil
+        local ok = invokeServer(treadmill.AskWearStill) ~= nil
+        if ok then
+            onTreadmill = true
+        end
+        return ok
     end
 
     Backends.SAE.treadmillStep = function()
         if stopped then return false end
         ensureModules()
         local data = profile()
-        local level = tonumber(data.TreadmillUpgradeLevel) or 0
+        if not data then return false end
+        local level = tonumber(data.TreadmillUpgradeLevel) or 1
         local nextConfig = Treadmills.GetByUpgradeLevel(level + 1)
         if not nextConfig then return false end
         local cash = cashValue()
-        local cost = tonumber(nextConfig.Cost) or tonumber(nextConfig.Price) or math.huge
+        local cost = tonumber(nextConfig.Price) or tonumber(nextConfig.Cost) or math.huge
         if cash - cost < state.economy.reserve then return false end
         local remote = Remotes.Treadmill and Remotes.Treadmill.AskTierRaise
         return invokeServer(remote, nextConfig._id) == true
@@ -2298,9 +2419,15 @@ do
             if Bases.BASES[level + 1] then
                 local ok, cost = pcall(Bases.GetCost, LocalPlayer, level + 1)
                 if ok and cashValue() - (tonumber(cost) or math.huge) >= state.economy.reserve then
+                    if BaseUpgrade and type(BaseUpgrade.PurchaseNextTier) == "function" then
+                        local okUp, resUp = pcall(BaseUpgrade.PurchaseNextTier)
+                        if okUp and resUp then
+                            return true
+                        end
+                    end
                     local homestead = Remotes.Homestead
                     if homestead and homestead.AskBaseTierRaise then
-                        return homestead.AskBaseTierRaise:FireServer()
+                        return fireServer(homestead.AskBaseTierRaise)
                     end
                 end
             end
@@ -2309,18 +2436,23 @@ do
             local id, definition = selectedTrail()
             if id and definition then
                 local inventory = data.TrailInventory or {}
-                local equipped = data.EquippedTrail
+                local equipped = data.EquippedTrail or syncWornTrail()
                 local trailwear = Remotes.Trailwear
                 if not inventory[id] and equipped ~= id then
                     local price = tonumber(definition.Price) or math.huge
                     if cashValue() - price >= state.economy.reserve and trailwear and trailwear.AskPurchase then
-                        local bought = trailwear.AskPurchase:InvokeServer(id)
+                        local bought = invokeServer(trailwear.AskPurchase, id)
                         if bought == true then
+                            wornTrailId = id
                             return true
                         end
                     end
                 elseif inventory[id] and equipped ~= id and trailwear and trailwear.AskChoose then
-                    return trailwear.AskChoose:InvokeServer(id) == true
+                    local chosen = invokeServer(trailwear.AskChoose, id)
+                    if chosen == true then
+                        wornTrailId = id
+                        return true
+                    end
                 end
             end
         end
@@ -2329,11 +2461,11 @@ do
 
     Backends.SAE.equipBest = function()
         if stopped or os.clock() < nextWearBest then return false end
-        nextWearBest = os.clock() + 3.0
+        nextWearBest = os.clock() + 5.5
         ensureModules()
         local haul = Remotes.Haul
         if not haul or not haul.WearBest then return false end
-        return haul.WearBest:InvokeServer() == true
+        return invokeServer(haul.WearBest) == true
     end
 
     Backends.SAE.collectEarnings = function()
@@ -2341,11 +2473,15 @@ do
         ensureModules()
         local away = Remotes.AwayEarnings
         if not away or not away.FetchSummary or not away.AskCollect then return false end
-        local summary = away.FetchSummary:InvokeServer()
-        if type(summary) ~= "table" or (tonumber(summary.ClaimableAmount) or 0) <= 0 then
+        local summary = invokeServer(away.FetchSummary)
+        if type(summary) ~= "table" then
             return false
         end
-        return away.AskCollect:InvokeServer({ Kind = "Claim" }) == true
+        local claimable = tonumber(summary.TotalAmount) or tonumber(summary.ClaimableAmount) or 0
+        if claimable <= 0 then
+            return false
+        end
+        return invokeServer(away.AskCollect, { Kind = "Claim" }) == true
     end
 
     Backends.SAE.claimIndex = function()
@@ -2353,16 +2489,53 @@ do
         ensureModules()
         local codex = Remotes.Codex
         if not codex or not codex.AskRedeemAll then return false end
-        return codex.AskRedeemAll:InvokeServer() == true
+        return invokeServer(codex.AskRedeemAll) == true
     end
 
     Backends.SAE.sellEveryPet = function()
         if stopped or not state.selling.explicit or not state.selling.confirmBulk then return false end
-        if state.selling.bulkPhrase ~= "SELL ALL SATCHEL" then return false end
+        if string.upper(state.selling.bulkPhrase or "") ~= "SELL ALL SATCHEL" then return false end
         ensureModules()
         local petSatchel = Remotes.PetSatchel
-        if not petSatchel or not petSatchel.SellEveryPet then return false end
-        return petSatchel.SellEveryPet:FireServer()
+        if not petSatchel then return false end
+        local data = profile()
+        local inventory = data and data.Inventory
+        if type(inventory) ~= "table" then return false end
+        local equippedSet = {}
+        for _, eqUid in ipairs(data.EquippedAssets or {}) do
+            equippedSet[eqUid] = true
+        end
+        local sellUids = {}
+        for uid, rawItem in pairs(inventory) do
+            if not equippedSet[uid] then
+                local itemData = rawItem
+                if AssetItems and type(AssetItems.Decode) == "function" then
+                    local okDec, decoded = pcall(AssetItems.Decode, rawItem)
+                    if okDec and type(decoded) == "table" then
+                        itemData = decoded
+                    end
+                end
+                if type(itemData) ~= "table" or (itemData.IsFavorite ~= true and itemData.InFuse ~= true) then
+                    sellUids[#sellUids + 1] = uid
+                end
+            end
+        end
+        if #sellUids == 0 then
+            return false
+        end
+        local sent = false
+        if petSatchel.SellEveryPet then
+            sent = fireServer(petSatchel.SellEveryPet, sellUids) or sent
+        end
+        if petSatchel.SellSelection then
+            for i = 1, #sellUids, 512 do
+                local batch = {}
+                local last = math.min(i + 511, #sellUids)
+                table.move(sellUids, i, last, 1, batch)
+                sent = fireServer(petSatchel.SellSelection, { Assets = batch, Eggs = {} }) or sent
+            end
+        end
+        return sent
     end
 
     Backends.SAE.sellStep = function(rarityEnabled)
@@ -2376,7 +2549,7 @@ do
                 wanted[id] = true
             end
         end
-        local current = haul.FetchAutoSell:InvokeServer() or {}
+        local current = invokeServer(haul.FetchAutoSell) or {}
         local changed = false
         for id in pairs(wanted) do
             if current[id] ~= true then changed = true end
@@ -2385,13 +2558,13 @@ do
             if value == true and not wanted[id] then changed = true end
         end
         if not changed then return false end
-        local sent, success = pcall(haul.WriteAutoSell.InvokeServer, haul.WriteAutoSell, wanted)
-        return sent and success == true
+        return invokeServer(haul.WriteAutoSell, wanted) == true
     end
 
     Backends.SAE.stop = function()
         stopped = true
         pendingFinish = {}
+        leaveTreadmillIfNeeded()
     end
 end
 
