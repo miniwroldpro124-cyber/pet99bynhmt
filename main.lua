@@ -1,8 +1,12 @@
 --[[
-    Steph HUB v10.7 - Dual-Game Loader (Pet Sim 99 + Steal an Egg)
+    Steph HUB v10.8 - Dual-Game Loader (Pet Sim 99 + Steal an Egg)
     Smooth boot: keeps the menu hidden until every component and config is ready.
     Protected source: no repository links are displayed in the UI or logs.
 ]]
+
+if not game:IsLoaded() then
+    pcall(function() game.Loaded:Wait() end)
+end
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -10,12 +14,19 @@ local UIS = game:GetService("UserInputService")
 local Tween = game:GetService("TweenService")
 
 local player = Players.LocalPlayer
+if not player then
+    local deadline = os.clock() + 15
+    while not player and os.clock() < deadline do
+        task.wait(0.1)
+        player = Players.LocalPlayer
+    end
+end
 assert(player, "[Steph HUB] run this on the client")
 
-local VERSION = "10.7"
+local VERSION = "10.8"
 local COMPONENT_VERSIONS = {
-    ["games/steal_an_egg.lua"] = "1.7.0",
-    ["ps99_engine_v3.lua"] = "3.4.0",
+    ["games/steal_an_egg.lua"] = "1.8.0",
+    ["ps99_engine_v3.lua"] = "3.4.1",
     ["lib/menu.lua"] = "2.0.1",
     ["lib/ui.lua"] = "1.1.0",
     ["lib/config.lua"] = "1.1.0",
@@ -71,7 +82,10 @@ local function detectGame()
         return "ps99", "Pet Sim 99"
     end
     local libraryFolder = ReplicatedStorage:FindFirstChild("Library")
-    if libraryFolder and libraryFolder:FindFirstChild("Client") then
+    if libraryFolder and (libraryFolder:FindFirstChild("Client") or libraryFolder:FindFirstChild("Directory")) then
+        return "ps99", "Pet Sim 99"
+    end
+    if ReplicatedStorage:FindFirstChild("__DIRECTORY") or workspace:FindFirstChild("__THINGS") then
         return "ps99", "Pet Sim 99"
     end
 
@@ -79,6 +93,13 @@ local function detectGame()
 end
 
 local gameKey, gameTitle = detectGame()
+if not gameKey then
+    local detectDeadline = os.clock() + 2.5
+    while not gameKey and os.clock() < detectDeadline do
+        task.wait(0.15)
+        gameKey, gameTitle = detectGame()
+    end
+end
 
 local playerGui = player:WaitForChild("PlayerGui", 30)
 assert(playerGui, "[Steph HUB] PlayerGui never appeared")
@@ -184,6 +205,63 @@ local function destroyOldMenus()
 end
 
 destroyOldMenus()
+
+----------------------------------------------------------------- UI replay cloak
+
+local CLOAKED_GUIS = {
+    STEPHHUB_LOADING = true,
+    StephHUB_UI = true,
+    StephHUB_AutoRankHUD = true,
+    StephHUB_WhiteScreen = true,
+}
+
+local function isCloakedGuiInstance(inst)
+    if typeof(inst) ~= "Instance" then
+        return false
+    end
+    local ok, cloaked = pcall(function()
+        if CLOAKED_GUIS[inst.Name] then
+            return true
+        end
+        for guiName in pairs(CLOAKED_GUIS) do
+            if inst:FindFirstAncestor(guiName) ~= nil then
+                return true
+            end
+        end
+        return false
+    end)
+    return ok and cloaked == true
+end
+
+local function cloakFromObservabilityRecorder()
+    task.spawn(function()
+        pcall(function()
+            local ug = ReplicatedStorage:FindFirstChild("UserGenerated")
+            local obs = ug and ug:FindFirstChild("Observability")
+            local recMod = obs and obs:FindFirstChild("Recorder")
+            if not recMod or not recMod:IsA("ModuleScript") then
+                return
+            end
+            local ok, recorder = pcall(require, recMod)
+            if not ok or type(recorder) ~= "table" then
+                return
+            end
+            local origInDomain = rawget(recorder, "_inDomain")
+            if type(origInDomain) == "function" and not rawget(recorder, "__stephCloaked") then
+                rawset(recorder, "__stephCloaked", true)
+                rawset(recorder, "_inDomain", function(self, inst, ...)
+                    if isCloakedGuiInstance(inst) then
+                        return false
+                    end
+                    return origInDomain(self, inst, ...)
+                end)
+            end
+        end)
+    end)
+    elevateThread()
+end
+
+cloakFromObservabilityRecorder()
 
 ----------------------------------------------------------------- smooth loader UI
 
@@ -374,21 +452,31 @@ local function validComponent(source, relative)
 end
 
 local function httpGet(relative)
+    local expected = COMPONENT_VERSIONS[relative]
     local query = relative:find("?", 1, true) and "&" or "?"
-    local bust = query .. "v=" .. VERSION .. "&t=" .. SESSION_BUST
+    local bust = query .. "v=" .. VERSION .. (expected and ("&cv=" .. expected) or "") .. "&t=" .. SESSION_BUST
+    local staleRemote = nil
     for _, root in ipairs({ BASE, MIRROR }) do
         local body = getOnce(root .. relative .. bust)
-        if body and validComponent(body, relative) then
-            return body
+        if body then
+            if validComponent(body, relative) then
+                return body
+            elseif not staleRemote and not body:find("AnchorPoint%s*=%s*UDim2") and componentVersion(body) ~= nil then
+                staleRemote = body
+            end
         end
     end
     if type(readfile) == "function" then
-        for _, candidate in ipairs({ relative, "stephhub-src/" .. relative, "pet99/" .. relative }) do
+        for _, candidate in ipairs({ relative, "stephhub-src/" .. relative, "pet99/" .. relative, "pet99bynhmt/" .. relative }) do
             local ok, content = pcall(readfile, candidate)
             if ok and type(content) == "string" and #content > 32 and validComponent(content, relative) then
                 return content
             end
         end
+    end
+    if staleRemote then
+        warn(("[Steph HUB] using cached CDN version (%s) for %s"):format(tostring(componentVersion(staleRemote)), tostring(relative)))
+        return staleRemote
     end
     return nil
 end
@@ -414,6 +502,7 @@ end
 local function runChunk(source, label)
     local chunk = compile(source, label)
     local ok, result = pcall(chunk)
+    elevateThread()
     if not ok then
         error("[Steph HUB] boot error in " .. tostring(label) .. ": " .. tostring(result), 0)
     end

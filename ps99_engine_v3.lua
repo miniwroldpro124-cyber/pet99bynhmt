@@ -1,5 +1,5 @@
--- STEPH_COMPONENT: ps99_engine 3.4.0
-local VERSION = "3.4.0"
+-- STEPH_COMPONENT: ps99_engine 3.4.1
+local VERSION = "3.4.1"
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local UIS = game:GetService("UserInputService")
@@ -525,31 +525,55 @@ local function probeSaveModule(mod)
     return nil
 end
 
-CFG.BootstrapDone = false
-CFG.BootstrapRetryAt = 0
+function CFG.SafeRequire(modScript, onAcquire)
+    if typeof(modScript) ~= "Instance" or not modScript:IsA("ModuleScript") then
+        return nil
+    end
+    local loaded = nil
+    task.spawn(function()
+        local ok, val = pcall(require, modScript)
+        if ok and val ~= nil then
+            loaded = val
+            if type(onAcquire) == "function" then
+                pcall(onAcquire, val)
+            end
+        end
+    end)
+    return loaded
+end
+
+nextAt.bootstrapDone = false
+nextAt.bootstrapRetry = 0
+nextAt.bootstrapping = false
+nextAt.gcScanning = false
+
 function CFG.BootstrapModules()
     local now = os.clock()
-    if now < (CFG.BootstrapRetryAt or 0) then return CFG.BootstrapDone end
+    if nextAt.bootstrapping or now < (nextAt.bootstrapRetry or 0) then
+        return nextAt.bootstrapDone == true
+    end
     local lib = RS:FindFirstChild("Library")
     local cli = lib and lib:FindFirstChild("Client")
     if not cli then
-        CFG.BootstrapRetryAt = now + 1.0
+        nextAt.bootstrapRetry = now + 1.0
         notes.profile = "waiting for Library/Client"
         return false
     end
+    nextAt.bootstrapping = true
     local function tryReq(slot, name)
         if modules[slot] then return end
         local child = cli:FindFirstChild(name)
         if not child then return end
-        local ok, mod = pcall(require, child)
-        if ok and type(mod) == "table" then
-            if slot == "save" then
-                modules.save = mod
-                probeSaveModule(mod)
-            else
-                modules[slot] = mod
+        CFG.SafeRequire(child, function(mod)
+            if type(mod) == "table" then
+                if slot == "save" then
+                    modules.save = mod
+                    probeSaveModule(mod)
+                else
+                    modules[slot] = mod
+                end
             end
-        end
+        end)
     end
     tryReq("save", "Save")
     tryReq("network", "Network")
@@ -581,10 +605,9 @@ function CFG.BootstrapModules()
         local orbCmdsMod = cli:FindFirstChild("OrbCmds")
         local orbChild = orbCmdsMod and orbCmdsMod:FindFirstChild("Orb")
         if orbChild then
-            local okOrb, orbMod = pcall(require, orbChild)
-            if okOrb and type(orbMod) == "table" then
-                modules.orb = orbMod
-            end
+            CFG.SafeRequire(orbChild, function(orbMod)
+                if type(orbMod) == "table" then modules.orb = orbMod end
+            end)
         end
     end
     local utilFolder = lib and lib:FindFirstChild("Util")
@@ -592,129 +615,145 @@ function CFG.BootstrapModules()
         if not modules.eggsUtil then
             local m = utilFolder:FindFirstChild("EggsUtil")
             if m then
-                local okU, mod = pcall(require, m)
-                if okU and type(mod) == "table" then modules.eggsUtil = mod end
+                CFG.SafeRequire(m, function(mod)
+                    if type(mod) == "table" then modules.eggsUtil = mod end
+                end)
             end
         end
         if not modules.ptButtons then
             local m = utilFolder:FindFirstChild("PumpkinTycoonButtons")
             if m then
-                local okU, mod = pcall(require, m)
-                if okU and type(mod) == "table" then modules.ptButtons = mod end
+                CFG.SafeRequire(m, function(mod)
+                    if type(mod) == "table" then modules.ptButtons = mod end
+                end)
             end
         end
     end
     if not modules.directory then
         local dirMod = lib and lib:FindFirstChild("Directory")
         if dirMod then
-            local okD, dir = pcall(require, dirMod)
-            if okD and type(dir) == "table" then
-                modules.directory = dir
-                if type(dir.Quests) == "table" then
-                    for qid, qdef in pairs(dir.Quests) do
-                        if type(qdef) == "table" and not questDirs[qid] then
-                            questDirs[qid] = qdef
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    local liveSave = probeSaveModule(modules.save)
-    if not liveSave and not snap.cache then
-        local fgc = filtergc or env.filtergc
-        if type(fgc) == "function" then
-            pcall(function()
-                local hits = fgc("table", { Keys = { "UnlockedZones", "Rank", "Rebirths" } })
-                if type(hits) == "table" then
-                    for _, tbl in ipairs(hits) do
-                        if looksLikeSave(tbl) then
-                            snap.raw = tbl
-                            snap.at = os.clock()
-                            liveSave = tbl
-                            break
+            CFG.SafeRequire(dirMod, function(dir)
+                if type(dir) == "table" then
+                    modules.directory = dir
+                    if type(dir.Quests) == "table" then
+                        for qid, qdef in pairs(dir.Quests) do
+                            if type(qdef) == "table" and not questDirs[qid] then
+                                questDirs[qid] = qdef
+                            end
                         end
                     end
                 end
             end)
         end
     end
-    if not liveSave and not snap.cache then
-        local senvReader = getsenv or env.getsenv
-        local dumpUpvalues = (debug and debug.getupvalues) or getupvalues or env.getupvalues
-        local readUpvalue = (debug and debug.getupvalue) or getupvalue or env.getupvalue
-        local ps = LocalPlayer:FindFirstChild("PlayerScripts")
-        if ps and type(senvReader) == "function" then
-            for _, scriptName in ipairs({ "Ranks", "GoalsFrontend", "Zone Quests", "NPC Quests" }) do
-                local scr = ps:FindFirstChild(scriptName, true)
-                if scr and scr:IsA("LocalScript") then
-                    local okEnv, senv = pcall(senvReader, scr)
-                    if okEnv and type(senv) == "table" then
-                        for _, fn in pairs(senv) do
-                            if type(fn) == "function" then
-                                if type(dumpUpvalues) == "function" then
-                                    local okU, ups = pcall(dumpUpvalues, fn)
-                                    if okU and type(ups) == "table" then
-                                        for _, up in pairs(ups) do
-                                            if type(up) == "table" then
-                                                if looksLikeSave(up) then
-                                                    snap.raw = up
-                                                    snap.at = os.clock()
-                                                    liveSave = up
-                                                    break
-                                                elseif looksLikeSave(rawget(up, LocalPlayer)) then
-                                                    snap.cache = up
-                                                    liveSave = rawget(up, LocalPlayer)
-                                                    break
-                                                elseif probeSaveModule(up) then
-                                                    modules.save = up
-                                                    liveSave = probeSaveModule(up)
-                                                    break
+
+    local liveSave = probeSaveModule(modules.save)
+    if not liveSave and not snap.cache and not nextAt.gcScanning then
+        nextAt.gcScanning = true
+        task.spawn(function()
+            local foundSave = probeSaveModule(modules.save)
+            if not foundSave and not snap.cache then
+                local fgc = filtergc or env.filtergc
+                if type(fgc) == "function" then
+                    pcall(function()
+                        local hits = fgc("table", { Keys = { "UnlockedZones", "Rank", "Rebirths" } })
+                        if type(hits) == "table" then
+                            for _, tbl in ipairs(hits) do
+                                if looksLikeSave(tbl) then
+                                    snap.raw = tbl
+                                    snap.at = os.clock()
+                                    foundSave = tbl
+                                    break
+                                end
+                            end
+                        end
+                    end)
+                end
+            end
+            if not foundSave and not snap.cache then
+                local senvReader = getsenv or env.getsenv
+                local dumpUpvalues = (debug and debug.getupvalues) or getupvalues or env.getupvalues
+                local readUpvalue = (debug and debug.getupvalue) or getupvalue or env.getupvalue
+                local ps = LocalPlayer:FindFirstChild("PlayerScripts")
+                if ps and type(senvReader) == "function" then
+                    for _, scriptName in ipairs({ "Ranks", "GoalsFrontend", "Zone Quests", "NPC Quests" }) do
+                        local scr = ps:FindFirstChild(scriptName, true)
+                        if scr and scr:IsA("LocalScript") then
+                            local okEnv, senv = pcall(senvReader, scr)
+                            if okEnv and type(senv) == "table" then
+                                for _, fn in pairs(senv) do
+                                    if type(fn) == "function" then
+                                        if type(dumpUpvalues) == "function" then
+                                            local okU, ups = pcall(dumpUpvalues, fn)
+                                            if okU and type(ups) == "table" then
+                                                for _, up in pairs(ups) do
+                                                    if type(up) == "table" then
+                                                        if looksLikeSave(up) then
+                                                            snap.raw = up
+                                                            snap.at = os.clock()
+                                                            foundSave = up
+                                                            break
+                                                        elseif looksLikeSave(rawget(up, LocalPlayer)) then
+                                                            snap.cache = up
+                                                            foundSave = rawget(up, LocalPlayer)
+                                                            break
+                                                        elseif probeSaveModule(up) then
+                                                            modules.save = up
+                                                            foundSave = probeSaveModule(up)
+                                                            break
+                                                        end
+                                                    end
+                                                end
+                                            end
+                                        elseif type(readUpvalue) == "function" then
+                                            for idx = 1, 20 do
+                                                local okU, upName, up = pcall(readUpvalue, fn, idx)
+                                                if not okU or upName == nil then break end
+                                                if type(up) == "table" then
+                                                    if looksLikeSave(up) then
+                                                        snap.raw = up
+                                                        snap.at = os.clock()
+                                                        foundSave = up
+                                                        break
+                                                    elseif looksLikeSave(rawget(up, LocalPlayer)) then
+                                                        snap.cache = up
+                                                        foundSave = rawget(up, LocalPlayer)
+                                                        break
+                                                    elseif probeSaveModule(up) then
+                                                        modules.save = up
+                                                        foundSave = probeSaveModule(up)
+                                                        break
+                                                    end
                                                 end
                                             end
                                         end
-                                    end
-                                elseif type(readUpvalue) == "function" then
-                                    for idx = 1, 20 do
-                                        local okU, upName, up = pcall(readUpvalue, fn, idx)
-                                        if not okU or upName == nil then break end
-                                        if type(up) == "table" then
-                                            if looksLikeSave(up) then
-                                                snap.raw = up
-                                                snap.at = os.clock()
-                                                liveSave = up
-                                                break
-                                            elseif looksLikeSave(rawget(up, LocalPlayer)) then
-                                                snap.cache = up
-                                                liveSave = rawget(up, LocalPlayer)
-                                                break
-                                            elseif probeSaveModule(up) then
-                                                modules.save = up
-                                                liveSave = probeSaveModule(up)
-                                                break
-                                            end
-                                        end
+                                        if foundSave then break end
                                     end
                                 end
-                                if liveSave then break end
                             end
                         end
+                        if foundSave then break end
                     end
                 end
-                if liveSave then break end
             end
-        end
+            if foundSave then
+                nextAt.bootstrapDone = true
+                notes.profile = "live save ready"
+            end
+            nextAt.gcScanning = false
+        end)
     end
 
-    CFG.BootstrapDone = liveSave ~= nil
-    CFG.BootstrapRetryAt = now + (CFG.BootstrapDone and 5.0 or 1.0)
-    if CFG.BootstrapDone then
+    liveSave = liveSave or probeSaveModule(modules.save) or (snap.cache and rawget(snap.cache, LocalPlayer)) or snap.raw
+    nextAt.bootstrapDone = looksLikeSave(liveSave)
+    nextAt.bootstrapRetry = now + (nextAt.bootstrapDone and 5.0 or 1.0)
+    nextAt.bootstrapping = false
+    if nextAt.bootstrapDone then
         notes.profile = "live save ready"
     elseif not modules.save then
         notes.profile = "waiting for Client/Save"
     end
-    return CFG.BootstrapDone
+    return nextAt.bootstrapDone
 end
 
 local function getSave()
@@ -736,8 +775,8 @@ local function getSave()
         end
         if snap.source == "live" then snap.raw = nil end
     end
-    if not CFG.BootstrapDone then
-        CFG.BootstrapModules()
+    if not nextAt.bootstrapDone and not nextAt.bootstrapping and os.clock() >= (nextAt.bootstrapRetry or 0) then
+        task.spawn(CFG.BootstrapModules)
         if snap.cache then
             local ok, value = pcall(function() return rawget(snap.cache, LocalPlayer) or snap.cache[LocalPlayer] end)
             if ok and looksLikeSave(value) then
@@ -952,7 +991,7 @@ local orbBackfillNeeded, heapBackfillsOrbs = false, false
 -- getgc's snap.raw table is usually writable, but a read-only one would abort
 -- the whole scan, so clearing entries is probed once and dropped if refused.
 local heapState = {clear = true, sources = nil, tried = 0}
-local function releaseHeap()
+function CFG.releaseHeap()
     if heapObjects then nextAt.heap = math.min(nextAt.heap, heapStarted + CFG.HeapRetryInterval) end
     heapObjects, heapCursor, heapBackfillsOrbs, heapState.sources = nil, nil, false, nil
 end
@@ -960,7 +999,7 @@ end
 -- Candidate tables come from whichever executor scan APIs exist, in order of
 -- cost. Module return values are only reachable through a GC walk; the module
 -- cache APIs are kept as a fallback for executors without getgc.
-local function nextSource()
+function CFG.nextSource()
     heapState.sources = heapState.sources or {
         function() local gc = getgc or env.getgc; return type(gc) == "function" and gc(true) or nil end,
         function() local gc = getgc or env.getgc; return type(gc) == "function" and gc(false) or nil end,
@@ -981,7 +1020,7 @@ local function nextSource()
     return nil, known
 end
 
-local function inspectObject(object)
+function CFG.inspectObject(object)
     if type(rawget(object, "Get")) == "function"
         and type(rawget(object, "GetSaves")) == "function"
         and (type(rawget(object, "GetStatChangedSignal")) == "function"
@@ -1077,12 +1116,12 @@ local function inspectObject(object)
     end
 end
 
-local function scanHeap()
+function CFG.scanHeap()
     if not heapObjects then
         if os.clock() < nextAt.heap then return end
         heapStarted = os.clock()
         nextAt.heap = heapStarted + CFG.HeapInterval
-        local objects, known = nextSource()
+        local objects, known = CFG.nextSource()
         if not objects then
             notes.heap = known and "scan returned no tables" or "getgc unavailable"
             orbBackfillNeeded = false
@@ -1104,12 +1143,12 @@ local function scanHeap()
         heapState.tried += 1
         local kind = type(object)
         if kind == "table" then
-            inspectObject(object)
+            CFG.inspectObject(object)
             -- An instance's class table carries the module (PlayerPet, Orb, item
             -- classes), so a metatable is a second route to the same functions.
             local meta = getmetatable(object)
             local class = type(meta) == "table" and rawget(meta, "__index")
-            if type(class) == "table" then inspectObject(class) end
+            if type(class) == "table" then CFG.inspectObject(class) end
         elseif kind == "function" then
             -- Executors that return functions only still expose the module
             -- through its upvalues: Save's cache, the Orb class, zone dirs and
@@ -1120,7 +1159,7 @@ local function scanHeap()
                 for index = 1, 24 do
                     local ok, upname, value = pcall(readUpvalue, object, index)
                     if not ok or upname == nil then break end
-                    if type(value) == "table" then inspectObject(value) end
+                    if type(value) == "table" then CFG.inspectObject(value) end
                 end
             else
                 local dumpUpvalues = getupvalues or env.getupvalues
@@ -1128,7 +1167,7 @@ local function scanHeap()
                     local ok, values = pcall(dumpUpvalues, object)
                     if ok and type(values) == "table" then
                         for _, value in pairs(values) do
-                            if type(value) == "table" then inspectObject(value) end
+                            if type(value) == "table" then CFG.inspectObject(value) end
                         end
                     end
                 end
@@ -1144,7 +1183,7 @@ local function scanHeap()
 end
 
 local treeScan
-local function scanTree()
+function CFG.scanTree()
     if not treeScan and os.clock() < nextAt.tree then return end
     treeScan = treeScan or {queue = {RS}, cursor = 1, childIndex = 1, candidates = {}, priorities = {}, ambiguous = {}}
     local scan = treeScan
@@ -1198,7 +1237,7 @@ local function scanTree()
     end
 end
 
-local function needsNative()
+function CFG.needsNative()
     if (enabled.petSpeed or enabled.farm) and not modules.pet and next(petState.records) == nil then return true end
     -- Only Fast Farm insists on the registry: it is the mode that must not
     -- waste taps on NoTapping breakables. Plain tap and Aura keep using the
@@ -1229,10 +1268,10 @@ local function needsNative()
         or enabled.ptAutoFlannelGifts or enabled.ptAutoHuntWild or enabled.ptAutoCatchWild
         or enabled.ptAutoBuyNets or enabled.ptAutoFightTurkey or enabled.ptAutoCatchRare) then return true end
     if enabled.autoRebirth and save and not rebirths[save.Rebirths + 1] then return true end
-    if (enabled.autoQuest or enabled.autoDoQuest) and save and type(save.NPCQuests) == "table" and not CFG.QuestDirScanned then
+    if (enabled.autoQuest or enabled.autoDoQuest) and save and type(save.NPCQuests) == "table" and not nextAt.questDirScanned then
         for id, data in pairs(save.NPCQuests) do
             if type(data) == "table" and data.Completed ~= true and not questDirs[id] then
-                CFG.QuestDirScanned = true
+                nextAt.questDirScanned = true
                 return true
             end
         end
@@ -1240,15 +1279,15 @@ local function needsNative()
     return false
 end
 
-local function discoveryTick()
-    scanTree()
-    if not alive or not needsNative() then releaseHeap(); return end
-    scanHeap()
-    while alive and heapObjects and needsNative() do
+function CFG.discoveryTick()
+    CFG.scanTree()
+    if not alive or not CFG.needsNative() then CFG.releaseHeap(); return end
+    CFG.scanHeap()
+    while alive and heapObjects and CFG.needsNative() do
         task.wait()
-        scanHeap()
+        CFG.scanHeap()
     end
-    if not needsNative() then releaseHeap() end
+    if not CFG.needsNative() then CFG.releaseHeap() end
 end
 
 local function thingsFolder(name)
@@ -1333,7 +1372,7 @@ local function bestInWorld(save, world)
     return best or entry
 end
 
-local function restorePetSpeed()
+function CFG.restorePetSpeed()
     if petState.module and petState.module.CalculateSpeedMultiplier == petState.hook then
         local ok, err = pcall(function() petState.module.CalculateSpeedMultiplier = petState.original end)
         if not ok then warn("[PS99 CLEAN] pet restore: " .. tostring(err)) end
@@ -1390,7 +1429,7 @@ function petState.isAttacking(record)
         or (now - (petState.lastAttackAt or -math.huge) <= 0.9)
 end
 
-local function petTick()
+function CFG.petTick()
     if not modules.pet then
         CFG.BootstrapModules()
     end
@@ -1398,7 +1437,7 @@ local function petTick()
     if not mod and next(petState.records) == nil then notes.pet = "waiting for PlayerPet; " .. notes.heap; return end
     if mod then
         if petState.module and (mod ~= petState.module or petState.module.CalculateSpeedMultiplier ~= petState.hook) then
-            restorePetSpeed()
+            CFG.restorePetSpeed()
             enabled.petSpeed, enabled.farm = false, false
             syncWorkers()
             updateToggles()
@@ -1655,7 +1694,7 @@ function petState.route(targetModel, point, explicitUid)
     return petState.routeSpread(list, point)
 end
 
-local function validTarget(model, point, zone)
+function CFG.validTarget(model, point, zone)
     if not model or not model:IsDescendantOf(workspace) then return false end
     if model:GetAttribute("ManualDamage") or model:GetAttribute("DisableDamage") then return false end
     if model:GetAttribute("BreakableUID") == nil then return false end
@@ -1673,7 +1712,7 @@ local auraTargets, auraCursor = {}, 0
 -- Queries the live BreakableFrontend registry first (fixing the chest class
 -- tracking bug and including special breakable classes), then falls through to
 -- the workspace.Breakables scan if the registry has no eligible hits.
-local function pickTarget(point, zone)
+function CFG.pickTarget(point, zone)
     local registry = modules.breakables
     local byZone, getRecord = registry and registry.AllByZoneAndClass, registry and registry.Get
     if type(byZone) == "function" and type(getRecord) == "function" and zone then
@@ -1749,14 +1788,14 @@ local function pickTarget(point, zone)
             scan.childIndex += 1
             local uid = child:GetAttribute("BreakableUID")
             if uid ~= nil then
-                if validTarget(child, point, zone) or (zone and validTarget(child, point, nil)) then
+                if CFG.validTarget(child, point, zone) or (zone and CFG.validTarget(child, point, nil)) then
                     local childPos = modelPosition(child)
                     if childPos then
                         scan.targets[#scan.targets + 1] = child
                         local length = (childPos - point).Magnitude
                         local isChest = enabled.chestFirst and tostring(child:GetAttribute("BreakableID") or child.Name):lower():find("chest", 1, true) ~= nil
                         if isChest then length = length * 0.25 end
-                        local bestPos = validTarget(scan.best, point, nil) and modelPosition(scan.best) or nil
+                        local bestPos = CFG.validTarget(scan.best, point, nil) and modelPosition(scan.best) or nil
                         local oldDistance = bestPos and (bestPos - point).Magnitude or math.huge
                         if length <= oldDistance then scan.best, scan.uid = child, uid end
                     end
@@ -1770,11 +1809,11 @@ local function pickTarget(point, zone)
     elseif #auraTargets == 0 and #scan.targets > 0 then
         auraTargets = scan.targets
     end
-    if validTarget(scan.best, point, nil) then return scan.best, scan.uid end
+    if CFG.validTarget(scan.best, point, nil) then return scan.best, scan.uid end
     return nil, nil
 end
 
-local function tapTick()
+function CFG.tapTick()
     local now = os.clock()
     local isLegitOnly = enabled.legitTap and not enabled.farm and not enabled.clickAura
     if (enabled.jitter or isLegitOnly) and now < nextAt.tap then return end
@@ -1787,16 +1826,16 @@ local function tapTick()
         petState.attackModel, petState.attackUid = nil, nil
         return
     end
-    if not validTarget(target.model, point, zone) or now - (target.at or 0) >= CFG.TargetRescan then
-        target.model, target.uid = pickTarget(point, zone)
+    if not CFG.validTarget(target.model, point, zone) or now - (target.at or 0) >= CFG.TargetRescan then
+        target.model, target.uid = CFG.pickTarget(point, zone)
         target.at = now
     end
-    if not target.model and now >= (CFG.TapProbeAt or 0) then
-        CFG.TapProbeAt = now + 0.35
+    if not target.model and now >= (nextAt.tapProbe or 0) then
+        nextAt.tapProbe = now + 0.35
         local registry = modules.breakables
         if registry and type(registry.GetAutoTapTarget) == "function" then
             local ok, model = pcall(registry.GetAutoTapTarget)
-            if ok and model and validTarget(model, point, nil) then
+            if ok and model and CFG.validTarget(model, point, nil) then
                 target.model, target.uid = model, model:GetAttribute("BreakableUID")
                 target.at = now
             end
@@ -1807,7 +1846,7 @@ local function tapTick()
     -- Click Aura rotation does not thrash pet teleports 60 times per second.
     local petTargetModel, petTargetUid = petState.attackModel, petState.attackUid
     local dwell = math.max(CFG.PetAttackDwell or 0.45, CFG.PetRouteRate or 0.35)
-    if not validTarget(petTargetModel, point, nil) or (now - (petState.switchAt or 0) >= dwell and target.model and target.model ~= petTargetModel and not enabled.clickAura) then
+    if not CFG.validTarget(petTargetModel, point, nil) or (now - (petState.switchAt or 0) >= dwell and target.model and target.model ~= petTargetModel and not enabled.clickAura) then
         petTargetModel, petTargetUid = target.model, target.uid
         petState.attackModel, petState.attackUid, petState.switchAt = petTargetModel, petTargetUid, now
     end
@@ -1816,12 +1855,12 @@ local function tapTick()
         for _ = 1, #auraTargets do
             auraCursor = auraCursor % #auraTargets + 1
             local candidate = auraTargets[auraCursor]
-            if validTarget(candidate, point, nil) then
+            if CFG.validTarget(candidate, point, nil) then
                 target.model, target.uid = candidate, candidate:GetAttribute("BreakableUID")
                 break
             end
         end
-        if not validTarget(petTargetModel, point, nil) and target.model then
+        if not CFG.validTarget(petTargetModel, point, nil) and target.model then
             petTargetModel, petTargetUid = target.model, target.uid
             petState.attackModel, petState.attackUid, petState.switchAt = petTargetModel, petTargetUid, now
         end
@@ -1850,7 +1889,7 @@ local function tapTick()
             if extras >= CFG.FarmBurst then break end
             auraCursor = auraCursor % #auraTargets + 1
             local candidate = auraTargets[auraCursor]
-            if candidate ~= primaryModel and candidate ~= target.model and validTarget(candidate, point, nil) then
+            if candidate ~= primaryModel and candidate ~= target.model and CFG.validTarget(candidate, point, nil) then
                 local uid = candidate:GetAttribute("BreakableUID")
                 if uid then
                     fire("Breakables_PlayerDealDamage", uid)
@@ -1872,7 +1911,7 @@ local function tapTick()
     notes.tap = ok and ((enabled.clickAura and "aura: " or "tapping ") .. tostring(primaryUid)) or tostring(message)
 end
 
-local function restoreOrbCapture()
+function CFG.restoreOrbCapture()
     if orbState.module then
         if orbState.module.new == orbState.hook and orbState.original then
             local ok, err = pcall(function() orbState.module.new = orbState.original end)
@@ -1894,7 +1933,7 @@ local function restoreOrbCapture()
     orbState.origPickup, orbState.origCollect = nil, nil
 end
 
-local function ensureOrbModule()
+function CFG.ensureOrbModule()
     if modules.orb then return modules.orb end
     local lib = RS:FindFirstChild("Library")
     local cli = lib and lib:FindFirstChild("Client")
@@ -1910,8 +1949,8 @@ local function ensureOrbModule()
     return nil
 end
 
-local function vacuumTick()
-    local mod = ensureOrbModule()
+function CFG.vacuumTick()
+    local mod = CFG.ensureOrbModule()
     if mod then
         if orbState.origPickup == nil then
             orbState.origPickup = tonumber(mod.DefaultPickupDistance) or 20
@@ -1998,7 +2037,7 @@ local function vacuumTick()
 end
 
 -- Finds the zone folder in Directory cache or workspace.Map / Map2 / Map3 / Map4 (Zones 1-279+).
-local function findZoneFolder(id)
+function CFG.findZoneFolder(id)
     local num = zoneNumbers[id]
     local zoneEntry = num and zones[num]
     local def = zoneEntry and zoneEntry.definition
@@ -2034,7 +2073,7 @@ local function findZoneFolder(id)
     return nil
 end
 
-local function zoneWorldNumber(id)
+function CFG.zoneWorldNumber(id)
     local num = zoneNumbers[id]
     local def = num and zones[num] and zones[num].definition
     if type(def) == "table" and type(def.WorldNumber) == "number" then
@@ -2048,7 +2087,7 @@ local function zoneWorldNumber(id)
     return 1
 end
 
-local function detectActiveWorld()
+function CFG.detectActiveWorld()
     for w = CFG.WorldCount, 2, -1 do
         if workspace:FindFirstChild("Map" .. w) then return w end
     end
@@ -2101,9 +2140,9 @@ end
 -- Priority 1: Live breakable items / INTERACT.BREAK_ZONES middle (strictly inside breakable bounds; shifts slightly toward an egg ONLY if still inside the breakables).
 -- Priority 2: Live breakables centroid (exact = true).
 -- Priority 3: __FAKE_GROUND / PERSISTENT.Teleport fallback (exact = false, triggers streaming).
-local function zoneCenter(id, preferEgg)
+function CFG.zoneCenter(id, preferEgg)
     if type(id) ~= "string" then return nil, false end
-    local folder = findZoneFolder(id)
+    local folder = CFG.findZoneFolder(id)
     local liveSum, liveCount, liveMaxY = Vector3.zero, 0, -math.huge
     local registry = modules.breakables
     if registry and type(registry.AllByZoneAndClass) == "function" then
@@ -2199,7 +2238,7 @@ local function zoneCenter(id, preferEgg)
     return nil, false
 end
 
-local function snapTo(point)
+function CFG.snapTo(point)
     if not point then return false end
     local character = LocalPlayer.Character
     local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
@@ -2249,12 +2288,12 @@ local function snapTo(point)
     return ok
 end
 
-local WORLD_FALLBACK_SPAWN = {
+CFG.WORLD_FALLBACK_SPAWN = {
     [3] = Vector3.new(-10221.390625, -2.1, -7376.2900390625),
     [4] = Vector3.new(-15916.173828125, 50.972, -387.6759948730469),
 }
 
-local function leaveActiveInstance()
+function CFG.leaveActiveInstance()
     local inst = modules.instancing
     local inInst = false
     if inst then
@@ -2283,17 +2322,17 @@ local function leaveActiveInstance()
     return false
 end
 
-local legitTeleDone = {}
+CFG.legitTeleDone = {}
 
 -- Island teleport (supports Zones 1-279 / World 1-4) with 2 modes:
 --   "Instant" : direct CFrame snap to INTERACT.BREAK_ZONES middle (falls back to server tp if streamed out)
 --   "Legit"   : uses Teleports_RequestTeleport first, waits for zone stream, then moves/snaps to middle
 -- Both modes always finish in the exact middle of the farm area.
-local function teleportToIslandMiddle(id, modeOverride)
+function CFG.teleportToIslandMiddle(id, modeOverride)
     if type(id) ~= "string" or #id == 0 then return false, "invalid zone id" end
-    leaveActiveInstance()
-    local hereW = detectActiveWorld()
-    local targetW = zoneWorldNumber(id)
+    CFG.leaveActiveInstance()
+    local hereW = CFG.detectActiveWorld()
+    local targetW = CFG.zoneWorldNumber(id)
     if targetW ~= hereW and targetW >= 1 and targetW <= CFG.WorldCount then
         local remoteName = "World" .. tostring(targetW) .. "Teleport"
         local ok, message = invoke(remoteName)
@@ -2303,7 +2342,7 @@ local function teleportToIslandMiddle(id, modeOverride)
     local mode = tostring(modeOverride or CFG.TeleMode or "Instant")
     local isLegit = mode:lower():find("legit", 1, true) ~= nil
     local zoneNum = zoneNumbers[id]
-    local isFirstLegit200 = zoneNum and zoneNum >= 200 and not legitTeleDone[id]
+    local isFirstLegit200 = zoneNum and zoneNum >= 200 and not CFG.legitTeleDone[id]
 
     local function requestServerTele()
         local inst = modules.instancing
@@ -2335,7 +2374,7 @@ local function teleportToIslandMiddle(id, modeOverride)
                 task.wait(0.1)
             end
         end
-        return snapTo(targetPos)
+        return CFG.snapTo(targetPos)
     end
 
     if isLegit then
@@ -2343,26 +2382,26 @@ local function teleportToIslandMiddle(id, modeOverride)
         if not alreadyInZone then
             local okTp = requestServerTele()
             if okTp then
-                if zoneNum and zoneNum >= 200 then legitTeleDone[id] = true end
+                if zoneNum and zoneNum >= 200 then CFG.legitTeleDone[id] = true end
                 local deadline = os.clock() + 2.5
-                local centre, exact = zoneCenter(id)
+                local centre, exact = CFG.zoneCenter(id)
                 while not exact and os.clock() < deadline and alive do
                     task.wait(0.2)
-                    centre, exact = zoneCenter(id)
+                    centre, exact = CFG.zoneCenter(id)
                 end
                 if centre then
                     if isLegit then
                         moveMiddleLegit(centre)
                     else
-                        snapTo(centre)
+                        CFG.snapTo(centre)
                     end
                     task.delay(0.4, function()
                         if not alive then return end
-                        local refined, isExact = zoneCenter(id)
+                        local refined, isExact = CFG.zoneCenter(id)
                         if refined and (isExact or enabled.teleCenter or enabled.zoneTele) then
                             local cur = position()
                             if not cur or (Vector3.new(cur.X, 0, cur.Z) - Vector3.new(refined.X, 0, refined.Z)).Magnitude > 10 then
-                                if isLegit then moveMiddleLegit(refined) else snapTo(refined) end
+                                if isLegit then moveMiddleLegit(refined) else CFG.snapTo(refined) end
                             end
                         end
                     end)
@@ -2371,25 +2410,25 @@ local function teleportToIslandMiddle(id, modeOverride)
                 return true, "legit teleported to " .. id .. " (via server)"
             end
         else
-            local centre = zoneCenter(id)
+            local centre = CFG.zoneCenter(id)
             if centre then
-                local okM = isLegit and moveMiddleLegit(centre) or snapTo(centre)
+                local okM = isLegit and moveMiddleLegit(centre) or CFG.snapTo(centre)
                 return okM, okM and ("centered in middle of " .. id .. (isLegit and " (legit)" or "")) or "character unavailable"
             end
         end
     end
 
-    local centre, exact = zoneCenter(id)
+    local centre, exact = CFG.zoneCenter(id)
     local myPosNow = position()
     local tooFarOrBig = (zoneNum and zoneNum >= 200)
         and (not centre or not exact or (myPosNow and centre and (myPosNow - centre).Magnitude > 900))
     if not centre or tooFarOrBig then
         -- Big/streamed-out island (e.g. Zone 200+): force server teleport + streaming, then wait for exact farm area center
         if requestServerTele() then
-            if zoneNum and zoneNum >= 200 then legitTeleDone[id] = true end
+            if zoneNum and zoneNum >= 200 then CFG.legitTeleDone[id] = true end
             local deadline = os.clock() + 3.0
             while alive and os.clock() < deadline do
-                centre, exact = zoneCenter(id)
+                centre, exact = CFG.zoneCenter(id)
                 if centre and exact then break end
                 task.wait(0.2)
             end
@@ -2399,32 +2438,32 @@ local function teleportToIslandMiddle(id, modeOverride)
         end
     end
     if not centre then
-        local fallback = WORLD_FALLBACK_SPAWN[targetW]
+        local fallback = CFG.WORLD_FALLBACK_SPAWN[targetW]
         if fallback and (id == "Void Spawn" or id == "Fantasy Spawn") then
             pcall(fire, "RequestStreaming", fallback)
-            local okSnap = snapTo(fallback)
+            local okSnap = CFG.snapTo(fallback)
             if okSnap then
                 task.delay(0.45, function()
                     if not alive then return end
-                    local refined = zoneCenter(id)
-                    if refined then snapTo(refined) end
+                    local refined = CFG.zoneCenter(id)
+                    if refined then CFG.snapTo(refined) end
                 end)
                 return true, "teleported to " .. id .. " (fallback spawn)"
             end
         end
         return false, "island center not loaded: " .. tostring(id)
     end
-    local ok = isLegit and moveMiddleLegit(centre) or snapTo(centre)
+    local ok = isLegit and moveMiddleLegit(centre) or CFG.snapTo(centre)
     if ok then
         local delays = exact and { 0.25 } or { 0.25, 0.65, 1.25 }
         for _, waitSec in ipairs(delays) do
             task.delay(waitSec, function()
                 if not alive then return end
-                local refined, isExact = zoneCenter(id)
+                local refined, isExact = CFG.zoneCenter(id)
                 if refined and (isExact or enabled.teleCenter or enabled.zoneTele) then
                     local cur = position()
                     if not cur or (Vector3.new(cur.X, 0, cur.Z) - Vector3.new(refined.X, 0, refined.Z)).Magnitude > 10 then
-                        if isLegit then moveMiddleLegit(refined) else snapTo(refined) end
+                        if isLegit then moveMiddleLegit(refined) else CFG.snapTo(refined) end
                     end
                 end
             end)
@@ -2433,7 +2472,7 @@ local function teleportToIslandMiddle(id, modeOverride)
     return ok, ok and ("teleported to middle of " .. id .. " (" .. (isLegit and "legit" or "instant") .. ")") or "character unavailable"
 end
 
-local function teleTick()
+function CFG.teleTick()
     if CFG.TimeTrial and CFG.TimeTrial.BlocksOtherTele() then
         notes.tele = "paused (Time Trial active)"
         return
@@ -2482,19 +2521,19 @@ local function teleTick()
         if not best then notes.tele = "waiting for zone map"; return end
         id = zones[best].id
     end
-    local hereW = detectActiveWorld()
-    local targetW = zoneWorldNumber(id)
+    local hereW = CFG.detectActiveWorld()
+    local targetW = CFG.zoneWorldNumber(id)
     if targetW ~= hereW then
         nextAt.tele = now + CFG.WorldBackoff
         if enabled.worldAdvance or enabled.worldTele then
-            local ok, msg = teleportToIslandMiddle(id)
+            local ok, msg = CFG.teleportToIslandMiddle(id)
             notes.tele = tostring(msg)
             return
         end
         notes.tele = ("best zone %s is in World %d (you are in World %d)"):format(id, targetW, hereW)
         return
     end
-    local centre = zoneCenter(id)
+    local centre = CFG.zoneCenter(id)
     local pos = position()
     local inZone = currentZone() == id
     if centre then
@@ -2508,11 +2547,11 @@ local function teleTick()
         return
     end
     nextAt.tele = now + CFG.TeleInterval
-    local ok, msg = teleportToIslandMiddle(id)
+    local ok, msg = CFG.teleportToIslandMiddle(id)
     notes.tele = ok and ("middle: " .. id .. " (" .. tostring(CFG.TeleMode or "Instant") .. ")") or tostring(msg)
 end
 
-local function buyTick()
+function CFG.buyTick()
     local now = os.clock()
     if now < nextAt.buy then return end
     local save = getSave()
@@ -2527,39 +2566,39 @@ local function buyTick()
     if ok == true then nextAt.buy = os.clock() + CFG.BuyInterval; nextAt.save = 0 end
 end
 
-local function goalFull(goal)
+function CFG.goalFull(goal)
     return type(goal) == "table" and type(goal.Progress) == "number"
         and type(goal.Amount) == "number" and goal.Progress >= goal.Amount
 end
 
-local function goalLocked(definition, goals, index)
+function CFG.goalLocked(definition, goals, index)
     local function requiresPrevious(at)
         return at > 1 and (definition.SequentialGoals == true or
             (type(goals[at]) == "table" and goals[at].RequiresPrevious == true))
     end
     if not requiresPrevious(index) then return false end
     for previous = index - 1, 1, -1 do
-        if not goalFull(goals[previous]) or goals[previous].Claimed ~= true then return true end
+        if not CFG.goalFull(goals[previous]) or goals[previous].Claimed ~= true then return true end
         if not requiresPrevious(previous) then return false end
     end
     return false
 end
 
-local function claimTarget(definition, goals)
+function CFG.claimTarget(definition, goals)
     if type(goals) ~= "table" then return nil end
     local allFull = #goals == 3
     for index = 1, 3 do
         local goal = goals[index]
-        if not goalFull(goal) then allFull = false end
+        if not CFG.goalFull(goal) then allFull = false end
         if definition.PerGoalClaim == true then
-            if goalFull(goal) and goal.Claimed ~= true and not goalLocked(definition, goals, index) then return index end
+            if CFG.goalFull(goal) and goal.Claimed ~= true and not CFG.goalLocked(definition, goals, index) then return index end
             if not goal or goal.Claimed ~= true then allFull = false end
         end
     end
     return allFull and 0 or nil
 end
 
-local function questTick()
+function CFG.questTick()
     local save = getSave()
     if not save then notes.quest = "waiting for profile"; return end
     if type(save.DailyQuests) == "table" and save.DailyQuests.ActiveCard == nil then
@@ -2594,7 +2633,7 @@ local function questTick()
                     nextAt.save = 0
                 end
             elseif now >= (nextAt.quest[id] or 0) then
-                local index = claimTarget(definition, goals)
+                local index = CFG.claimTarget(definition, goals)
                 if index ~= nil then
                     nextAt.quest[id] = now + CFG.QuestBackoff
                     sent += 1
@@ -2610,7 +2649,7 @@ local function questTick()
     end
 end
 
-local function claimRankRewards(onlyIndex)
+function CFG.claimRankRewards(onlyIndex)
     if not alive then return false, "stopped" end
     if os.clock() < nextAt.rank then return false, "rank claim cooldown" end
     nextAt.rank = os.clock() + CFG.RankInterval
@@ -2628,16 +2667,16 @@ local function claimRankRewards(onlyIndex)
     return ok, message
 end
 
-local function rankTick()
+function CFG.rankTick()
     if os.clock() < nextAt.rank then return end
     local save = getSave()
-    if not save then claimRankRewards(); return end
+    if not save then CFG.claimRankRewards(); return end
     local redeemed = save.RedeemedRankRewards
     if type(redeemed) ~= "table" then notes.rank = "waiting for reward state"; return end
     local stars = tonumber(save.RankStars) or 0
     local definition = ranks[save.Rank]
     if not definition then
-        claimRankRewards()
+        CFG.claimRankRewards()
         return
     end
     local order = {}
@@ -2659,10 +2698,10 @@ local function rankTick()
         notes.rank = ("nothing earned (rank %s, %d stars)"):format(tostring(save.Rank), stars)
         return
     end
-    claimRankRewards(claimable)
+    CFG.claimRankRewards(claimable)
 end
 
-local function rebirthTick()
+function CFG.rebirthTick()
     local now = os.clock()
     if now < nextAt.rebirth then return end
     local save = getSave()
@@ -2682,10 +2721,10 @@ local function rebirthTick()
     if ok == true then nextAt.save = 0 end
 end
 
-local eggModelCache = {}
-local function findEggModel(targetEggId, point)
+CFG.eggModelCache = {}
+function CFG.findEggModel(targetEggId, point)
     if targetEggId then
-        local cached = eggModelCache[targetEggId]
+        local cached = CFG.eggModelCache[targetEggId]
         if cached and cached.model and cached.model.Parent then
             local at = modelPosition(cached.model)
             if at then
@@ -2715,7 +2754,7 @@ local function findEggModel(targetEggId, point)
                             local at = modelPosition(child)
                             if at then
                                 if targetEggId and (child.Name == targetEggId or (targetNum and number == targetNum) or child.Name:find(targetEggId, 1, true)) then
-                                    eggModelCache[targetEggId] = { model = child, number = number or targetNum }
+                                    CFG.eggModelCache[targetEggId] = { model = child, number = number or targetNum }
                                     return child, number or targetNum, at
                                 end
                                 if number and point then
@@ -2736,21 +2775,21 @@ local function findEggModel(targetEggId, point)
     return best, bestNumber, best and modelPosition(best) or nil
 end
 
-local function hatchEggById(eggId, count, snapNear)
+function CFG.hatchEggById(eggId, count, snapNear)
     if type(eggId) ~= "string" or #eggId == 0 then return false, "invalid egg id" end
     local save = getSave()
     local hatchCount = math.clamp(tonumber(count) or (save and tonumber(save.EggHatchCount)) or 1, 1, CFG.EggMaxHatch)
     local point = position()
-    local _, _, eggPos = findEggModel(eggId, point)
+    local _, _, eggPos = CFG.findEggModel(eggId, point)
     if snapNear and eggPos and point and (eggPos - point).Magnitude > 30 then
-        snapTo(eggPos + Vector3.new(0, 0, 6))
+        CFG.snapTo(eggPos + Vector3.new(0, 0, 6))
         task.wait(0.1)
     end
     local ok, message = invoke("Eggs_RequestPurchase", eggId, hatchCount)
     return ok == true, ok == true and ("opened %s x%d"):format(eggId, hatchCount) or tostring(message or "rejected")
 end
 
-local function eggTick()
+function CFG.eggTick()
     if CFG.TimeTrial and CFG.TimeTrial.BlocksOtherTele() then
         notes.egg = "paused (Time Trial active)"
         return
@@ -2766,7 +2805,7 @@ local function eggTick()
         if active then chosenEgg = id; break end
     end
     if not chosenEgg then
-        local _, number = findEggModel(nil, point)
+        local _, number = CFG.findEggModel(nil, point)
         if number then
             chosenEgg = eggByNumber[number]
         end
@@ -2776,13 +2815,13 @@ local function eggTick()
     end
     if not chosenEgg then notes.egg = "no egg in range or selected"; return end
     nextAt.egg = now + CFG.EggInterval
-    local ok, msg = hatchEggById(chosenEgg, save.EggHatchCount, pickCount(picked.eggs) > 0)
+    local ok, msg = CFG.hatchEggById(chosenEgg, save.EggHatchCount, pickCount(picked.eggs) > 0)
     if not alive or not enabled.autoEgg then return end
     notes.egg = msg
 end
 
 -- Detects which World (1-4) the current server Place holds.
-local function currentWorldNumber()
+function CFG.currentWorldNumber()
     for w = CFG.WorldCount, 2, -1 do
         if workspace:FindFirstChild("Map" .. w) then return w end
     end
@@ -2794,8 +2833,8 @@ local function currentWorldNumber()
     return 1
 end
 
-local function bestUnlockedWorld(save)
-    local here = currentWorldNumber()
+function CFG.bestUnlockedWorld(save)
+    local here = CFG.currentWorldNumber()
     local best = maxOwned(save) or 1
     local reb = save and tonumber(save.Rebirths) or 0
     local calc = 1
@@ -2805,10 +2844,10 @@ local function bestUnlockedWorld(save)
     return math.max(here, calc)
 end
 
-local function teleportToWorldOrBestIsland(targetW)
+function CFG.teleportToWorldOrBestIsland(targetW)
     local save = getSave()
-    local hereWorld = currentWorldNumber()
-    local desiredWorld = tonumber(targetW) or (save and bestUnlockedWorld(save)) or math.max(worldTarget, hereWorld)
+    local hereWorld = CFG.currentWorldNumber()
+    local desiredWorld = tonumber(targetW) or (save and CFG.bestUnlockedWorld(save)) or math.max(worldTarget, hereWorld)
     desiredWorld = math.clamp(math.floor(desiredWorld), 1, CFG.WorldCount)
     -- Never auto-downgrade or auto-tele back to World 1 when already in a higher world.
     if desiredWorld < hereWorld then
@@ -2825,10 +2864,10 @@ local function teleportToWorldOrBestIsland(targetW)
         return false, "world " .. desiredWorld .. " zone map unavailable"
     end
     local id = zones[number].id
-    return teleportToIslandMiddle(id)
+    return CFG.teleportToIslandMiddle(id)
 end
 
-local function worldTeleTick()
+function CFG.worldTeleTick()
     if CFG.TimeTrial and CFG.TimeTrial.BlocksOtherTele() then
         notes.world = "paused (Time Trial active)"
         return
@@ -2843,12 +2882,12 @@ local function worldTeleTick()
     end
     local save = getSave()
     if not save then notes.world = "waiting for profile"; return end
-    local hereWorld = currentWorldNumber()
+    local hereWorld = CFG.currentWorldNumber()
     if worldTarget < hereWorld then
         worldTarget = hereWorld
     end
     if enabled.worldAdvance then
-        worldTarget = math.max(hereWorld, bestUnlockedWorld(save))
+        worldTarget = math.max(hereWorld, CFG.bestUnlockedWorld(save))
     end
     if hereWorld ~= worldTarget and worldTarget > hereWorld then
         nextAt.worldTele = now + CFG.WorldBackoff
@@ -2861,7 +2900,7 @@ local function worldTeleTick()
     local number = bestInWorld(save, hereWorld)
     if not number then notes.world = "world " .. hereWorld .. " zone map unavailable"; return end
     local id = zones[number].id
-    local centre = zoneCenter(id)
+    local centre = CFG.zoneCenter(id)
     local pos = position()
     local dist2D = (pos and centre) and (Vector3.new(pos.X, 0, pos.Z) - Vector3.new(centre.X, 0, centre.Z)).Magnitude or math.huge
     if currentZone() == id and dist2D <= 18 then
@@ -2869,7 +2908,7 @@ local function worldTeleTick()
         return
     end
     nextAt.worldTele = now + CFG.WorldInterval
-    local ok, message = teleportToIslandMiddle(id)
+    local ok, message = CFG.teleportToIslandMiddle(id)
     notes.world = ok and ("world %d -> middle of %s"):format(hereWorld, id) or tostring(message)
 end
 
@@ -2883,28 +2922,28 @@ CFG.AdvanceTick = function()
         return
     end
     local now = os.clock()
-    if now < (CFG.AdvanceNext or 0) then return end
+    if now < (nextAt.advance or 0) then return end
     local save = getSave()
     if not save then notes.advance = "waiting for profile"; return end
-    local hereWorld = currentWorldNumber()
+    local hereWorld = CFG.currentWorldNumber()
     local limit = math.min(CFG.WorldAdvanceLimit, CFG.WorldCount)
-    local bestW = math.max(hereWorld, math.min(bestUnlockedWorld(save), limit))
+    local bestW = math.max(hereWorld, math.min(CFG.bestUnlockedWorld(save), limit))
     if bestW <= hereWorld then
         worldTarget = hereWorld
         notes.advance = ("at world %d (owned zone %d)"):format(hereWorld, maxOwned(save) or 1)
         return
     end
-    CFG.AdvanceNext = now + CFG.WorldAdvanceInterval
+    nextAt.advance = now + CFG.WorldAdvanceInterval
     worldTarget = bestW
-    local ok, msg = teleportToWorldOrBestIsland(bestW)
+    local ok, msg = CFG.teleportToWorldOrBestIsland(bestW)
     notes.advance = ok and ("hopping -> world " .. bestW) or tostring(msg)
 end
 
-local EFFECT_CLASSES = {
+CFG.EFFECT_CLASSES = {
     ParticleEmitter = true, Trail = true, Beam = true, Smoke = true,
     Fire = true, Sparkles = true, PointLight = true, SpotLight = true, SurfaceLight = true,
 }
-local function suppressEffects(folderName, store)
+function CFG.suppressEffects(folderName, store)
     local root = thingsFolder(folderName)
     if not root then return 0 end
     local queue, cursor, visited, changed = {root}, 1, 0, 0
@@ -2916,7 +2955,7 @@ local function suppressEffects(folderName, store)
         if ok then
             for _, child in ipairs(children) do
                 visited += 1
-                if EFFECT_CLASSES[child.ClassName] then
+                if CFG.EFFECT_CLASSES[child.ClassName] then
                     if store[child] == nil then
                         store[child] = child.Enabled
                         local disabled = pcall(function() child.Enabled = false end)
@@ -2932,14 +2971,14 @@ local function suppressEffects(folderName, store)
     return changed
 end
 
-local function restoreEffects(store)
+function CFG.restoreEffects(store)
     for effect, original in pairs(store) do
         pcall(function() effect.Enabled = original end)
     end
     table.clear(store)
 end
 
-local function eggFolderNames()
+function CFG.eggFolderNames()
     local names, seen = {}, {}
     for _, rootName in ipairs({"__THINGS", "_THINGS", "THINGS"}) do
         local root = workspace:FindFirstChild(rootName)
@@ -2963,7 +3002,7 @@ end
 -- in Egg Opening Frontend so the 3D camera cutscene is bypassed in 0ms while
 -- Eggs_PlayOpenAnimation still runs SM_Unmask and CompletedHatching cleanly.
 CFG.EggFxState = {senv = nil, originals = {}}
-local function syncEggFx()
+function CFG.syncEggFx()
     local state = CFG.EggFxState
     local active = alive and enabled.hideEggFx
     pcall(function() workspace:SetAttribute("GlobalInstantHatch", active and true or nil) end)
@@ -3022,17 +3061,17 @@ local function syncEggFx()
     end
 end
 
-local function optimizeTick()
+function CFG.optimizeTick()
     local changed = 0
-    if enabled.optBreakables then changed += suppressEffects("Breakables", optBreakableEffects) end
-    if enabled.optPets then changed += suppressEffects("Pets", optPetEffects) end
-    syncEggFx()
+    if enabled.optBreakables then changed += CFG.suppressEffects("Breakables", optBreakableEffects) end
+    if enabled.optPets then changed += CFG.suppressEffects("Pets", optPetEffects) end
+    CFG.syncEggFx()
     if enabled.hideEggFx then
-        for _, name in ipairs(eggFolderNames()) do
-            changed += suppressEffects(name, optPetEffects)
+        for _, name in ipairs(CFG.eggFolderNames()) do
+            changed += CFG.suppressEffects(name, optPetEffects)
         end
-        changed += suppressEffects("Eggs", optPetEffects)
-        changed += suppressEffects("ZoneEggs", optPetEffects)
+        changed += CFG.suppressEffects("Eggs", optPetEffects)
+        changed += CFG.suppressEffects("ZoneEggs", optPetEffects)
     end
     notes.optimize = ("breakables %s | pets %s | eggFx %s | +%d"):format(
         enabled.optBreakables and "on" or "off",
@@ -3041,11 +3080,11 @@ local function optimizeTick()
         changed)
 end
 
-local function destroyAuraPart()
+function CFG.destroyAuraPart()
     if auraPart then pcall(function() auraPart:Destroy() end); auraPart = nil end
 end
 
-local function ensureAuraPart()
+function CFG.ensureAuraPart()
     if auraPart then return end
     local ok, part = pcall(function()
         local p = Instance.new("Part")
@@ -3063,14 +3102,14 @@ local function ensureAuraPart()
     if ok then auraPart = part else warn("[PS99 CLEAN] aura visualizer: " .. tostring(part)) end
 end
 
-local function setWorldTarget(n)
+function CFG.setWorldTarget(n)
     if type(n) ~= "number" or n < 1 or n > CFG.WorldCount then return false end
     worldTarget = math.floor(n)
     if enabled.worldTele then nextAt.worldTele = 0 end
     return true
 end
 
-local function petSlotTick()
+function CFG.petSlotTick()
     local now = os.clock()
     if now < nextAt.petSlot then return end
     local save = getSave()
@@ -3092,7 +3131,7 @@ local function petSlotTick()
 end
 
 CFG.EggSlotBundles = nil
-local function nextEggSlotEnd(purchased)
+function CFG.nextEggSlotEnd(purchased)
     if not CFG.EggSlotBundles then
         local bundles, cur, total = {}, 1, 83
         while cur <= total do
@@ -3117,7 +3156,7 @@ function CFG.EggSlotTick()
     local save = getSave()
     if not save then notes.eggSlot = "waiting for profile"; return end
     local purchased = type(save.EggSlotsPurchased) == "number" and save.EggSlotsPurchased or 0
-    local targetEnd = nextEggSlotEnd(purchased)
+    local targetEnd = CFG.nextEggSlotEnd(purchased)
     if not targetEnd then notes.eggSlot = "max egg slots purchased"; nextAt.eggSlot = now + 30; return end
     nextAt.eggSlot = now + CFG.EggSlotBackoff
     local ok, message = invoke("EggHatchSlotsMachine_RequestPurchase", targetEnd)
@@ -3238,7 +3277,7 @@ local function stackList(bucket)
     return out
 end
 
-local KEY_PAIRS = {
+CFG.KEY_PAIRS = {
     {name = "CrystalKey_Combine", lower = "Crystal Key Lower Half", upper = "Crystal Key Upper Half"},
     {name = "TechKey_Combine", lower = "Tech Key Lower Half", upper = "Tech Key Upper Half"},
     {name = "VoidKey_Combine", lower = "Void Key Lower Half", upper = "Void Key Upper Half"},
@@ -3246,7 +3285,7 @@ local KEY_PAIRS = {
     {name = "SecretKey_Combine", lower = "Secret Key Lower Half", upper = "Secret Key Upper Half"},
 }
 
-local BAG_KINDS = {
+CFG.BAG_KINDS = {
     "Gift Bag", "Large Gift Bag", "Seed Bag", "Diamond Gift Bag",
     "Fruit Bundle", "Potion Bundle", "Large Potion Bundle",
     "Enchant Bundle", "Large Enchant Bundle", "Flag Bundle",
@@ -3273,41 +3312,39 @@ local BAG_KINDS = {
     "Tower Defense Gift 3", "Tropical Gift", "Turkey Gift", "Wooden Gift", "World Cup Gift",
 }
 
-local FLAG_NAMES = {
+CFG.FLAG_NAMES = {
     "Coins Flag", "Diamonds Flag", "Exotic Treasure Flag", "Fortune Flag",
     "Golden Flag", "Hasty Flag", "Magnet Flag", "Rainbow Flag",
     "Shiny Flag", "Strength Flag",
 }
 
-local FRUIT_IDS = {"Apple", "Banana", "Candycane", "Orange", "Pineapple", "Rainbow", "Watermelon"}
-local POTION_IDS = {
+CFG.FRUIT_IDS = {"Apple", "Banana", "Candycane", "Orange", "Pineapple", "Rainbow", "Watermelon"}
+CFG.POTION_IDS = {
     "Coins", "Damage", "Diamonds", "Huge", "Lucky",
     "The Cocktail", "Treasure Hunter", "Walkspeed",
     "Garden XP Token", "Mastery", "Pet XP Token", "Recipe",
     "Titanic", "Tower Defense I", "Tower Defense II", "Tower Defense III",
     "Ultimate", "Ultra Huge", "Ultra Mastery", "Ultra Titanic",
 }
-local XP_POTION_SET = {
+CFG.XP_POTION_SET = {
     ["Garden XP Token"] = true, ["Mastery"] = true, ["Pet XP Token"] = true,
     ["Recipe"] = true, ["Titanic"] = true, ["Tower Defense I"] = true,
     ["Tower Defense II"] = true, ["Tower Defense III"] = true, ["Ultimate"] = true,
     ["Ultra Huge"] = true, ["Ultra Mastery"] = true, ["Ultra Titanic"] = true,
 }
-local DICE_IDS = {
+CFG.DICE_IDS = {
     "Lucky Dice V2", "Lucky Dice II V2", "Lucky Dice III V2",
     "Mega Lucky Dice V2", "Mega Lucky Dice II V2", "Fire Dice V2",
 }
-local MEGA_DICE = {["Mega Lucky Dice V2"] = true, ["Mega Lucky Dice II V2"] = true}
-local FREE_GIFT_MAX = 12
-
+CFG.MEGA_DICE = {["Mega Lucky Dice V2"] = true, ["Mega Lucky Dice II V2"] = true}
 -- Dynamic & static full-game catalog (Item 8: All Items, Potions, Huges, Eggs, Islands).
 CFG.Catalog = {
     scanned = false,
     islands = {},
-    potions = table.clone(POTION_IDS),
-    fruits = table.clone(FRUIT_IDS),
-    flags = table.clone(FLAG_NAMES),
-    bags = table.clone(BAG_KINDS),
+    potions = table.clone(CFG.POTION_IDS),
+    fruits = table.clone(CFG.FRUIT_IDS),
+    flags = table.clone(CFG.FLAG_NAMES),
+    bags = table.clone(CFG.BAG_KINDS),
     eggs = table.clone(CFG.EggIndex),
     huges = {
         "Huge Cat", "Huge Dog", "Huge Dragon", "Huge Corgi", "Huge Pegasus", "Huge Festive Cat",
@@ -3339,7 +3376,7 @@ CFG.Catalog = {
     },
 }
 
-local function scanLiveDirectory()
+function CFG.scanLiveDirectory()
     local cat = CFG.Catalog
     if #cat.islands == 0 then
         for num = 1, 279 do
@@ -3368,7 +3405,7 @@ local function scanLiveDirectory()
         table.sort(dest)
     end
     collectNames(dirRoot:FindFirstChild("Potions"), cat.potions)
-    collectNames(dirRoot:FindFirstChild("XPPotions"), cat.potions, XP_POTION_SET)
+    collectNames(dirRoot:FindFirstChild("XPPotions"), cat.potions, CFG.XP_POTION_SET)
     collectNames(dirRoot:FindFirstChild("Fruits"), cat.fruits)
     collectNames(dirRoot:FindFirstChild("ZoneFlags"), cat.flags)
     collectNames(dirRoot:FindFirstChild("Lootboxes"), cat.bags)
@@ -3382,29 +3419,29 @@ local function scanLiveDirectory()
         collectNames(petsDir:FindFirstChild("Titanic"), cat.huges)
         collectNames(petsDir:FindFirstChild("Gargantuan"), cat.huges)
     end
-    POTION_IDS = cat.potions
-    FRUIT_IDS = cat.fruits
-    FLAG_NAMES = cat.flags
-    BAG_KINDS = cat.bags
+    CFG.POTION_IDS = cat.potions
+    CFG.FRUIT_IDS = cat.fruits
+    CFG.FLAG_NAMES = cat.flags
+    CFG.BAG_KINDS = cat.bags
     return cat
 end
 
-local PICK_CATEGORIES = {
+CFG.PICK_CATEGORIES = {
     {"zones", "Zones"}, {"keys", "Keys"}, {"bags", "Bags"}, {"fruits", "Fruits"},
     {"potions", "Potions"}, {"flags", "Flags"}, {"dice", "Dice"},
     {"cards", "Cards"}, {"freeGifts", "Gifts"}, {"eggs", "Eggs"},
     {"huges", "Huges"}, {"items", "Items"}, {"tickets", "Tickets"},
 }
 
-local function pickItems(category)
-    local cat = scanLiveDirectory()
+function CFG.pickItems(category)
+    local cat = CFG.scanLiveDirectory()
     local out = {}
     if category == "zones" then
         for num = 1, 279 do
             if zones[num] then out[#out + 1] = zones[num].id end
         end
     elseif category == "keys" then
-        for _, pair in ipairs(KEY_PAIRS) do out[#out + 1] = pair.name end
+        for _, pair in ipairs(CFG.KEY_PAIRS) do out[#out + 1] = pair.name end
     elseif category == "bags" then
         for _, name in ipairs(cat.bags) do out[#out + 1] = name end
     elseif category == "fruits" then
@@ -3414,9 +3451,9 @@ local function pickItems(category)
     elseif category == "flags" then
         for _, name in ipairs(cat.flags) do out[#out + 1] = name end
     elseif category == "dice" then
-        for _, id in ipairs(DICE_IDS) do out[#out + 1] = id end
+        for _, id in ipairs(CFG.DICE_IDS) do out[#out + 1] = id end
     elseif category == "freeGifts" then
-        for id = 1, FREE_GIFT_MAX do out[#out + 1] = id end
+        for id = 1, CFG.FreeGiftMax do out[#out + 1] = id end
     elseif category == "eggs" then
         for _, id in ipairs(cat.eggs) do out[#out + 1] = id end
     elseif category == "huges" then
@@ -3441,11 +3478,11 @@ local function pickItems(category)
     return out
 end
 
-local function allowAll(store, id)
+function CFG.allowAll(store, id)
     return pickCount(store) == 0 or store[id] == true
 end
 
-local KEY_UNLOCKS = {
+CFG.KEY_UNLOCKS = {
     {item = "Crystal Key", remote = "CrystalKey_Unlock", pick = "CrystalKey_Combine", world = 1, batch = true},
     {item = "Tech Key",    remote = "TechKey_Unlock",    pick = "TechKey_Combine",    world = 2, batch = true},
     {item = "Void Key",    remote = "VoidKey_Unlock",    pick = "VoidKey_Combine",    world = 3, batch = true},
@@ -3453,7 +3490,7 @@ local KEY_UNLOCKS = {
 }
 
 -- Secret Key unlocks "Crystal Key Castle" in World 1 Zone 54 ("Fairy Castle") and spins "CrystalKeyWheel"
-local function useSecretKeyCrystalWheel(save, haveSecretKeys)
+function CFG.useSecretKeyCrystalWheel(save, haveSecretKeys)
     if not save then return false, "no save" end
     if CFG.Event and type(CFG.Event.InInstance) == "function" and CFG.Event.InInstance() then
         return false, "in event instance"
@@ -3475,13 +3512,13 @@ local function useSecretKeyCrystalWheel(save, haveSecretKeys)
     if not ownsZone(save, "Fairy Castle") then
         return false, "requires Zone 54 (Fairy Castle)"
     end
-    if detectActiveWorld() ~= 1 then
+    if CFG.detectActiveWorld() ~= 1 then
         return false, "Secret Key Castle is in World 1 (Zone 54)"
     end
     local okUnlock, unlockMsg = invoke("SecretRoom_Unlock", "Crystal Key Castle")
     if okUnlock ~= true then
         if currentZone() ~= "Fairy Castle" then
-            teleportToIslandMiddle("Fairy Castle")
+            CFG.teleportToIslandMiddle("Fairy Castle")
             task.wait(0.25)
             okUnlock, unlockMsg = invoke("SecretRoom_Unlock", "Crystal Key Castle")
         end
@@ -3498,7 +3535,7 @@ local function useSecretKeyCrystalWheel(save, haveSecretKeys)
     return false, tostring(unlockMsg or "Crystal Key Castle rejected")
 end
 
-local function keyTick()
+function CFG.keyTick()
     local now = os.clock()
     if now < nextAt.key then return end
     local save = getSave()
@@ -3506,11 +3543,11 @@ local function keyTick()
     local misc = stackList(inventory(save, "Misc"))
     local halves = {}
     for _, item in ipairs(misc) do halves[item.id] = (halves[item.id] or 0) + item.amount end
-    for _, pair in ipairs(KEY_PAIRS) do
+    for _, pair in ipairs(CFG.KEY_PAIRS) do
         if not alive or not enabled.autoKeys then return end
         local count = halves[pair.lower] or 0
         if pair.upper then count = math.min(count, halves[pair.upper] or 0) end
-        if count > 0 and allowAll(picked.keys, pair.name) then
+        if count > 0 and CFG.allowAll(picked.keys, pair.name) then
             nextAt.key = now + CFG.KeyInterval
             local ok, message = invoke(pair.name, count)
             if not alive or not enabled.autoKeys then return end
@@ -3519,10 +3556,10 @@ local function keyTick()
             return
         end
     end
-    for _, unlock in ipairs(KEY_UNLOCKS) do
+    for _, unlock in ipairs(CFG.KEY_UNLOCKS) do
         if not alive or not enabled.autoKeys then return end
         local have = halves[unlock.item] or 0
-        if have > 0 and allowAll(picked.keys, unlock.pick) then
+        if have > 0 and CFG.allowAll(picked.keys, unlock.pick) then
             if unlock.item ~= "Crystal Key" or save.CastleUnlocked ~= false then
                 nextAt.key = now + CFG.KeyInterval
                 local amount = unlock.batch and math.min(have, 100) or 1
@@ -3538,9 +3575,9 @@ local function keyTick()
     end
     local haveSecret = halves["Secret Key"] or 0
     local secretRoomOpen = type(save.SecretRooms) == "table" and save.SecretRooms["Crystal Key Castle"] == true
-    if (haveSecret > 0 or secretRoomOpen) and allowAll(picked.keys, "SecretKey_Combine") then
+    if (haveSecret > 0 or secretRoomOpen) and CFG.allowAll(picked.keys, "SecretKey_Combine") then
         nextAt.key = now + CFG.KeyInterval
-        local okS, msgS = useSecretKeyCrystalWheel(save, haveSecret)
+        local okS, msgS = CFG.useSecretKeyCrystalWheel(save, haveSecret)
         if okS then
             notes.keys = msgS
             return
@@ -3549,7 +3586,7 @@ local function keyTick()
     notes.keys = "no selected keys to combine or unlock"
 end
 
-local MISC_GIFT_BAG_SET = {
+CFG.MISC_GIFT_BAG_SET = {
     ["Gift Bag"] = true, ["Large Gift Bag"] = true, ["Seed Bag"] = true,
     ["Diamond Gift Bag"] = true, ["Fruit Bundle"] = true, ["Potion Bundle"] = true,
     ["Large Potion Bundle"] = true, ["Enchant Bundle"] = true, ["Large Enchant Bundle"] = true,
@@ -3557,16 +3594,16 @@ local MISC_GIFT_BAG_SET = {
     ["Rainbow Mini Chest"] = true, ["Charm Stone"] = true,
 }
 
-local function bagTick()
+function CFG.bagTick()
     local now = os.clock()
     if now < nextAt.bag then return end
     local save = getSave()
     if not save then notes.bags = "waiting for profile"; return end
-    scanLiveDirectory()
+    CFG.scanLiveDirectory()
     -- Lootboxes (Hype Eggs, Anniversary Gifts, Clan Gifts, Packs, etc.) use KX_Release(uid, amount, nil).
     for _, item in ipairs(stackList(inventory(save, "Lootbox"))) do
         if not alive or not enabled.autoGiftBags then return end
-        if allowAll(picked.bags, item.id) then
+        if CFG.allowAll(picked.bags, item.id) then
             nextAt.bag = now + CFG.BagInterval
             local amount = math.max(1, math.min(item.amount, CFG.BagMaxOpen))
             local ok, message = invoke("KX_Release", item.uid, amount, nil)
@@ -3581,7 +3618,7 @@ local function bagTick()
     -- Misc gift bags & bundles use GiftBag_Open(id, amount).
     for _, item in ipairs(stackList(inventory(save, "Misc"))) do
         if not alive or not enabled.autoGiftBags then return end
-        if (MISC_GIFT_BAG_SET[item.id] or picked.bags[item.id]) and allowAll(picked.bags, item.id) then
+        if (CFG.MISC_GIFT_BAG_SET[item.id] or picked.bags[item.id]) and CFG.allowAll(picked.bags, item.id) then
             nextAt.bag = now + CFG.BagInterval
             local amount = math.max(1, math.min(item.amount, CFG.BagMaxOpen))
             local ok, message = invoke("GiftBag_Open", item.id, amount)
@@ -3596,7 +3633,7 @@ local function bagTick()
     notes.bags = "no selected bags or lootboxes in inventory"
 end
 
-local SPINNY_WHEELS = {
+CFG.SPINNY_WHEELS = {
     { id = "StarterWheel", ticket = "Spinny Wheel Ticket",         zone = nil },
     { id = "TechWheel",    ticket = "Tech Spinny Wheel Ticket",    zone = "Tech Spawn",    rebirths = 4 },
     { id = "VoidWheel",    ticket = "Void Spinny Wheel Ticket",    zone = "Void Spawn",    rebirths = 4 },
@@ -3684,10 +3721,10 @@ function CFG.Spin.BypassAndReopen(wheelId)
 end
 
 function CFG.Spin.CollectWheels()
-    return SPINNY_WHEELS
+    return CFG.SPINNY_WHEELS
 end
 
-local function spinTick()
+function CFG.spinTick()
     local now = os.clock()
     if now < (nextAt.spin or 0) then return end
     CFG.Spin.ClaimPopup()
@@ -3701,7 +3738,7 @@ local function spinTick()
     local serverNow = workspace:GetServerTimeNow()
     local cooldowns = type(save.SpinnyWheelCooldowns) == "table" and save.SpinnyWheelCooldowns or {}
     local rebirths = tonumber(save.Rebirths) or 0
-    for _, w in ipairs(SPINNY_WHEELS) do
+    for _, w in ipairs(CFG.SPINNY_WHEELS) do
         if not alive or not enabled.autoSpinTickets then return end
         local unlocked = true
         if w.id == "StarterWheel" then
@@ -3715,7 +3752,7 @@ local function spinTick()
                 pcall(fire, "Spinny Wheel: Request Ticket", w.id)
             end
             local have = counts[w.ticket] or 0
-            if have > 0 and allowAll(picked.tickets, w.ticket) then
+            if have > 0 and CFG.allowAll(picked.tickets, w.ticket) then
                 nextAt.spin = now + 0.15
                 local ok = invoke("Spinny Wheel: Request Spin", w.id)
                 if not alive or not enabled.autoSpinTickets then return end
@@ -3739,14 +3776,14 @@ local function spinTick()
 end
 
 -- 4 World Chests (World 1 Crystal, World 2 Tech, World 3 Void, World 4 Fantasy)
-local ALL_KEY_CHESTS = {
+CFG.ALL_KEY_CHESTS = {
     { item = "Crystal Key", remote = "CrystalKey_Unlock", pick = "CrystalKey_Combine", world = 1, batch = true },
     { item = "Tech Key",    remote = "TechKey_Unlock",    pick = "TechKey_Combine",    world = 2, batch = true },
     { item = "Void Key",    remote = "VoidKey_Unlock",    pick = "VoidKey_Combine",    world = 3, batch = true },
     { item = "Fantasy Key", remote = "FantasyKey_Unlock", pick = "FantasyKey_Combine", world = 4, batch = true },
 }
 
-local function chestTick()
+function CFG.chestTick()
     local now = os.clock()
     if now < (nextAt.chest or 0) then return end
     local save = getSave()
@@ -3757,10 +3794,10 @@ local function chestTick()
         counts[item.id] = (counts[item.id] or 0) + item.amount
     end
     -- 1. Open the 4 World Chests for the 4 World Keys
-    for _, kc in ipairs(ALL_KEY_CHESTS) do
+    for _, kc in ipairs(CFG.ALL_KEY_CHESTS) do
         if not alive or not enabled.autoOpenChests then return end
         local have = counts[kc.item] or 0
-        if have > 0 and allowAll(picked.keys, kc.pick) then
+        if have > 0 and CFG.allowAll(picked.keys, kc.pick) then
             if kc.item ~= "Crystal Key" or save.CastleUnlocked ~= false then
                 nextAt.chest = now + CFG.KeyInterval
                 local amount = kc.batch and math.min(have, 100) or 1
@@ -3777,9 +3814,9 @@ local function chestTick()
     -- 2. Secret Key -> World 1 Zone 54 ("Crystal Key Castle") -> spin CrystalKeyWheel for Crystal Keys
     local haveSecret = counts["Secret Key"] or 0
     local secretRoomOpen = type(save.SecretRooms) == "table" and save.SecretRooms["Crystal Key Castle"] == true
-    if (haveSecret > 0 or secretRoomOpen) and allowAll(picked.keys, "SecretKey_Combine") then
+    if (haveSecret > 0 or secretRoomOpen) and CFG.allowAll(picked.keys, "SecretKey_Combine") then
         nextAt.chest = now + CFG.KeyInterval
-        local okS, msgS = useSecretKeyCrystalWheel(save, haveSecret)
+        local okS, msgS = CFG.useSecretKeyCrystalWheel(save, haveSecret)
         if okS then
             notes.chests = msgS
             return
@@ -3816,8 +3853,8 @@ local function chestTick()
     notes.chests = "no world chests or keys in inventory"
 end
 
-local consumeNext = {Fruit = 0, Potion = 0, potionCooldown = {}}
-local function getActiveFruitCount(save, fruitId)
+CFG.consumeNext = {Fruit = 0, Potion = 0, potionCooldown = {}}
+function CFG.getActiveFruitCount(save, fruitId)
     local fc = modules.fruitCmds
     if fc and type(fc.GetActiveFruits) == "function" then
         local ok, activeTbl = pcall(fc.GetActiveFruits)
@@ -3839,7 +3876,7 @@ local function getActiveFruitCount(save, fruitId)
     return 0
 end
 
-local function computeMaxFruitQueue()
+function CFG.computeMaxFruitQueue()
     local limit = tonumber(CFG.FruitQueueLimit) or 20
     local fc = modules.fruitCmds
     if fc and type(fc.ComputeFruitQueueLimit) == "function" then
@@ -3851,12 +3888,12 @@ local function computeMaxFruitQueue()
     return limit
 end
 
-local function fruitTick()
+function CFG.fruitTick()
     local now = os.clock()
-    if now < consumeNext.Fruit then return end
+    if now < CFG.consumeNext.Fruit then return end
     local save = getSave()
     if not save then notes.fruits = "waiting for profile"; return end
-    local queueLimit = computeMaxFruitQueue()
+    local queueLimit = CFG.computeMaxFruitQueue()
     local stacks = stackList(inventory(save, "Fruit"))
     -- Prefer Shiny fruit stacks first so the active queue gets maximum bonus
     table.sort(stacks, function(a, b)
@@ -3871,10 +3908,10 @@ local function fruitTick()
     local remainingByFruit = {}
     for _, item in ipairs(stacks) do
         if not alive or not enabled.autoFruits then return end
-        if allowAll(picked.fruits, item.id) and item.amount > 0 then
+        if CFG.allowAll(picked.fruits, item.id) and item.amount > 0 then
             local remNeed = remainingByFruit[item.id]
             if remNeed == nil then
-                local activeCount = getActiveFruitCount(save, item.id)
+                local activeCount = CFG.getActiveFruitCount(save, item.id)
                 remNeed = math.max(0, queueLimit - activeCount)
                 remainingByFruit[item.id] = remNeed
             end
@@ -3892,7 +3929,7 @@ local function fruitTick()
             end
         end
     end
-    consumeNext.Fruit = now + CFG.FruitInterval
+    CFG.consumeNext.Fruit = now + CFG.FruitInterval
     if consumedAny then
         notes.fruits = lastMsg
         nextAt.save = 0
@@ -3901,7 +3938,7 @@ local function fruitTick()
     notes.fruits = "all selected fruits at full stack (" .. tostring(queueLimit) .. ")"
 end
 
-local function getActivePotionTierAndTime(save, potionId)
+function CFG.getActivePotionTierAndTime(save, potionId)
     local bestTier = 0
     local bestRem = 0
     local pc = modules.potionCmds
@@ -3928,9 +3965,9 @@ end
 
 -- Item 5: Select what potion to drink & Drink Highest Tier First (no-stack:
 -- skips any potion while an equal or higher tier of that potion is still active).
-local function potionTick()
+function CFG.potionTick()
     local now = os.clock()
-    if now < consumeNext.Potion then return end
+    if now < CFG.consumeNext.Potion then return end
     local save = getSave()
     if not save then notes.potions = "waiting for profile"; return end
     local minTier = tonumber(CFG.PotionMinTier) or 1
@@ -3940,14 +3977,14 @@ local function potionTick()
     for _, bucketKind in ipairs({"Potion", "XPPotion"}) do
         local isXP = bucketKind == "XPPotion"
         for _, item in ipairs(stackList(inventory(save, bucketKind))) do
-            if allowAll(picked.potions, item.id) and item.tier >= minTier and item.tier <= maxTier then
-                local cd = consumeNext.potionCooldown[item.uid] or 0
+            if CFG.allowAll(picked.potions, item.id) and item.tier >= minTier and item.tier <= maxTier then
+                local cd = CFG.consumeNext.potionCooldown[item.uid] or 0
                 if now >= cd then
-                    local isXpPotion = isXP or XP_POTION_SET[item.id] == true
+                    local isXpPotion = isXP or CFG.XP_POTION_SET[item.id] == true
                     local allowedByMastery = isXpPotion or CFG.Quest.CanUsePotionTier(item.tier)
                     if allowedByMastery then
                         if not isXpPotion then
-                            local activeTier, activeRem = getActivePotionTierAndTime(save, item.id)
+                            local activeTier, activeRem = CFG.getActivePotionTierAndTime(save, item.id)
                             if activeRem > 0 and item.tier <= activeTier then
                                 skippedActive += 1
                                 continue
@@ -3961,11 +3998,11 @@ local function potionTick()
         end
     end
     if #candidates == 0 then
-        table.clear(consumeNext.potionCooldown)
+        table.clear(CFG.consumeNext.potionCooldown)
         notes.potions = skippedActive > 0
             and ("active potion timers running (%d skipped, no stack)"):format(skippedActive)
             or "no selected potions in inventory"
-        consumeNext.Potion = now + CFG.PotionInterval
+        CFG.consumeNext.Potion = now + CFG.PotionInterval
         return
     end
     table.sort(candidates, function(a, b)
@@ -3980,8 +4017,8 @@ local function potionTick()
         return tostring(a.uid) < tostring(b.uid)
     end)
     local chosen = candidates[1]
-    consumeNext.Potion = now + CFG.PotionInterval
-    consumeNext.potionCooldown[chosen.uid] = now + 8
+    CFG.consumeNext.Potion = now + CFG.PotionInterval
+    CFG.consumeNext.potionCooldown[chosen.uid] = now + 8
     -- Consume 1 bottle at a time for regular potions so timers never stack unnecessarily
     local count = chosen.isXP and math.max(1, math.min(chosen.amount, CFG.PotionMaxConsume)) or 1
     local remoteName = chosen.isXP and "XPPotions: Consume" or "Potions: Consume"
@@ -3991,7 +4028,7 @@ local function potionTick()
     if ok then nextAt.save = 0 end
 end
 
-local function freeGiftTick()
+function CFG.freeGiftTick()
     local now = os.clock()
     if now < nextAt.freeGift then return end
     local save = getSave()
@@ -4003,7 +4040,7 @@ local function freeGiftTick()
         if not alive or not enabled.autoFreeGifts then return end
         local id = nextAt.freeGiftCursor
         nextAt.freeGiftCursor = nextAt.freeGiftCursor % CFG.FreeGiftMax + 1
-        if not claimed[tostring(id)] and allowAll(picked.freeGifts, id) then
+        if not claimed[tostring(id)] and CFG.allowAll(picked.freeGifts, id) then
             nextAt.freeGift = now + CFG.FreeGiftInterval
             local ok, message = invoke("Redeem Free Gift", id)
             if not alive or not enabled.autoFreeGifts then return end
@@ -4015,7 +4052,7 @@ local function freeGiftTick()
     notes.freeGift = "all free gifts redeemed"
 end
 
-local function getUltimateCmds()
+function CFG.getUltimateCmds()
     if modules.ultimates then return modules.ultimates end
     local ok, mod = pcall(function()
         local lib = RS:FindFirstChild("Library")
@@ -4030,7 +4067,7 @@ local function getUltimateCmds()
     return nil
 end
 
-local function isUltimateHudReady()
+function CFG.isUltimateHudReady()
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     local mainGui = pg and pg:FindFirstChild("Main")
     if not mainGui then return false end
@@ -4038,14 +4075,14 @@ local function isUltimateHudReady()
     return ready ~= nil and ready:IsA("GuiObject") and ready.Visible == true
 end
 
-local function ultimateTick()
+function CFG.ultimateTick()
     local now = os.clock()
     if now < nextAt.ultimate then return end
     local save = getSave()
     if not save then notes.ultimate = "waiting for profile"; return end
     if (tonumber(save.Rebirths) or 0) < 4 then notes.ultimate = "unlocks at 4 rebirths"; return end
 
-    local ultCmds = getUltimateCmds()
+    local ultCmds = CFG.getUltimateCmds()
     local ultId = nil
 
     if ultCmds and type(ultCmds.GetEquippedItem) == "function" then
@@ -4110,7 +4147,7 @@ local function ultimateTick()
             if okChg and val == true then charged = true end
         end
     end
-    if pct >= 1 or isUltimateHudReady() then
+    if pct >= 1 or CFG.isUltimateHudReady() then
         charged = true
         if pct < 1 then pct = 1 end
     end
@@ -4140,7 +4177,7 @@ local function ultimateTick()
     if ok then nextAt.save = 0 end
 end
 
-local function daycareRemaining(save, record, serverNow)
+function CFG.daycareRemaining(save, record, serverNow)
     if type(record) ~= "table" then return 0 end
     local age = (tonumber(save.Age) or 0) + math.max(0, serverNow - (tonumber(save.LoginTime) or serverNow))
     local online = math.max(0, age - (tonumber(record.CreationAge) or 0))
@@ -4149,7 +4186,7 @@ local function daycareRemaining(save, record, serverNow)
     return math.max(0, CFG.DaycareDuration - elapsed)
 end
 
-local function daycareTick()
+function CFG.daycareTick()
     local now = os.clock()
     if now < nextAt.daycare then return end
     local save = getSave()
@@ -4160,7 +4197,7 @@ local function daycareTick()
     for uid, record in pairs(active) do
         if not alive or not enabled.autoDaycare then return end
         if type(record) == "table" then used += tonumber(record.Pet and record.Pet._am) or 0 end
-        if type(record) == "table" and record.Pet ~= nil and daycareRemaining(save, record, serverNow) <= 0 then
+        if type(record) == "table" and record.Pet ~= nil and CFG.daycareRemaining(save, record, serverNow) <= 0 then
             nextAt.daycare = now + CFG.DaycareInterval
             local ok, message = invoke("Daycare: Claim", tostring(uid))
             if not alive or not enabled.autoDaycare then return end
@@ -4189,7 +4226,7 @@ local function daycareTick()
     if ok == true then nextAt.save = 0 end
 end
 
-local function flagTick()
+function CFG.flagTick()
     local now = os.clock()
     if now < nextAt.flag then return end
     local save = getSave()
@@ -4241,7 +4278,7 @@ local function flagTick()
     end
     for _, item in ipairs(stackList(inventory(save, "Misc"))) do
         if not alive or not enabled.autoFlags then return end
-        local matchChosen = (chosenFlag == "Any Flag" and allowAll(picked.flags, item.id)) or (item.id == chosenFlag)
+        local matchChosen = (chosenFlag == "Any Flag" and CFG.allowAll(picked.flags, item.id)) or (item.id == chosenFlag)
         if item.id:match(" Flag$") and matchChosen and item.amount > 0 then
             nextAt.flag = now + CFG.FlagInterval
             local ok, message = invoke("FlexibleFlags_Consume", item.id, item.uid, 1)
@@ -4254,7 +4291,7 @@ local function flagTick()
     notes.flags = "no " .. (chosenFlag == "Any Flag" and "selected flags" or chosenFlag) .. " in inventory"
 end
 
-local function secretRoomTick()
+function CFG.secretRoomTick()
     local now = os.clock()
     if now < nextAt.secret then return end
     local save = getSave()
@@ -4278,7 +4315,7 @@ local function secretRoomTick()
     notes.secret = "all nearby secret rooms unlocked"
 end
 
-local function treehouseTick()
+function CFG.treehouseTick()
     local now = os.clock()
     if now < nextAt.treehouse then return end
     nextAt.treehouse = now + CFG.TreehouseInterval
@@ -4291,7 +4328,7 @@ local function treehouseTick()
     end
 end
 
-local function fuseTick()
+function CFG.fuseTick()
     local now = os.clock()
     if now < nextAt.fuse then return end
     local save = getSave()
@@ -4323,14 +4360,14 @@ local function fuseTick()
     if ok == true then nextAt.save = 0 end
 end
 
-local function cardTick()
+function CFG.cardTick()
     local now = os.clock()
     if now < nextAt.card then return end
     local save = getSave()
     if not save then notes.cards = "waiting for profile"; return end
     local payload, total = {}, 0
     for _, card in ipairs(stackList(inventory(save, "Card"))) do
-        if allowAll(picked.cards, card.id) then
+        if CFG.allowAll(picked.cards, card.id) then
             local count = card.amount // 3
             if count > 0 then payload[card.uid] = count; total += count end
         end
@@ -4343,7 +4380,7 @@ local function cardTick()
     if ok == true then nextAt.save = 0 end
 end
 
-local function diceTick()
+function CFG.diceTick()
     local now = os.clock()
     if now < nextAt.dice then return end
     local save = getSave()
@@ -4352,16 +4389,16 @@ local function diceTick()
     for _, item in ipairs(stackList(inventory(save, "Misc"))) do
         halves[item.id] = (halves[item.id] or 0) + item.amount
     end
-    for _, id in ipairs(DICE_IDS) do
+    for _, id in ipairs(CFG.DICE_IDS) do
         if not alive or not enabled.autoDice then return end
         local amount = halves[id] or 0
-        if amount > 0 and allowAll(picked.dice, id) then
+        if amount > 0 and CFG.allowAll(picked.dice, id) then
             nextAt.dice = now + CFG.DiceInterval
             local count = math.max(1, math.min(amount, CFG.DiceMaxConsume))
             local ok, message
             if id == "Fire Dice V2" then
                 ok, message = invoke("FireDice_Consume_V2", count)
-            elseif MEGA_DICE[id] then
+            elseif CFG.MEGA_DICE[id] then
                 ok, message = invoke("LuckyDice_ConsumeMega_V2", id, count)
             else
                 ok, message = invoke("LuckyDice_Consume_V2", id, count)
@@ -4375,7 +4412,7 @@ local function diceTick()
     notes.dice = "no selected dice in inventory"
 end
 
-local function relicTick()
+function CFG.relicTick()
     local now = os.clock()
     if now < nextAt.relic then return end
     local save = getSave()
@@ -4401,7 +4438,7 @@ local function relicTick()
     notes.relics = "no uncollected relics listed"
 end
 
-local function mailClaimTick()
+function CFG.mailClaimTick()
     local now = os.clock()
     if now < nextAt.mail then return end
     local save = getSave()
@@ -4588,16 +4625,16 @@ function CFG.Quest.HasPotionBulk()
     return bulk
 end
 
-local bestEggInfoCache = { at = -math.huge, maxEggNum = nil, maxHatch = nil }
+CFG.bestEggInfoCache = { at = -math.huge, maxEggNum = nil, maxHatch = nil }
 function CFG.Quest.BestEggInfo(save)
     local now = os.clock()
     local saveMaxEgg = tonumber(save and save.MaximumAvailableEgg) or nil
     local saveHatch = tonumber(save and save.EggHatchCount) or nil
-    if now - bestEggInfoCache.at < 5.0
-        and bestEggInfoCache.bestEggId
-        and (not saveMaxEgg or bestEggInfoCache.maxEggNum == saveMaxEgg)
-        and (not saveHatch or bestEggInfoCache.saveHatch == saveHatch) then
-        return bestEggInfoCache.bestEggId, bestEggInfoCache.bestEggPets, bestEggInfoCache.petCount, bestEggInfoCache.maxEggNum, bestEggInfoCache.maxHatch
+    if now - CFG.bestEggInfoCache.at < 5.0
+        and CFG.bestEggInfoCache.bestEggId
+        and (not saveMaxEgg or CFG.bestEggInfoCache.maxEggNum == saveMaxEgg)
+        and (not saveHatch or CFG.bestEggInfoCache.saveHatch == saveHatch) then
+        return CFG.bestEggInfoCache.bestEggId, CFG.bestEggInfoCache.bestEggPets, CFG.bestEggInfoCache.petCount, CFG.bestEggInfoCache.maxEggNum, CFG.bestEggInfoCache.maxHatch
     end
     local maxEggNum = saveMaxEgg
     local maxHatch = nil
@@ -4673,13 +4710,13 @@ function CFG.Quest.BestEggInfo(save)
     end
     if not bestEggId or #bestEggId == 0 then bestEggId = eggByNumber[1] end
     local clampedHatch = math.clamp(maxHatch, 1, CFG.EggMaxHatch)
-    bestEggInfoCache.at = now
-    bestEggInfoCache.bestEggId = bestEggId
-    bestEggInfoCache.bestEggPets = bestEggPets
-    bestEggInfoCache.petCount = petCount
-    bestEggInfoCache.maxEggNum = maxEggNum
-    bestEggInfoCache.maxHatch = clampedHatch
-    bestEggInfoCache.saveHatch = saveHatch
+    CFG.bestEggInfoCache.at = now
+    CFG.bestEggInfoCache.bestEggId = bestEggId
+    CFG.bestEggInfoCache.bestEggPets = bestEggPets
+    CFG.bestEggInfoCache.petCount = petCount
+    CFG.bestEggInfoCache.maxEggNum = maxEggNum
+    CFG.bestEggInfoCache.maxHatch = clampedHatch
+    CFG.bestEggInfoCache.saveHatch = saveHatch
     return bestEggId, bestEggPets, petCount, maxEggNum, clampedHatch
 end
 
@@ -4687,21 +4724,21 @@ function CFG.Quest.HatchBestEgg(save, desiredCount)
     local bestEggId, _, _, _, maxHatch = CFG.Quest.BestEggInfo(save)
     if not bestEggId then return false, "best egg unknown" end
     local count = math.clamp(tonumber(desiredCount) or maxHatch, 1, maxHatch)
-    local _, _, eggPos = findEggModel(bestEggId, position())
+    local _, _, eggPos = CFG.findEggModel(bestEggId, position())
     if not eggPos then
-        local spawnZone = CFG.Quest.WORLD_SPAWN[detectActiveWorld()] or "Spawn"
+        local spawnZone = CFG.Quest.WORLD_SPAWN[CFG.detectActiveWorld()] or "Spawn"
         if currentZone() ~= spawnZone then
-            teleportToIslandMiddle(spawnZone)
+            CFG.teleportToIslandMiddle(spawnZone)
             task.wait(0.35)
         end
-        _, _, eggPos = findEggModel(bestEggId, position())
+        _, _, eggPos = CFG.findEggModel(bestEggId, position())
     end
-    local ok, msg = hatchEggById(bestEggId, count, true)
+    local ok, msg = CFG.hatchEggById(bestEggId, count, true)
     if not ok then
         local unlocked = invoke("Eggs_RequestUnlock", bestEggId)
         if unlocked == true then
             task.wait(0.15)
-            ok, msg = hatchEggById(bestEggId, count, true)
+            ok, msg = CFG.hatchEggById(bestEggId, count, true)
         end
     end
     if ok then nextAt.save = 0 end
@@ -4727,10 +4764,10 @@ end
 
 -- Item 6: Auto Do Quest Tasks. Inspects Rank Goals (save.Goals), ZoneGateQuest,
 -- ZoneQuests, and NPCQuests, and automatically performs the required action.
-local function collectActiveGoals(save)
+function CFG.collectActiveGoals(save)
     local list = {}
     local function push(goal, source)
-        if type(goal) == "table" and type(goal.Type) == "number" and not goalFull(goal) and goal.Claimed ~= true then
+        if type(goal) == "table" and type(goal.Type) == "number" and not CFG.goalFull(goal) and goal.Claimed ~= true then
             list[#list + 1] = {
                 goal = goal,
                 source = source,
@@ -4773,7 +4810,7 @@ local function collectActiveGoals(save)
     return list
 end
 
-local function doQuestTick()
+function CFG.doQuestTick()
     if CFG.TimeTrial and CFG.TimeTrial.BlocksOtherTele() then
         notes.doQuest = "paused (Time Trial active)"
         return
@@ -4782,9 +4819,9 @@ local function doQuestTick()
     if now < nextAt.doQuest then return end
     local save = getSave()
     if not save then notes.doQuest = "waiting for profile"; return end
-    if enabled.autoQuest and not workers.quest then pcall(questTick) end
-    if enabled.autoRank and not workers.rank then pcall(rankTick) end
-    local activeGoals = collectActiveGoals(save)
+    if enabled.autoQuest and not workers.quest then pcall(CFG.questTick) end
+    if enabled.autoRank and not workers.rank then pcall(CFG.rankTick) end
+    local activeGoals = CFG.collectActiveGoals(save)
     if #activeGoals == 0 then
         notes.doQuest = "no active incomplete quest goals"
         nextAt.doQuest = now + CFG.DoQuestInterval
@@ -4819,7 +4856,7 @@ local function doQuestTick()
             if goal.EggID then
                 local _, _, _, _, maxHatch = CFG.Quest.BestEggInfo(save)
                 local count = math.clamp(math.min(rem, maxHatch), 1, maxHatch)
-                ok, msg = hatchEggById(goal.EggID, count, true)
+                ok, msg = CFG.hatchEggById(goal.EggID, count, true)
                 if ok then nextAt.save = 0 end
             else
                 local _, _, _, _, maxHatch = CFG.Quest.BestEggInfo(save)
@@ -4905,7 +4942,7 @@ local function doQuestTick()
             CFG.Quest.currentDoing = CFG.Quest.GoalTitle(goal)
             local best = maxOwned(save)
             if best and zones[best] and currentZone() ~= zones[best].id then
-                teleportToIslandMiddle(zones[best].id)
+                CFG.teleportToIslandMiddle(zones[best].id)
             end
             for _, item in ipairs(stackList(inventory(save, "Misc"))) do
                 if item.id:match(" Flag$") then
@@ -5005,7 +5042,7 @@ local function doQuestTick()
             end
         -- 19 = FUSE_PETS
         elseif gtype == 19 then
-            pcall(fuseTick)
+            pcall(CFG.fuseTick)
             notes.doQuest = "quest fuse triggered"
         -- 12 = UPGRADE_POTION
         elseif gtype == 12 then
@@ -5067,7 +5104,7 @@ local function doQuestTick()
             if now >= (nextAt.coinJar or 0) then
                 local best = maxOwned(save)
                 if best and zones[best] and currentZone() ~= zones[best].id then
-                    teleportToIslandMiddle(zones[best].id)
+                    CFG.teleportToIslandMiddle(zones[best].id)
                 end
                 local miscList = stackList(inventory(save, "Misc"))
                 local jarOrder = {"Basic Coin Jar"}
@@ -5092,7 +5129,7 @@ local function doQuestTick()
             local goalTitle = CFG.Quest.GoalTitle(goal)
             CFG.Quest.currentDoing = goalTitle
             -- Leave any instance and stand inside the best unlocked zone's breakables dotted box (required by Comet/Pinata/LuckyBlock)
-            leaveActiveInstance()
+            CFG.leaveActiveInstance()
             local best = maxOwned(save)
             if best and zones[best] then
                 local inBox = false
@@ -5103,7 +5140,7 @@ local function doQuestTick()
                     end
                 end)
                 if currentZone() ~= zones[best].id or not inBox then
-                    teleportToIslandMiddle(zones[best].id)
+                    CFG.teleportToIslandMiddle(zones[best].id)
                     task.wait(0.25)
                 end
             end
@@ -5118,7 +5155,7 @@ local function doQuestTick()
                         CFG.Quest.currentDoing = ("Break %d Comet (Comet Shower active)"):format(rem)
                         CFG.Quest.Log("CometShower_Activate -> started!")
                         nextAt.save = 0
-                        pcall(petTick); pcall(tapTick); pcall(vacuumTick)
+                        pcall(CFG.petTick); pcall(CFG.tapTick); pcall(CFG.vacuumTick)
                         return
                     else
                         CFG.Quest.Log("CometShower_Activate -> " .. tostring(msgSh or "cooldown/unavailable"))
@@ -5137,7 +5174,7 @@ local function doQuestTick()
                                 CFG.Quest.currentDoing = ("Break %d Comet (spawned)"):format(rem)
                                 CFG.Quest.Log("Comet_Spawn -> " .. item.id)
                                 nextAt.save = 0
-                                pcall(petTick); pcall(tapTick); pcall(vacuumTick)
+                                pcall(CFG.petTick); pcall(CFG.tapTick); pcall(CFG.vacuumTick)
                                 return
                             else
                                 nextAt.comet = now + 3
@@ -5163,7 +5200,7 @@ local function doQuestTick()
                                 CFG.Quest.currentDoing = ("Break %d Pinata (spawned)"):format(rem)
                                 CFG.Quest.Log("MiniPinata_Consume -> " .. item.id)
                                 nextAt.save = 0
-                                pcall(petTick); pcall(tapTick); pcall(vacuumTick)
+                                pcall(CFG.petTick); pcall(CFG.tapTick); pcall(CFG.vacuumTick)
                                 return
                             else
                                 nextAt.pinata = now + 3
@@ -5189,7 +5226,7 @@ local function doQuestTick()
                                 CFG.Quest.currentDoing = ("Break %d Lucky Block (spawned)"):format(rem)
                                 CFG.Quest.Log("MiniLuckyBlock_Consume -> " .. item.id)
                                 nextAt.save = 0
-                                pcall(petTick); pcall(tapTick); pcall(vacuumTick)
+                                pcall(CFG.petTick); pcall(CFG.tapTick); pcall(CFG.vacuumTick)
                                 return
                             else
                                 nextAt.luckyBlock = now + 3
@@ -5218,13 +5255,13 @@ local function doQuestTick()
             end
         -- 18 = FREE_GIFT, 80 = EQUIP_PET, 55 = SECRET_KEY, 56 = CRYSTAL_KEY, 61 = DIAMOND_WHEEL
         elseif gtype == 18 then
-            pcall(freeGiftTick)
+            pcall(CFG.freeGiftTick)
         elseif gtype == 80 then
-            pcall(petSlotTick)
+            pcall(CFG.petSlotTick)
         elseif gtype == 56 then
             if invoke("CrystalKey_Unlock") == true then notes.doQuest = "quest crystal chest unlocked"; return end
         elseif gtype == 55 then
-            local okS, msgS = useSecretKeyCrystalWheel(save, 1)
+            local okS, msgS = CFG.useSecretKeyCrystalWheel(save, 1)
             if okS then notes.doQuest = "quest secret key: " .. tostring(msgS); return end
         elseif gtype == 61 then
             if invoke("Spinny Wheel: Request Spin", "DiamondWheel") == true then notes.doQuest = "quest spun diamond wheel"; return end
@@ -5242,13 +5279,13 @@ local function doQuestTick()
         if best and zones[best] then
             local id = zones[best].id
             if currentZone() ~= id then
-                teleportToIslandMiddle(id)
+                CFG.teleportToIslandMiddle(id)
             end
         end
     end
-    if not workers.pet then pcall(petTick) end
-    if not workers.tap then pcall(tapTick) end
-    if not workers.vacuum then pcall(vacuumTick) end
+    if not workers.pet then pcall(CFG.petTick) end
+    if not workers.tap then pcall(CFG.tapTick) end
+    if not workers.vacuum then pcall(CFG.vacuumTick) end
     local topTitle = CFG.Quest.GoalTitle(activeGoals[1].goal)
     CFG.Quest.currentDoing = topTitle
     notes.doQuest = ("Doing: %s"):format(topTitle)
@@ -5621,8 +5658,8 @@ function CFG.SyncReduceCpuRam()
                 pcall(function() child.Enabled = false end)
             end
         end
-        suppressEffects("Breakables", optBreakableEffects)
-        suppressEffects("Pets", optPetEffects)
+        CFG.suppressEffects("Breakables", optBreakableEffects)
+        CFG.suppressEffects("Pets", optPetEffects)
         local debris = workspace:FindFirstChild("__DEBRIS")
         if debris then
             for _, child in ipairs(debris:GetChildren()) do
@@ -5680,18 +5717,18 @@ function CFG.SyncFastFarmBeta()
         local zone = currentZone()
         if pickCount(picked.zones) > 0 and zone and not picked.zones[zone] then return end
         if #auraTargets == 0 or now - (target.at or 0) >= 0.04 then
-            target.model, target.uid = pickTarget(point, zone)
+            target.model, target.uid = CFG.pickTarget(point, zone)
             target.at = now
         end
         local validList = {}
         local seenM = {}
-        if target.model and validTarget(target.model, point, nil) then
+        if target.model and CFG.validTarget(target.model, point, nil) then
             seenM[target.model] = true
             validList[#validList + 1] = { model = target.model, uid = target.model:GetAttribute("BreakableUID") }
         end
         if type(auraTargets) == "table" then
             for _, m in ipairs(auraTargets) do
-                if not seenM[m] and validTarget(m, point, nil) then
+                if not seenM[m] and CFG.validTarget(m, point, nil) then
                     local u = m:GetAttribute("BreakableUID")
                     if u ~= nil then
                         seenM[m] = true
@@ -5833,7 +5870,7 @@ CFG.CheatState = {
     uidCounter = 1,
 }
 
-local function syncNoclip()
+function CFG.syncNoclip()
     local st = CFG.CheatState
     if not alive or not enabled.noclip then
         if st.noclipConn then st.noclipConn:Disconnect(); st.noclipConn = nil end
@@ -5852,7 +5889,7 @@ local function syncNoclip()
     end)
 end
 
-local function syncFly()
+function CFG.syncFly()
     local st = CFG.CheatState
     if not alive or not enabled.fly then
         if st.flyConn then st.flyConn:Disconnect(); st.flyConn = nil end
@@ -5900,7 +5937,7 @@ local function syncFly()
     end)
 end
 
-local function syncGamepasses()
+function CFG.syncGamepasses()
     local st = CFG.CheatState
     local active = alive and enabled.unlockGamepasses
     local save = getSave()
@@ -5940,7 +5977,7 @@ local function syncGamepasses()
     end
 end
 
-local function syncGates()
+function CFG.syncGates()
     local st = CFG.CheatState
     if alive and enabled.removeGates then
         for _, borderName in ipairs({"Border", "Border2", "Border3", "Border4"}) do
@@ -5984,7 +6021,7 @@ local function syncGates()
     end
 end
 
-local function runCheatAction(action, params)
+function CFG.runCheatAction(action, params)
     params = type(params) == "table" and params or {}
     local save = getSave()
     local function fireStatChange(key)
@@ -6089,7 +6126,7 @@ local function runCheatAction(action, params)
     return false, "unknown cheat action: " .. tostring(action)
 end
 
-local function httpGet(url)
+function CFG.httpGet(url)
     if type(game.HttpGet) == "function" then
         local ok, body = pcall(game.HttpGet, game, url)
         if ok then return body end
@@ -6126,7 +6163,7 @@ function CFG.Hop.FetchCandidates(force)
         if cursor and #cursor > 0 then
             url = url .. "&cursor=" .. httpSvc:UrlEncode(cursor)
         end
-        local body = httpGet(url)
+        local body = CFG.httpGet(url)
         if not body then break end
         local ok, data = pcall(function() return httpSvc:JSONDecode(body) end)
         if not ok or type(data) ~= "table" or type(data.data) ~= "table" then break end
@@ -6151,7 +6188,6 @@ function CFG.Hop.FetchCandidates(force)
     return candidates
 end
 
-local hopTick
 function CFG.Hop.EnsureListener()
     if CFG.Hop.conn then return end
     local tpSvc = game:GetService("TeleportService")
@@ -6168,14 +6204,14 @@ function CFG.Hop.EnsureListener()
             task.delay(1.5, function()
                 if not alive then return end
                 if enabled.serverHop or CFG.Hop.forceRetry then
-                    hopTick(CFG.Hop.forceRetry)
+                    CFG.hopTick(CFG.Hop.forceRetry)
                 end
             end)
         end
     end)
 end
 
-hopTick = function(force)
+CFG.hopTick = function(force)
     CFG.Hop.EnsureListener()
     local now = os.clock()
     if CFG.Hop.inProgress and (now - CFG.Hop.startedAt) < 12 then
@@ -6368,7 +6404,7 @@ function CFG.Event.MoveTo(targetPos)
         pcall(function() hum:MoveTo(targetPos) end)
         return true
     end
-    return snapTo(targetPos)
+    return CFG.snapTo(targetPos)
 end
 
 function CFG.Event.TeleToFarm()
@@ -6438,7 +6474,7 @@ function CFG.Event.Enter()
                     local target = (sp and sp:IsA("BasePart") and sp.Position) or modelPosition(model)
                     local myPos = position()
                     if target and (not myPos or (myPos - target).Magnitude > 250 or myPos.Y < target.Y - 60) then
-                        snapTo(target + Vector3.new(0, 3, 0))
+                        CFG.snapTo(target + Vector3.new(0, 3, 0))
                     end
                 end
             end
@@ -6469,7 +6505,7 @@ function CFG.Event.Enter()
         if type(inst.GetEnterPart) == "function" then
             local okP, part = pcall(inst.GetEnterPart, "PumpkinTycoon")
             if okP and typeof(part) == "Instance" and part:IsA("BasePart") then
-                snapTo(part.Position)
+                CFG.snapTo(part.Position)
                 task.wait(0.25)
             end
         end
@@ -6677,7 +6713,7 @@ function CFG.Event.ZonePos(plot, zIdx)
     return model and modelPosition(model) or nil, nil
 end
 
-local EVENT_DEBRIS_FX = {
+CFG.EVENT_DEBRIS_FX = {
     TurkeyFlash = true, TurkeyBreakRing = true, TurkeyBeacon = true,
     TurkeyCoin = true, TurkeyOrb = true, TurkeyMeteor = true,
     PumpkinBeacon = true, PumpkinPillar = true, PumpkinBloom = true, PumpkinChunk = true,
@@ -6696,7 +6732,7 @@ function CFG.Event.Optimize(now)
     local debris = workspace:FindFirstChild("__DEBRIS")
     if debris then
         for _, child in ipairs(debris:GetChildren()) do
-            if EVENT_DEBRIS_FX[child.Name] then
+            if CFG.EVENT_DEBRIS_FX[child.Name] then
                 pcall(function() child:Destroy() end)
             end
         end
@@ -6707,18 +6743,18 @@ function CFG.Event.Optimize(now)
         if ptInst then
             local shared = ptInst:FindFirstChild("PumpkinTycoonShared")
             if shared then
-                suppressEffects("Instances", optBreakableEffects)
+                CFG.suppressEffects("Instances", optBreakableEffects)
                 local arena = shared:FindFirstChild("TurkeyArena", true)
                 if arena then
                     for _, child in ipairs(arena:GetDescendants()) do
-                        if EFFECT_CLASSES[child.ClassName] then
+                        if CFG.EFFECT_CLASSES[child.ClassName] then
                             pcall(function() child.Enabled = false end)
                         end
                     end
                 end
             end
             for _, child in ipairs(ptInst:GetDescendants()) do
-                if EFFECT_CLASSES[child.ClassName] then
+                if CFG.EFFECT_CLASSES[child.ClassName] then
                     if optBreakableEffects[child] == nil then optBreakableEffects[child] = child.Enabled end
                     pcall(function() child.Enabled = false end)
                 end
@@ -6728,7 +6764,7 @@ function CFG.Event.Optimize(now)
     local islandsFolder = workspace:FindFirstChild("PumpkinTycoonIslands")
     if islandsFolder then
         for _, child in ipairs(islandsFolder:GetDescendants()) do
-            if EFFECT_CLASSES[child.ClassName] then
+            if CFG.EFFECT_CLASSES[child.ClassName] then
                 pcall(function() child.Enabled = false end)
             end
         end
@@ -7149,14 +7185,14 @@ function CFG.Event.Cocoa(now, plot, save)
     end
 end
 
-local EVENT_BOOST_PREFIX = {
+CFG.EVENT_BOOST_PREFIX = {
     ["Pumpkin Coin Boost"] = "PumpkinTycoonCoins",
     ["Pumpkin Damage Boost"] = "PumpkinTycoonDamage",
     ["Island Egg Luck Boost"] = "PumpkinTycoonIslandLuck",
 }
 
-local function getActiveEventBoostTier(save, itemId)
-    local prefix = EVENT_BOOST_PREFIX[itemId]
+function CFG.getActiveEventBoostTier(save, itemId)
+    local prefix = CFG.EVENT_BOOST_PREFIX[itemId]
     if not prefix then return 0, 0 end
     local bc = modules.boostCmds
     if not bc then
@@ -7198,7 +7234,7 @@ function CFG.Event.UseBoosts(now, save)
             end
             if okAllow then
                 -- Do not stack or consume lower/same tier while an active boost timer is running
-                local activeTier, activeRem = getActiveEventBoostTier(save, item.id)
+                local activeTier, activeRem = CFG.getActiveEventBoostTier(save, item.id)
                 if activeRem <= 0 or item.tier > activeTier then
                     list[#list + 1] = item
                 end
@@ -7519,7 +7555,7 @@ function CFG.AntiAfk.Pulse()
     return ok
 end
 
-local function syncAntiAfk()
+function CFG.syncAntiAfk()
     local st = CFG.AntiAfk
     if not alive or not enabled.antiAfk then
         if st.conn then st.conn:Disconnect(); st.conn = nil end
@@ -7682,7 +7718,7 @@ function CFG.TimeTrial.GetStatus()
     local pvpUnlocked = goalIndex > totalGoals
     return {
         inInstance = CFG.TimeTrial.InInstance(),
-        world = detectActiveWorld(),
+        world = CFG.detectActiveWorld(),
         goalIndex = goalIndex,
         totalGoals = totalGoals,
         pvpUnlocked = pvpUnlocked,
@@ -7702,19 +7738,19 @@ function CFG.TimeTrial.TeleportToZone()
     if CFG.TimeTrial.InInstance() then
         return true, "already inside Time Trial"
     end
-    if detectActiveWorld() ~= CFG.TimeTrial.WORLD_NUMBER then
-        local okW, msgW = teleportToWorldOrBestIsland(CFG.TimeTrial.WORLD_NUMBER)
+    if CFG.detectActiveWorld() ~= CFG.TimeTrial.WORLD_NUMBER then
+        local okW, msgW = CFG.teleportToWorldOrBestIsland(CFG.TimeTrial.WORLD_NUMBER)
         return okW, okW and "teleporting to World 4" or tostring(msgW or "failed World 4 teleport")
     end
     local inst = modules.instancing
     if inst and type(inst.GetEnterPart) == "function" then
         local okP, part = pcall(inst.GetEnterPart, CFG.TimeTrial.INSTANCE_ID)
         if okP and typeof(part) == "Instance" and part:IsA("BasePart") then
-            snapTo(part.Position + Vector3.new(0, 4, 0))
+            CFG.snapTo(part.Position + Vector3.new(0, 4, 0))
             return true, "teleported to Time Trial portal"
         end
     end
-    local okZ, msgZ = teleportToIslandMiddle(CFG.TimeTrial.ZONE_NAME)
+    local okZ, msgZ = CFG.teleportToIslandMiddle(CFG.TimeTrial.ZONE_NAME)
     return okZ, msgZ or ("teleported to " .. CFG.TimeTrial.ZONE_NAME)
 end
 
@@ -7726,13 +7762,13 @@ function CFG.TimeTrial.Enter()
     if inst and type(inst.IsInInstance) == "function" then
         local okOther, inAny = pcall(inst.IsInInstance)
         if okOther and inAny == true then
-            leaveActiveInstance()
+            CFG.leaveActiveInstance()
             task.wait(0.6)
         end
     end
-    if detectActiveWorld() ~= CFG.TimeTrial.WORLD_NUMBER then
+    if CFG.detectActiveWorld() ~= CFG.TimeTrial.WORLD_NUMBER then
         notes.timeTrial = "switching to World 4..."
-        teleportToWorldOrBestIsland(CFG.TimeTrial.WORLD_NUMBER)
+        CFG.teleportToWorldOrBestIsland(CFG.TimeTrial.WORLD_NUMBER)
         return false, "switching to World 4 (re-run after load)"
     end
     local portalPart = nil
@@ -7745,11 +7781,11 @@ function CFG.TimeTrial.Enter()
     if portalPart then
         local myPos = position()
         if not myPos or (myPos - portalPart.Position).Magnitude > 45 then
-            snapTo(portalPart.Position + Vector3.new(0, 4, 0))
+            CFG.snapTo(portalPart.Position + Vector3.new(0, 4, 0))
             task.wait(0.25)
         end
     else
-        pcall(teleportToIslandMiddle, CFG.TimeTrial.ZONE_NAME)
+        pcall(CFG.teleportToIslandMiddle, CFG.TimeTrial.ZONE_NAME)
         task.wait(0.35)
     end
     table.clear(CFG.TimeTrial.visitedPads)
@@ -7979,7 +8015,7 @@ function CFG.TimeTrial.Tick()
             local nearest = list[1]
             if myPos and nearest.dist > 28 and now >= (CFG.TimeTrial.nextMoveAt or 0) then
                 CFG.TimeTrial.nextMoveAt = now + 0.35
-                snapTo(nearest.pos + Vector3.new(0, 4, 0))
+                CFG.snapTo(nearest.pos + Vector3.new(0, 4, 0))
             end
             local assigned = CFG.TimeTrial.AttackBreakables(list)
             notes.timeTrial = ("running | %d targets | %d pets"):format(#list, assigned)
@@ -7991,7 +8027,7 @@ function CFG.TimeTrial.Tick()
                 if pad and now >= (CFG.TimeTrial.nextMoveAt or 0) then
                     CFG.TimeTrial.visitedPads[pad] = true
                     CFG.TimeTrial.nextMoveAt = now + 0.8
-                    snapTo(pad.Position + Vector3.new(0, 4, 0))
+                    CFG.snapTo(pad.Position + Vector3.new(0, 4, 0))
                     notes.timeTrial = "moving to " .. pad.Name
                     return
                 end
@@ -8261,8 +8297,8 @@ function CFG.RankHUD.Build()
     pcall(CFG.RankHUD.Update)
 end
 
-local function readRankGoalsFromGui()
-    local pg = LP and LP:FindFirstChildOfClass("PlayerGui")
+function CFG.readRankGoalsFromGui()
+    local pg = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
     if not pg then return nil, nil, nil end
     local uiRank, uiStars, uiGoals = nil, nil, {}
     pcall(function()
@@ -8324,7 +8360,7 @@ function CFG.RankHUD.Update()
     local save = getSave()
     local uiRank, uiStars, uiGoals = nil, nil, nil
     if not save then
-        uiRank, uiStars, uiGoals = readRankGoalsFromGui()
+        uiRank, uiStars, uiGoals = CFG.readRankGoalsFromGui()
     end
     local rank = (save and save.Rank ~= nil and tostring(save.Rank)) or uiRank or "?"
     local stars = (save and save.RankStars ~= nil and tostring(save.RankStars)) or uiStars or "0"
@@ -8351,7 +8387,7 @@ function CFG.RankHUD.Update()
     if CFG.RankHUD.goalsLabel then
         local okG, errG = pcall(function()
             if save then
-                local active = collectActiveGoals(save)
+                local active = CFG.collectActiveGoals(save)
                 if #active == 0 then
                     if type(save.Goals) == "table" and next(save.Goals) ~= nil then
                         CFG.RankHUD.goalsLabel.Text = "All visible rank goals complete! Claiming rewards / waiting for new goal..."
@@ -8553,12 +8589,12 @@ end
 
 syncWorkers = function()
     if not alive then return end
-    syncAntiAfk()
-    syncEggFx()
-    syncNoclip()
-    syncFly()
-    syncGamepasses()
-    syncGates()
+    CFG.syncAntiAfk()
+    CFG.syncEggFx()
+    CFG.syncNoclip()
+    CFG.syncFly()
+    CFG.syncGamepasses()
+    CFG.syncGates()
     CFG.SyncFastFarmBeta()
     CFG.SyncWhiteScreen()
     CFG.SyncReduceCpuRam()
@@ -8582,72 +8618,72 @@ syncWorkers = function()
         or eventWanted or ttWanted
     local discoveryWanted = profileWanted or enabled.petSpeed or enabled.farm or enabled.fastFarmBeta or enabled.vacuum or enabled.tap or enabled.clickAura
     ensureWorker("profile", profileWanted, CFG.ProfileInterval, profileTick)
-    ensureWorker("discovery", discoveryWanted, CFG.DiscoveryInterval, discoveryTick)
+    ensureWorker("discovery", discoveryWanted, CFG.DiscoveryInterval, CFG.discoveryTick)
     if not discoveryWanted then heapObjects, heapCursor, treeScan = nil, nil, nil end
     local petWanted = enabled.petSpeed or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.ptAutoFightTurkey or enabled.autoTimeTrial or enabled.autoDoQuest
-    if not petWanted and petState.hook then restorePetSpeed() end
-    ensureWorker("pet", petWanted, CFG.PetInterval, petTick)
+    if not petWanted and petState.hook then CFG.restorePetSpeed() end
+    ensureWorker("pet", petWanted, CFG.PetInterval, CFG.petTick)
     local tapRate = enabled.clickAura and CFG.AuraRate or (enabled.farm and CFG.FarmTapRate or CFG.TapRate)
     if enabled.legitTap and not enabled.farm and not enabled.clickAura then tapRate = 8 end
-    ensureWorker("tap", enabled.tap or enabled.farm or enabled.clickAura, 1 / math.clamp(math.min(tapRate, CFG.MaxTapRate), 1, 120), tapTick)
+    ensureWorker("tap", enabled.tap or enabled.farm or enabled.clickAura, 1 / math.clamp(math.min(tapRate, CFG.MaxTapRate), 1, 120), CFG.tapTick)
     if (enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.autoTimeTrial or enabled.autoDoQuest) and not orbState.hook then
         if not orbBackfillNeeded then nextAt.heap = math.min(nextAt.heap, os.clock() + CFG.HeapRetryInterval) end
         orbBackfillNeeded = true
     end
-    ensureWorker("vacuum", enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.autoTimeTrial or enabled.autoDoQuest, CFG.VacuumRate, vacuumTick)
-    ensureWorker("tele", enabled.zoneTele, 0.5, teleTick, function() enabled.zoneTele = false end)
-    ensureWorker("buy", enabled.zoneBuy, 0.5, buyTick, function() enabled.zoneBuy = false end)
-    ensureWorker("quest", enabled.autoQuest, CFG.QuestInterval, questTick, function() enabled.autoQuest = false end)
-    ensureWorker("doQuest", enabled.autoDoQuest, CFG.DoQuestInterval, doQuestTick, function() enabled.autoDoQuest = false end)
-    ensureWorker("rank", enabled.autoRank, 1, rankTick, function() enabled.autoRank = false end)
-    ensureWorker("rebirth", enabled.autoRebirth, 1, rebirthTick, function() enabled.autoRebirth = false end)
-    ensureWorker("egg", enabled.autoEgg, 0.35, eggTick, function() enabled.autoEgg = false end)
-    ensureWorker("world", enabled.worldTele, 0.5, worldTeleTick, function() enabled.worldTele = false end)
+    ensureWorker("vacuum", enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.autoTimeTrial or enabled.autoDoQuest, CFG.VacuumRate, CFG.vacuumTick)
+    ensureWorker("tele", enabled.zoneTele, 0.5, CFG.teleTick, function() enabled.zoneTele = false end)
+    ensureWorker("buy", enabled.zoneBuy, 0.5, CFG.buyTick, function() enabled.zoneBuy = false end)
+    ensureWorker("quest", enabled.autoQuest, CFG.QuestInterval, CFG.questTick, function() enabled.autoQuest = false end)
+    ensureWorker("doQuest", enabled.autoDoQuest, CFG.DoQuestInterval, CFG.doQuestTick, function() enabled.autoDoQuest = false end)
+    ensureWorker("rank", enabled.autoRank, 1, CFG.rankTick, function() enabled.autoRank = false end)
+    ensureWorker("rebirth", enabled.autoRebirth, 1, CFG.rebirthTick, function() enabled.autoRebirth = false end)
+    ensureWorker("egg", enabled.autoEgg, 0.35, CFG.eggTick, function() enabled.autoEgg = false end)
+    ensureWorker("world", enabled.worldTele, 0.5, CFG.worldTeleTick, function() enabled.worldTele = false end)
     ensureWorker("advance", enabled.worldAdvance, 1, CFG.AdvanceTick, function() enabled.worldAdvance = false end)
-    ensureWorker("petSlot", enabled.autoBuyPetSlots, 1, petSlotTick, function() enabled.autoBuyPetSlots = false end)
+    ensureWorker("petSlot", enabled.autoBuyPetSlots, 1, CFG.petSlotTick, function() enabled.autoBuyPetSlots = false end)
     ensureWorker("eggSlot", enabled.autoBuyEggSlots, 1, CFG.EggSlotTick, function() enabled.autoBuyEggSlots = false end)
     ensureWorker("foreverPack", enabled.autoForeverPack, 2, CFG.ForeverPackTick, function() enabled.autoForeverPack = false end)
     ensureWorker("upgrade", enabled.autoBuyUpgrades, 1.5, CFG.UpgradeTick, function() enabled.autoBuyUpgrades = false end)
     ensureWorker("enchant", enabled.autoEquipEnchant, 1.5, CFG.AutoEquipEnchantTick, function() enabled.autoEquipEnchant = false end)
     ensureWorker("tnt", enabled.autoTNT, 1, CFG.TNTTick, function() enabled.autoTNT = false end)
     ensureWorker("tntCrate", enabled.autoTNTCrate, 1, CFG.TNTCrateTick, function() enabled.autoTNTCrate = false end)
-    ensureWorker("keys", enabled.autoKeys, 1, keyTick, function() enabled.autoKeys = false end)
-    ensureWorker("bags", enabled.autoGiftBags, 1, bagTick, function() enabled.autoGiftBags = false end)
-    ensureWorker("spin", enabled.autoSpinTickets, 0.15, spinTick, function() enabled.autoSpinTickets = false end)
+    ensureWorker("keys", enabled.autoKeys, 1, CFG.keyTick, function() enabled.autoKeys = false end)
+    ensureWorker("bags", enabled.autoGiftBags, 1, CFG.bagTick, function() enabled.autoGiftBags = false end)
+    ensureWorker("spin", enabled.autoSpinTickets, 0.15, CFG.spinTick, function() enabled.autoSpinTickets = false end)
     ensureWorker("seasonPass", enabled.autoSeasonPass, 5.0, CFG.SeasonPassTick, function() enabled.autoSeasonPass = false end)
     ensureWorker("zoneGifts", enabled.autoZoneGifts, 8.0, CFG.ZoneGiftsTick, function() enabled.autoZoneGifts = false end)
-    ensureWorker("chests", enabled.autoOpenChests, 1, chestTick, function() enabled.autoOpenChests = false end)
-    ensureWorker("fruits", enabled.autoFruits, 1, fruitTick, function() enabled.autoFruits = false end)
-    ensureWorker("potions", enabled.autoPotions, 1, potionTick, function() enabled.autoPotions = false end)
-    ensureWorker("freeGift", enabled.autoFreeGifts, 1, freeGiftTick, function() enabled.autoFreeGifts = false end)
-    ensureWorker("ultimate", enabled.autoUltimate, 1, ultimateTick, function() enabled.autoUltimate = false end)
+    ensureWorker("chests", enabled.autoOpenChests, 1, CFG.chestTick, function() enabled.autoOpenChests = false end)
+    ensureWorker("fruits", enabled.autoFruits, 1, CFG.fruitTick, function() enabled.autoFruits = false end)
+    ensureWorker("potions", enabled.autoPotions, 1, CFG.potionTick, function() enabled.autoPotions = false end)
+    ensureWorker("freeGift", enabled.autoFreeGifts, 1, CFG.freeGiftTick, function() enabled.autoFreeGifts = false end)
+    ensureWorker("ultimate", enabled.autoUltimate, 1, CFG.ultimateTick, function() enabled.autoUltimate = false end)
     ensureWorker("sprinkler", enabled.autoSprinkler, 2, CFG.SprinklerTick, function() enabled.autoSprinkler = false end)
-    ensureWorker("daycare", enabled.autoDaycare, 1, daycareTick, function() enabled.autoDaycare = false end)
-    ensureWorker("flags", enabled.autoFlags, 1, flagTick, function() enabled.autoFlags = false end)
-    ensureWorker("secret", enabled.autoSecretRooms, 1, secretRoomTick, function() enabled.autoSecretRooms = false end)
-    ensureWorker("treehouse", enabled.autoTreehouse, 1, treehouseTick, function() enabled.autoTreehouse = false end)
-    ensureWorker("fuse", enabled.autoFuse, 1, fuseTick, function() enabled.autoFuse = false end)
-    ensureWorker("cards", enabled.autoCards, 1, cardTick, function() enabled.autoCards = false end)
-    ensureWorker("dice", enabled.autoDice, 1, diceTick, function() enabled.autoDice = false end)
-    ensureWorker("relics", enabled.autoRelics, 1, relicTick, function() enabled.autoRelics = false end)
-    ensureWorker("mailClaim", enabled.autoMailClaim, 1, mailClaimTick, function() enabled.autoMailClaim = false end)
-    ensureWorker("hop", enabled.serverHop, CFG.HopInterval, hopTick, function() enabled.serverHop = false end)
+    ensureWorker("daycare", enabled.autoDaycare, 1, CFG.daycareTick, function() enabled.autoDaycare = false end)
+    ensureWorker("flags", enabled.autoFlags, 1, CFG.flagTick, function() enabled.autoFlags = false end)
+    ensureWorker("secret", enabled.autoSecretRooms, 1, CFG.secretRoomTick, function() enabled.autoSecretRooms = false end)
+    ensureWorker("treehouse", enabled.autoTreehouse, 1, CFG.treehouseTick, function() enabled.autoTreehouse = false end)
+    ensureWorker("fuse", enabled.autoFuse, 1, CFG.fuseTick, function() enabled.autoFuse = false end)
+    ensureWorker("cards", enabled.autoCards, 1, CFG.cardTick, function() enabled.autoCards = false end)
+    ensureWorker("dice", enabled.autoDice, 1, CFG.diceTick, function() enabled.autoDice = false end)
+    ensureWorker("relics", enabled.autoRelics, 1, CFG.relicTick, function() enabled.autoRelics = false end)
+    ensureWorker("mailClaim", enabled.autoMailClaim, 1, CFG.mailClaimTick, function() enabled.autoMailClaim = false end)
+    ensureWorker("hop", enabled.serverHop, CFG.HopInterval, CFG.hopTick, function() enabled.serverHop = false end)
     ensureWorker("pumpkinEvent", eventWanted, (enabled.ptAutoBreakPumpkins or enabled.ptAutoFightTurkey) and 0.12 or 0.4, CFG.Event.Tick)
     if not eventWanted then notes.event = "off" end
     ensureWorker("timeTrial", ttWanted, CFG.TimeTrialInterval or 0.12, CFG.TimeTrial.Tick)
     if not ttWanted then notes.timeTrial = "off" end
-    if not enabled.optBreakables and not enabled.reduceCpuRam and not enabled.optPumpkinTycoon then restoreEffects(optBreakableEffects) end
-    if not enabled.optPets and not enabled.hideEggFx and not enabled.reduceCpuRam then restoreEffects(optPetEffects) end
+    if not enabled.optBreakables and not enabled.reduceCpuRam and not enabled.optPumpkinTycoon then CFG.restoreEffects(optBreakableEffects) end
+    if not enabled.optPets and not enabled.hideEggFx and not enabled.reduceCpuRam then CFG.restoreEffects(optPetEffects) end
     if enabled.optBreakables or enabled.optPets or enabled.hideEggFx or enabled.reduceCpuRam then
         ensureWorker("optimize", true, CFG.OptimizeInterval, function()
-            optimizeTick()
+            CFG.optimizeTick()
             if enabled.reduceCpuRam then CFG.SyncReduceCpuRam() end
         end, function() enabled.optBreakables = false; enabled.optPets = false end)
     else
         stopWorker("optimize")
         notes.optimize = "off"
     end
-    if enabled.auraVisual then ensureAuraPart() else destroyAuraPart() end
+    if enabled.auraVisual then CFG.ensureAuraPart() else CFG.destroyAuraPart() end
     if not enabled.tap and not enabled.farm and not enabled.fastFarmBeta and not enabled.clickAura and not enabled.autoDoQuest then
         target.model, target.uid, target.at, targetScan = nil, nil, nil, nil
         auraTargets, auraCursor = {}, 0
@@ -8659,7 +8695,7 @@ syncWorkers = function()
         table.clear(petState.joinedTarget)
         notes.tap = "off"
     end
-    if not enabled.vacuum and not enabled.farm and not enabled.fastFarmBeta and not enabled.autoDoQuest and not enabled.ptAutoBreakPumpkins and not enabled.autoTimeTrial then restoreOrbCapture(); notes.vacuum = "off" end
+    if not enabled.vacuum and not enabled.farm and not enabled.fastFarmBeta and not enabled.autoDoQuest and not enabled.ptAutoBreakPumpkins and not enabled.autoTimeTrial then CFG.restoreOrbCapture(); notes.vacuum = "off" end
 end
 
 updateToggles = function() end
@@ -8679,14 +8715,14 @@ setEnabled = function(key, value)
     return true
 end
 
-local function allOff()
+function CFG.allOff()
     for key in pairs(enabled) do enabled[key] = false end
     syncWorkers()
     updateToggles()
     stage("All features off; already-sent requests cannot be recalled")
 end
 
-local function updateStatus()
+function CFG.updateStatus()
     local now = os.clock()
     local restarted = false
     for name, worker in pairs(workers) do
@@ -8709,9 +8745,9 @@ local function updateStatus()
         zones = count,
         best = tostring(best and zones[best].id or "unknown"),
         here = tostring(currentZone() or "unknown"),
-        world = currentWorldNumber(),
+        world = CFG.currentWorldNumber(),
         targetWorld = worldTarget,
-        bestWorld = bestUnlockedWorld(save),
+        bestWorld = CFG.bestUnlockedWorld(save),
         rank = tostring(save and save.Rank or "?"),
         stars = tostring(save and save.RankStars or "?"),
         rebirths = tostring(save and save.Rebirths or "?"),
@@ -8722,12 +8758,12 @@ cleanup = function()
     if not alive then return end
     alive = false
     for key in pairs(enabled) do enabled[key] = false end
-    syncAntiAfk()
-    syncEggFx()
-    syncNoclip()
-    syncFly()
-    syncGamepasses()
-    syncGates()
+    CFG.syncAntiAfk()
+    CFG.syncEggFx()
+    CFG.syncNoclip()
+    CFG.syncFly()
+    CFG.syncGamepasses()
+    CFG.syncGates()
     CFG.SyncFastFarmBeta()
     CFG.SyncWhiteScreen()
     CFG.SyncReduceCpuRam()
@@ -8741,13 +8777,13 @@ cleanup = function()
     if stats.connection then stats.connection:Disconnect(); stats.connection = nil end
     for _, connection in ipairs(connections) do connection:Disconnect() end
     table.clear(connections)
-    restorePetSpeed()
-    restoreOrbCapture()
-    restoreEffects(optBreakableEffects)
-    restoreEffects(optPetEffects)
-    destroyAuraPart()
+    CFG.restorePetSpeed()
+    CFG.restoreOrbCapture()
+    CFG.restoreEffects(optBreakableEffects)
+    CFG.restoreEffects(optPetEffects)
+    CFG.destroyAuraPart()
     if CFG.RankHUD and type(CFG.RankHUD.Destroy) == "function" then CFG.RankHUD.Destroy() end
-    table.clear(legitTeleDone)
+    table.clear(CFG.legitTeleDone)
     unpublish()
     print("[Steph HUB] unloaded")
 end
@@ -8755,10 +8791,10 @@ end
 local controller = {
     Version = VERSION,
     SetEnabled = setEnabled,
-    ClaimRankRewards = claimRankRewards,
-    AllOff = allOff,
+    ClaimRankRewards = CFG.claimRankRewards,
+    AllOff = CFG.allOff,
     Stop = cleanup,
-    TeleportIsland = teleportToIslandMiddle,
+    TeleportIsland = CFG.teleportToIslandMiddle,
     EnterPumpkinTycoon = function()
         return CFG.Event.Enter()
     end,
@@ -8791,8 +8827,8 @@ local controller = {
     end,
     TeleportBestWorld = function()
         local save = getSave()
-        local bestW = bestUnlockedWorld(save)
-        return teleportToWorldOrBestIsland(bestW)
+        local bestW = CFG.bestUnlockedWorld(save)
+        return CFG.teleportToWorldOrBestIsland(bestW)
     end,
     TeleportToFarm = function()
         if CFG.Event and type(CFG.Event.InInstance) == "function" and CFG.Event.InInstance() then
@@ -8802,20 +8838,20 @@ local controller = {
         if not save then return false, "waiting for profile" end
         local best = maxOwned(save)
         if not best or not zones[best] then return false, "waiting for zone map" end
-        return teleportToIslandMiddle(zones[best].id)
+        return CFG.teleportToIslandMiddle(zones[best].id)
     end,
     TeleportEventFarm = function()
         return CFG.Event.TeleToFarm()
     end,
     HatchEgg = function(eggId, count)
-        return hatchEggById(eggId, count, true)
+        return CFG.hatchEggById(eggId, count, true)
     end,
-    Cheat = runCheatAction,
+    Cheat = CFG.runCheatAction,
     GetCatalog = function()
-        return scanLiveDirectory()
+        return CFG.scanLiveDirectory()
     end,
     GetWorldCatalog = function()
-        local w = detectActiveWorld()
+        local w = CFG.detectActiveWorld()
         local wMin = (CFG.WorldFirst and CFG.WorldFirst[w]) or (w == 1 and 1 or (w == 2 and 100 or (w == 3 and 200 or 240)))
         local wMax = (CFG.WorldFirst and CFG.WorldFirst[w + 1] and (CFG.WorldFirst[w + 1] - 1)) or (w == 1 and 99 or (w == 2 and 199 or (w == 3 and 239 or 999)))
         local worldIslands = {}
@@ -8827,8 +8863,17 @@ local controller = {
         local worldEggs = {}
         local seenEgg = {}
         pcall(function()
-            local dir = require(RS.Library.Directory)
-            local eggsDir = dir and dir.Eggs
+            local dir = modules.directory
+            if not dir then
+                local lib = RS:FindFirstChild("Library")
+                local dirMod = lib and lib:FindFirstChild("Directory")
+                if dirMod then
+                    dir = CFG.SafeRequire(dirMod, function(loaded)
+                        if type(loaded) == "table" then modules.directory = loaded end
+                    end)
+                end
+            end
+            local eggsDir = type(dir) == "table" and dir.Eggs or nil
             if type(eggsDir) == "table" then
                 local ordered = {}
                 for id, data in pairs(eggsDir) do
@@ -8875,6 +8920,9 @@ local controller = {
         return true, pickCount(store)
     end,
     SetConfig = function(key, value)
+        if key == "BootstrapDone" or key == "BootstrapRetryAt" or key == "QuestDirScanned" or key == "TapProbeAt" or key == "AdvanceNext" then
+            return true, value
+        end
         if CFG[key] == nil then return false, "unknown knob" end
         if type(CFG[key]) == "string" then
             CFG[key] = tostring(value)
@@ -8892,7 +8940,7 @@ local controller = {
         return true, number
     end,
     HopNow = function()
-        task.spawn(hopTick, true)
+        task.spawn(CFG.hopTick, true)
         return true, "searching low-player server"
     end,
     GetConfig = function(key)
@@ -8905,7 +8953,7 @@ local controller = {
         return out
     end,
     GetStatus = function()
-        updateStatus()
+        CFG.updateStatus()
         return {
             running = alive,
             enabled = table.clone(enabled),
@@ -8924,7 +8972,16 @@ controller.IsRunning = function()
     return alive
 end
 controller.GetKnobs = function()
-    return table.clone(CFG)
+    local out = {}
+    for k, v in pairs(CFG) do
+        local tv = type(v)
+        if (tv == "number" or tv == "string" or tv == "boolean")
+            and k ~= "BootstrapDone" and k ~= "BootstrapRetryAt"
+            and k ~= "QuestDirScanned" and k ~= "TapProbeAt" and k ~= "AdvanceNext" then
+            out[k] = v
+        end
+    end
+    return out
 end
 controller.GetNotes = function()
     return table.clone(notes)
@@ -8932,19 +8989,19 @@ end
 controller.GetWorld = function()
     return worldTarget, CFG.WorldCount
 end
-controller.SetWorld = setWorldTarget
+controller.SetWorld = CFG.setWorldTarget
 controller.PickList = function()
     local out = {}
-    for _, category in ipairs(PICK_CATEGORIES) do
-        out[category[1]] = { title = category[2], items = pickItems(category[1]) }
+    for _, category in ipairs(CFG.PICK_CATEGORIES) do
+        out[category[1]] = { title = category[2], items = CFG.pickItems(category[1]) }
     end
     return out
 end
-worldTarget = currentWorldNumber()
+worldTarget = CFG.currentWorldNumber()
 publish()
 if not alive then return controller end
 task.defer(CFG.BootstrapModules)
-task.defer(scanLiveDirectory)
+task.defer(CFG.scanLiveDirectory)
 connect(LocalPlayer.CharacterAdded, function()
     target.model, target.uid, target.at = nil, nil, nil
     petState.routeTarget, petState.routeAt = nil, nil
@@ -8954,6 +9011,6 @@ connect(LocalPlayer.CharacterAdded, function()
     table.clear(petState.assignedUid)
     table.clear(petState.joinedTarget)
 end)
-ensureWorker("status", true, 1, updateStatus)
+ensureWorker("status", true, 1, CFG.updateStatus)
 stage("Ready; headless; no startup scans")
 return controller

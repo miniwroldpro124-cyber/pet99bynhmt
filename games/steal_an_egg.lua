@@ -1,8 +1,8 @@
 --!nolint
--- STEPH_COMPONENT: sae_hub 1.7.0
+-- STEPH_COMPONENT: steal_an_egg 1.8.0
 -- Stehp-Hub | Luau / Roblox executor | Steal an Egg + PS99 StephUI Edition
 
-local VERSION = "1.7.0"
+local VERSION = "1.8.0"
 local HUB_NAME = "Steph HUB"
 local CONFIG_FOLDER = "StephHUB_SAE"
 local CONFIG_FILE = CONFIG_FOLDER .. "/config.json"
@@ -367,6 +367,7 @@ local shuttingDown = false
 local syncAntiAfk
 local syncAntiCheat
 local cleanupHub
+local jobBusy = {}
 
 local runtime = {
     mode = "idle",
@@ -615,310 +616,75 @@ local function teleportToCFrame(cframe)
 end
 
 -- ============================================================================
--- Steal an Egg Anti-Cheat Protection Suite (verified against steal_an_egg_source)
+-- Steal an Egg Legit UI Cloaking Suite (verified against steal_an_egg_source)
 -- ============================================================================
 local acRuntime = {
-    hookedRemotes = {},
-    charConn = nil,
-    obbyAttrConn = nil,
-    heartbeatConn = nil,
-    namecallHooked = false,
+    recorderTable = nil,
+    origRecorderInDomain = nil,
 }
 
-local function restoreRemoteHooks()
-    for tbl, saved in pairs(acRuntime.hookedRemotes) do
-        pcall(function()
-            if saved.FireServer then
-                tbl.FireServer = saved.FireServer
-            end
-            if saved.InvokeServer then
-                tbl.InvokeServer = saved.InvokeServer
-            end
-        end)
+local function isCloakedUiInstance(inst)
+    if typeof(inst) ~= "Instance" then
+        return false
     end
-    table.clear(acRuntime.hookedRemotes)
+    local ok, cloaked = pcall(function()
+        local name = inst.Name
+        if name == "StephHUB_UI" or name == "STEPHHUB_LOADING" or name == HUB_NAME then
+            return true
+        end
+        if inst:FindFirstAncestor("StephHUB_UI") ~= nil or inst:FindFirstAncestor("STEPHHUB_LOADING") ~= nil then
+            return true
+        end
+        if gui and (inst == gui or inst:IsDescendantOf(gui)) then
+            return true
+        end
+        return false
+    end)
+    return ok and cloaked == true
 end
 
-local function hookRemoteTable(tbl, mode)
-    if type(tbl) ~= "table" then return end
-    if acRuntime.hookedRemotes[tbl] then return end
-    local origFire = rawget(tbl, "FireServer")
-    local origInvoke = rawget(tbl, "InvokeServer")
-    acRuntime.hookedRemotes[tbl] = {
-        FireServer = origFire,
-        InvokeServer = origInvoke,
-    }
-    if type(origFire) == "function" then
-        if mode == "guard_strike" then
-            tbl.FireServer = function(self, ...)
-                if not shuttingDown and state.anticheat.enabled and state.anticheat.blockGuardStrike then
-                    runtime.acBlockedStrikes = runtime.acBlockedStrikes + 1
-                    runtime.acLastNote = "Blocked ForestGuard strike #" .. tostring(runtime.acBlockedStrikes)
-                    return nil
-                end
-                return origFire(self, ...)
-            end
-        elseif mode == "limpness" then
-            tbl.FireServer = function(self, isLimp, ...)
-                if not shuttingDown and state.anticheat.enabled and state.anticheat.antiRagdollStun and isLimp == true then
-                    runtime.acCleanedStuns = runtime.acCleanedStuns + 1
-                    runtime.acLastNote = "Blocked Ragdoll limp packet"
-                    return origFire(self, false)
-                end
-                return origFire(self, isLimp, ...)
-            end
-        elseif mode == "idle_false" then
-            tbl.FireServer = function(self, flag, ...)
-                if not shuttingDown and state.anticheat.enabled and state.anticheat.blockIdleTelemetry and flag == true then
-                    runtime.acBlockedTele = runtime.acBlockedTele + 1
-                    return origFire(self, false)
-                end
-                return origFire(self, flag, ...)
-            end
-        elseif mode == "idle_drop" then
-            tbl.FireServer = function(self, ...)
-                if not shuttingDown and state.anticheat.enabled and state.anticheat.blockIdleTelemetry then
-                    runtime.acBlockedTele = runtime.acBlockedTele + 1
-                    return nil
-                end
-                return origFire(self, ...)
-            end
-        end
+local function restoreRecorderCloak()
+    if acRuntime.recorderTable and acRuntime.origRecorderInDomain then
+        pcall(function()
+            acRuntime.recorderTable._inDomain = acRuntime.origRecorderInDomain
+        end)
     end
-    if type(origInvoke) == "function" and mode == "idle_drop" then
-        tbl.InvokeServer = function(self, ...)
-            if not shuttingDown and state.anticheat.enabled and state.anticheat.blockIdleTelemetry then
-                runtime.acBlockedTele = runtime.acBlockedTele + 1
+    acRuntime.recorderTable = nil
+    acRuntime.origRecorderInDomain = nil
+end
+
+local function installRecorderCloak()
+    if acRuntime.origRecorderInDomain then
+        return true
+    end
+    local recorderModule = remoteAt("UserGenerated/Observability/Recorder")
+    local Recorder = safeRequire(recorderModule)
+    if type(Recorder) == "table" and type(Recorder._inDomain) == "function" then
+        local origInDomain = Recorder._inDomain
+        acRuntime.recorderTable = Recorder
+        acRuntime.origRecorderInDomain = origInDomain
+        Recorder._inDomain = function(self, inst, ...)
+            if isCloakedUiInstance(inst) then
+                runtime.acBlockedTele = (runtime.acBlockedTele or 0) + 1
+                runtime.acLastNote = "Cloaked StephHUB UI from Observability.Recorder"
                 return false
             end
-            return origInvoke(self, ...)
+            return origInDomain(self, inst, ...)
         end
+        runtime.acLastNote = "Observability.Recorder UI Cloak Active"
+        return true
     end
-end
-
-local function NeutralizePushbackOnCharacter(char)
-    if not char then return end
-    if not (state.anticheat.enabled and state.anticheat.bypassPushback) then return end
-    pcall(function()
-        local scriptInst = char:FindFirstChild("AntiCollisionHighSeedPushBack")
-        if scriptInst then
-            if type(getconnections) == "function" then
-                for _, conn in ipairs(getconnections(RunService.PostSimulation)) do
-                    local okF, fn = pcall(function() return conn.Function end)
-                    if okF and type(fn) == "function" then
-                        local okS, src = pcall(debug.info, fn, "s")
-                        if okS and type(src) == "string" and src:find("AntiCollisionHighSeedPushBack", 1, true) then
-                            pcall(function() conn:Disconnect() end)
-                        end
-                    end
-                end
-            end
-            if scriptInst:IsA("LocalScript") or scriptInst:IsA("Script") then
-                scriptInst.Disabled = true
-            end
-            scriptInst:Destroy()
-            runtime.acLastNote = "Neutralized AntiCollisionHighSeedPushBack"
-        end
-    end)
-end
-
-local function CleanRagdollAndStunOnCharacter(char)
-    if not char then return end
-    if not (state.anticheat.enabled and state.anticheat.antiRagdollStun) then return end
-    local humanoid = char:FindFirstChildOfClass("Humanoid")
-    if humanoid then
-        pcall(function()
-            humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
-            humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-            humanoid:SetStateEnabled(Enum.HumanoidStateType.Physics, false)
-            local st = humanoid:GetState()
-            if st == Enum.HumanoidStateType.Ragdoll
-                or st == Enum.HumanoidStateType.FallingDown
-                or st == Enum.HumanoidStateType.Physics then
-                humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
-            end
-            if humanoid.PlatformStand then
-                humanoid.PlatformStand = false
-            end
-        end)
-    end
-    for _, desc in ipairs(char:GetDescendants()) do
-        if desc:IsA("Motor6D") and desc.Enabled == false then
-            pcall(function() desc.Enabled = true end)
-        elseif desc.Name == "RagdollLocalLimp" then
-            pcall(function() desc:Destroy() end)
-        end
-    end
-    if LocalPlayer:GetAttribute("RaygunStunEnds") ~= nil then
-        pcall(function()
-            LocalPlayer:SetAttribute("RaygunStunEnds", nil)
-            ContextActionService:UnbindAction("RaygunStunJumpSink")
-            runtime.acCleanedStuns = runtime.acCleanedStuns + 1
-            runtime.acLastNote = "Cleared Raygun stun lock"
-        end)
-    end
-    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-    local stunGui = pg and pg:FindFirstChild("RaygunStun")
-    if stunGui and stunGui.Enabled then
-        pcall(function() stunGui.Enabled = false end)
-    end
+    return false
 end
 
 syncAntiCheat = function()
     if gameKey ~= "sae" then return end
-    if shuttingDown or not state.anticheat.enabled then
-        restoreRemoteHooks()
-        if acRuntime.charConn then
-            pcall(function() acRuntime.charConn:Disconnect() end)
-            acRuntime.charConn = nil
-        end
-        if acRuntime.obbyAttrConn then
-            pcall(function() acRuntime.obbyAttrConn:Disconnect() end)
-            acRuntime.obbyAttrConn = nil
-        end
-        if acRuntime.heartbeatConn then
-            pcall(function() acRuntime.heartbeatConn:Disconnect() end)
-            acRuntime.heartbeatConn = nil
-        end
+    if shuttingDown then
+        restoreRecorderCloak()
         runtime.acLastNote = "Disabled"
         return
     end
-
-    -- 1. Hook Remotes table wrappers from ReplicatedStorage.Shared.Remotes
-    local Remotes = safeRequire(remoteAt("Shared/Remotes"))
-    if type(Remotes) == "table" then
-        if Remotes.GuardPatrol then
-            hookRemoteTable(Remotes.GuardPatrol.ForestStrike, "guard_strike")
-            hookRemoteTable(Remotes.GuardPatrol.ForestHandoff, "guard_strike")
-            -- Disarm client ForestGuardRuntime patrol loop by signaling EnabledShifted(false, math.huge)
-            if state.anticheat.blockGuardStrike and Remotes.GuardPatrol.EnabledShifted and type(getconnections) == "function" then
-                pcall(function()
-                    local ev = Remotes.GuardPatrol.EnabledShifted.OnClientEvent
-                    if ev then
-                        for _, conn in ipairs(getconnections(ev)) do
-                            if type(conn.Fire) == "function" then
-                                pcall(conn.Fire, conn, false, math.huge)
-                            elseif type(conn.Function) == "function" then
-                                pcall(conn.Function, false, math.huge)
-                            end
-                        end
-                    end
-                end)
-            end
-        end
-        if Remotes.Limpness then
-            hookRemoteTable(Remotes.Limpness.WriteLimpness, "limpness")
-        end
-        if Remotes.Telemetry then
-            hookRemoteTable(Remotes.Telemetry.SubmitIdleState, "idle_false")
-            hookRemoteTable(Remotes.Telemetry.AskIdleHopFlush, "idle_drop")
-        end
-        if Remotes.IdleRescue then
-            hookRemoteTable(Remotes.IdleRescue.SubmitIdleFlag, "idle_false")
-            hookRemoteTable(Remotes.IdleRescue.AskRescueHop, "idle_drop")
-        end
-    end
-
-    -- 1b. Instance-level __namecall protection for raw RemoteEvent/RemoteFunction calls
-    if not acRuntime.namecallHooked and type(hookmetamethod) == "function" and type(getnamecallmethod) == "function" then
-        acRuntime.namecallHooked = true
-        pcall(function()
-            local oldNamecall
-            oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-                if not shuttingDown and state.anticheat.enabled then
-                    local method = getnamecallmethod()
-                    if method == "FireServer" or method == "InvokeServer" then
-                        local name = tostring(self)
-                        if state.anticheat.blockGuardStrike and (name == "ForestStrike" or name == "ForestHandoff") then
-                            runtime.acBlockedStrikes = runtime.acBlockedStrikes + 1
-                            runtime.acLastNote = "Blocked " .. name .. " (#" .. tostring(runtime.acBlockedStrikes) .. ")"
-                            return nil
-                        elseif state.anticheat.antiRagdollStun and name == "WriteLimpness" then
-                            local isLimp = select(1, ...)
-                            if isLimp == true then
-                                runtime.acCleanedStuns = runtime.acCleanedStuns + 1
-                                return oldNamecall(self, false)
-                            end
-                        elseif state.anticheat.blockIdleTelemetry then
-                            if name == "SubmitIdleState" or name == "SubmitIdleFlag" then
-                                local flag = select(1, ...)
-                                if flag == true then
-                                    runtime.acBlockedTele = runtime.acBlockedTele + 1
-                                    return oldNamecall(self, false)
-                                end
-                            elseif name == "AskIdleHopFlush" or name == "AskRescueHop" then
-                                runtime.acBlockedTele = runtime.acBlockedTele + 1
-                                return method == "InvokeServer" and false or nil
-                            end
-                        end
-                    end
-                end
-                return oldNamecall(self, ...)
-            end)
-        end)
-    end
-
-    -- 2. Disarm ObbyAntiTPClientController (checks Workspace:GetAttribute("ClientObbyAntiTp") ~= false)
-    if state.anticheat.bypassAntiTp then
-        pcall(function()
-            if workspace:GetAttribute("ClientObbyAntiTp") ~= false then
-                workspace:SetAttribute("ClientObbyAntiTp", false)
-            end
-        end)
-        if not acRuntime.obbyAttrConn then
-            local okC, conn = pcall(function()
-                return workspace:GetAttributeChangedSignal("ClientObbyAntiTp"):Connect(function()
-                    if not shuttingDown and state.anticheat.enabled and state.anticheat.bypassAntiTp then
-                        if workspace:GetAttribute("ClientObbyAntiTp") ~= false then
-                            workspace:SetAttribute("ClientObbyAntiTp", false)
-                        end
-                    end
-                end)
-            end)
-            if okC and conn then
-                acRuntime.obbyAttrConn = conn
-            end
-        end
-    end
-
-    -- 3. Neutralize AntiCollisionHighSeedPushBack + Ragdoll/RaygunStun on current and future characters
-    if LocalPlayer.Character then
-        NeutralizePushbackOnCharacter(LocalPlayer.Character)
-        CleanRagdollAndStunOnCharacter(LocalPlayer.Character)
-    end
-    if not acRuntime.charConn then
-        acRuntime.charConn = LocalPlayer.CharacterAdded:Connect(function(newChar)
-            task.defer(function()
-                if shuttingDown or not state.anticheat.enabled then return end
-                NeutralizePushbackOnCharacter(newChar)
-                CleanRagdollAndStunOnCharacter(newChar)
-                task.wait(0.25)
-                NeutralizePushbackOnCharacter(newChar)
-                CleanRagdollAndStunOnCharacter(newChar)
-            end)
-        end)
-    end
-    if not acRuntime.heartbeatConn then
-        local nextCheck = 0
-        acRuntime.heartbeatConn = RunService.Heartbeat:Connect(function()
-            if shuttingDown or not state.anticheat.enabled then return end
-            local now = os.clock()
-            if now < nextCheck then return end
-            nextCheck = now + 0.25
-            local char = LocalPlayer.Character
-            if char then
-                if state.anticheat.bypassPushback and char:FindFirstChild("AntiCollisionHighSeedPushBack") then
-                    NeutralizePushbackOnCharacter(char)
-                end
-                if state.anticheat.antiRagdollStun then
-                    CleanRagdollAndStunOnCharacter(char)
-                end
-            end
-            if state.anticheat.bypassAntiTp and workspace:GetAttribute("ClientObbyAntiTp") ~= false then
-                pcall(function() workspace:SetAttribute("ClientObbyAntiTp", false) end)
-            end
-        end)
-    end
+    installRecorderCloak()
 end
 
 -- ============================================================================
@@ -1206,37 +972,22 @@ local function instanceCFrame(instance)
 end
 
 local function defaultAntiAfk()
-    -- Reset AntiAFKController's UserInputService timer (u11 = os.clock()) via VirtualInputManager
-    pcall(function()
-        local vim = game:GetService("VirtualInputManager")
-        vim:SendMouseMoveEvent(1, 1, game)
-    end)
-    local camera = workspace.CurrentCamera
     local ok, virtualUser = pcall(function()
         return game:GetService("VirtualUser")
     end)
     if ok and virtualUser then
         local clicked = pcall(function()
             virtualUser:CaptureController()
-            if camera then
-                virtualUser:ClickButton2(Vector2.new(0, 0), camera.CFrame)
-            else
-                virtualUser:ClickButton2(Vector2.new(0, 0))
-            end
+            virtualUser:ClickButton2(Vector2.zero)
         end)
         if clicked then
             return true
         end
     end
-    return pcall(function()
-        local input = game:GetService("VirtualInputManager")
-        input:SendKeyEvent(true, Enum.KeyCode.RightShift, false, game)
-        task.wait(0.05)
-        input:SendKeyEvent(false, Enum.KeyCode.RightShift, false, game)
-    end)
+    return false
 end
 
-local antiAfkRuntime = { conn = nil, thread = nil, disabled = {} }
+local antiAfkRuntime = { conn = nil }
 syncAntiAfk = function()
     local st = antiAfkRuntime
     if shuttingDown or not state.settings.antiAfk then
@@ -1244,29 +995,9 @@ syncAntiAfk = function()
             pcall(function() st.conn:Disconnect() end)
             st.conn = nil
         end
-        if st.thread then
-            pcall(task.cancel, st.thread)
-            st.thread = nil
-        end
-        for _, connection in ipairs(st.disabled) do
-            pcall(function()
-                if type(connection.Enable) == "function" then connection:Enable() end
-            end)
-        end
-        table.clear(st.disabled)
         return
     end
-    if st.conn or st.thread then return end
-    if type(getconnections) == "function" then
-        pcall(function()
-            for _, connection in ipairs(getconnections(LocalPlayer.Idled)) do
-                if type(connection.Disable) == "function" then
-                    pcall(connection.Disable, connection)
-                    st.disabled[#st.disabled + 1] = connection
-                end
-            end
-        end)
-    end
+    if st.conn then return end
     local okIdle, idled = pcall(function() return LocalPlayer.Idled end)
     if okIdle and idled then
         st.conn = idled:Connect(function()
@@ -1275,12 +1006,6 @@ syncAntiAfk = function()
             end
         end)
     end
-    st.thread = task.spawn(function()
-        while not shuttingDown and state.settings.antiAfk do
-            defaultAntiAfk()
-            task.wait(55)
-        end
-    end)
 end
 
 local function finishBackend(backend)
@@ -1347,9 +1072,8 @@ Backends.SAE = finishBackend({
     teleport = function(destination)
         local PlotState = safeRequire(remoteAt("Client/PlotState"))
         local EggState = safeRequire(remoteAt("Client/EggState"))
-        local Remotes = safeRequire(remoteAt("Shared/Remotes"))
-        if Remotes and Remotes.Treadmill and Remotes.Treadmill.AskDoff then
-            pcall(invokeServer, Remotes.Treadmill.AskDoff)
+        if Backends.SAE.leaveTreadmill then
+            pcall(Backends.SAE.leaveTreadmill)
         end
         local function moveForTarget(cf)
             if not cf then return false end
@@ -1359,10 +1083,6 @@ Backends.SAE = finishBackend({
         -- Egg targets ALWAYS use walkToCFrame (Requirement #2: Change tele to egg to walk to egg)
         if destination == "Nearest Field Egg" and EggState then
             local snapshot = EggState.ReadFieldEggs()
-            if not snapshot or not snapshot.Records or #snapshot.Records == 0 then
-                pcall(EggState.SyncFieldEggs)
-                snapshot = EggState.ReadFieldEggs()
-            end
             local root = characterRoot()
             local best, bestDistance
             for _, record in ipairs(snapshot and snapshot.Records or {}) do
@@ -1456,15 +1176,19 @@ do
     local TreadmillUtil
     local SpeedPowerProjection
     local SafeZoneBarriers
-    local nextOwnedSync = 0
-    local nextHatchSync = 0
     local nextWearBest = 0
-    local nextWornTrailSync = 0
+    local nextClaimIndex = 0
+    local nextAwayCollect = 0
+    local needEquipBest = false
+    local needClaimIndex = false
+    local lastAutoSellSignature = nil
+    local wornTrailSyncedOnce = false
     local wornTrailId = nil
     local wornTrailHooked = false
     local carryHooked = false
     local beltHooked = false
     local guardFailHooked = false
+    local hatchStartedHooked = false
     local onTreadmill = false
     local plotFullUntil = 0
     local plantSkipUntil = {}
@@ -1538,6 +1262,19 @@ do
         SafeZoneBarriers = SafeZoneBarriers or safeRequire(remoteAt("Shared/Util/SafeZoneBarriers"))
         assert(EggState and PlotState and Save and Remotes, "Steal an Egg modules are not ready")
 
+        if not hatchStartedHooked and PlacedEggRenderer and PlacedEggRenderer.LocalEggHatchStarted then
+            hatchStartedHooked = true
+            local okH, connH = pcall(function()
+                return PlacedEggRenderer.LocalEggHatchStarted:Connect(function()
+                    needEquipBest = true
+                    needClaimIndex = true
+                end)
+            end)
+            if okH and connH then
+                track(connH)
+            end
+        end
+
         if not carryHooked and EggState and EggState.CarryChanged then
             carryHooked = true
             local okC, conn = pcall(function()
@@ -1603,8 +1340,8 @@ do
         end
     end
 
-    local function leaveTreadmillIfNeeded(force)
-        if (force or isCharacterOnTreadmill()) and Remotes and Remotes.Treadmill and Remotes.Treadmill.AskDoff then
+    local function leaveTreadmillIfNeeded()
+        if isCharacterOnTreadmill() and Remotes and Remotes.Treadmill and Remotes.Treadmill.AskDoff then
             pcall(invokeServer, Remotes.Treadmill.AskDoff)
             onTreadmill = false
             pcall(function()
@@ -1620,7 +1357,7 @@ do
     end
     Backends.SAE.leaveTreadmill = function()
         pcall(ensureModules)
-        leaveTreadmillIfNeeded(true)
+        leaveTreadmillIfNeeded()
     end
 
     local function unequipBlockingTools()
@@ -1663,9 +1400,8 @@ do
                 track(conn)
             end
         end
-        local now = os.clock()
-        if now >= nextWornTrailSync and Remotes.Trailwear.AskWornSnapshot then
-            nextWornTrailSync = now + 8.0
+        if not wornTrailSyncedOnce and Remotes.Trailwear.AskWornSnapshot then
+            wornTrailSyncedOnce = true
             local snap = invokeServer(Remotes.Trailwear.AskWornSnapshot)
             if type(snap) == "table" then
                 wornTrailId = snap[LocalPlayer.UserId] or snap[tostring(LocalPlayer.UserId)]
@@ -1680,14 +1416,22 @@ do
         return plot
     end
 
-    local function ownedEggs(sync)
+    local function ownedEggs()
         ensureModules()
-        local now = os.clock()
-        if sync and now >= nextOwnedSync then
-            nextOwnedSync = now + 2.0
-            pcall(EggState.SyncOwnedEggs)
-        end
         return EggState.ReadOwnerEggs(LocalPlayer.UserId) or {}
+    end
+
+    local function isEggToolInCharacter(uid)
+        local char = LocalPlayer.Character
+        if not char then return false end
+        for _, child in ipairs(char:GetChildren()) do
+            if child:IsA("Tool") then
+                if child:GetAttribute("UID") == uid or child:GetAttribute("ItemType") == "AssetEgg" or child.Name == uid then
+                    return true
+                end
+            end
+        end
+        return false
     end
 
     -- Checks if the player's plot has an available slot BEFORE walking back to base (prevents useless trips when plot is full)
@@ -1765,7 +1509,11 @@ do
         return nil
     end
 
-    -- Single-walk planting: checks for an open slot first, walks directly to the target slot once, equips and plants
+    -- Legit Planting (EggPlacementController.luau):
+    -- Walk within <= 6 studs of the free PetArea slot, call EggState.WearEggTool(uid),
+    -- wait up to 0.7s for the egg Tool to appear in LocalPlayer.Character, wait 0.16s,
+    -- call EggState.PlantEgg(uid, chosenLocal), and call PlacedEggRenderer.Refresh().
+    -- Do NOT call EggState.DoffEggTool(uid) when PlantEgg succeeds.
     local function plantOwnedEgg(uid)
         assert(type(uid) == "string" and uid ~= "", "Invalid egg UID")
         local plot = localPlot()
@@ -1776,7 +1524,11 @@ do
             return false
         end
         leaveTreadmillIfNeeded()
-        if not walkToCFrame(chosenWorldCf, 22, { stopRadius = 3.5 }) then
+        if not walkToCFrame(chosenWorldCf, 22, { stopRadius = 4.2 }) then
+            return false
+        end
+        local root = characterRoot()
+        if not root or Vector3.new(root.Position.X - chosenWorldCf.Position.X, 0, root.Position.Z - chosenWorldCf.Position.Z).Magnitude > 6.0 then
             return false
         end
         local wore, wearError = EggState.WearEggTool(uid)
@@ -1787,7 +1539,14 @@ do
             end
             return false
         end
-        task.wait(0.04)
+        local toolDeadline = os.clock() + 0.7
+        while os.clock() < toolDeadline do
+            if isEggToolInCharacter(uid) then
+                break
+            end
+            task.wait(0.03)
+        end
+        task.wait(0.16)
         local planted, errText = EggState.PlantEgg(uid, chosenLocal)
         if planted == true then
             plantSkipUntil[uid] = nil
@@ -1795,10 +1554,11 @@ do
             if PlacedEggRenderer and type(PlacedEggRenderer.Refresh) == "function" then
                 pcall(PlacedEggRenderer.Refresh)
             end
-            pcall(EggState.DoffEggTool, uid)
             return true
         end
-        pcall(EggState.DoffEggTool, uid)
+        if isEggToolInCharacter(uid) then
+            pcall(EggState.DoffEggTool, uid)
+        end
         plantSkipUntil[uid] = os.clock() + 15.0
         -- Pause all planting attempts for 15s so we don't try 20 other inventory eggs when plot is full
         plotFullUntil = os.clock() + 15.0
@@ -1839,8 +1599,6 @@ do
                 local carry = EggState.ReadCarryState() or {}
                 if not carry.IsCarrying then
                     runtime.walkStatus = "Egg Redeemed!"
-                    nextOwnedSync = 0
-                    task.spawn(function() pcall(EggState.SyncOwnedEggs) end)
                     return true
                 end
 
@@ -1870,8 +1628,6 @@ do
         local carryAfterLine = EggState.ReadCarryState() or {}
         if not carryAfterLine.IsCarrying then
             runtime.walkStatus = "Egg Redeemed!"
-            nextOwnedSync = 0
-            task.spawn(function() pcall(EggState.SyncOwnedEggs) end)
             return true
         end
 
@@ -1891,8 +1647,6 @@ do
         for _ = 1, 8 do
             local carry = EggState.ReadCarryState() or {}
             if not carry.IsCarrying then
-                nextOwnedSync = 0
-                task.spawn(function() pcall(EggState.SyncOwnedEggs) end)
                 return true
             end
             task.wait(0.06)
@@ -1901,8 +1655,59 @@ do
     end
 
     -- ========================================================================
-    -- Speed & Zone Aware Smart Egg Selector
+    -- Speed & Zone Aware Smart Egg Selector + Live Guard Distance Check
     -- ========================================================================
+    local function getLiveGuardDistance(areaId, fromPos)
+        local refPos = fromPos
+        if not refPos then
+            local root = characterRoot()
+            refPos = root and root.Position
+        end
+        if not refPos then
+            return math.huge
+        end
+        local world = workspace:FindFirstChild("World")
+        local areasFolder = world and world:FindFirstChild("Areas")
+        local guardAreas = areasFolder and areasFolder:FindFirstChild("GuardAreas")
+        local areaModel = guardAreas and guardAreas:FindFirstChild(tostring(areaId or ""))
+        if not areaModel then
+            return math.huge
+        end
+        local bestDist = math.huge
+        for _, child in ipairs(areaModel:GetChildren()) do
+            if child:IsA("Model") and child.Name == "Guard" then
+                local gRoot = child:FindFirstChild("HumanoidRootPart") or child.PrimaryPart
+                if gRoot and gRoot:IsA("BasePart") then
+                    local d = Vector3.new(refPos.X - gRoot.Position.X, 0, refPos.Z - gRoot.Position.Z).Magnitude
+                    if d < bestDist then
+                        bestDist = d
+                    end
+                end
+            end
+        end
+        return bestDist
+    end
+
+    local function retreatToSafeZone(fromPos)
+        local root = characterRoot()
+        local startPos = fromPos or (root and root.Position)
+        if not startPos or not isPastSeparationLine(startPos) then
+            return true
+        end
+        local escapePos = computePerpendicularEscapePoint(startPos, 8.0)
+        if not escapePos then
+            return false
+        end
+        runtime.walkStatus = "Guard Near (<11.5 studs) - Retreating!"
+        return walkToCFrame(CFrame.new(escapePos), 12, {
+            stopRadius = 3.2,
+            abortIf = function()
+                local r = characterRoot()
+                return r ~= nil and not isPastSeparationLine(r.Position)
+            end,
+        })
+    end
+
     local function getPlayerSpeedMetrics()
         local speedPower = 16
         local walkSpeed = 16
@@ -2067,15 +1872,21 @@ do
     end
 
     local function canSafelyEscapeEgg(record, zoneInfo, playerWalkSpeed)
-        if zoneInfo.areaId == "Forest" or zoneInfo.zoneIndex == 1 then
-            return true
-        end
         if state.farm.respectSpeed == false then
             return true
         end
         local cf = record.BottomCFrame or record.BoundsCFrame
         if not cf then return false end
         local eggPos = cf.Position
+        if zoneInfo.guardPos then
+            local guardDistToEgg = Vector3.new(zoneInfo.guardPos.X - eggPos.X, 0, zoneInfo.guardPos.Z - eggPos.Z).Magnitude
+            if guardDistToEgg < 14 then
+                return false
+            end
+        end
+        if zoneInfo.areaId == "Forest" or zoneInfo.zoneIndex == 1 then
+            return true
+        end
         local escapePt = computePerpendicularEscapePoint(eggPos, 6.0)
         if not escapePt then return true end
         local distToExit = Vector3.new(eggPos.X - escapePt.X, 0, eggPos.Z - escapePt.Z).Magnitude
@@ -2087,9 +1898,6 @@ do
             local guardStart = zoneInfo.guardPos or eggPos
             local guardDistToExit = Vector3.new(guardStart.X - escapePt.X, 0, guardStart.Z - escapePt.Z).Magnitude
             local guardDistToEgg = Vector3.new(guardStart.X - eggPos.X, 0, guardStart.Z - eggPos.Z).Magnitude
-            if guardDistToEgg < 14 then
-                return false
-            end
             local guardInterceptTime = GUARD_WAKE_SEC + (math.max(0, math.min(guardDistToExit, guardDistToEgg + distToExit) - 7.5) / zoneInfo.guardWalkSpeed)
             if playerEscapeTime >= guardInterceptTime then
                 return false
@@ -2106,11 +1914,10 @@ do
         local escapePt = computePerpendicularEscapePoint(eggPos, 7.0)
         local distToExit = escapePt and Vector3.new(eggPos.X - escapePt.X, 0, eggPos.Z - escapePt.Z).Magnitude or distFromPlayer
 
-        -- Check live Guard proximity in server-guarded zones
-        if zoneInfo.areaId ~= "Forest" and zoneInfo.guardPos then
+        -- Check live Guard proximity in all zones (including Forest)
+        if zoneInfo.guardPos then
             local guardDistToEgg = Vector3.new(eggPos.X - zoneInfo.guardPos.X, 0, eggPos.Z - zoneInfo.guardPos.Z).Magnitude
-            if guardDistToEgg < 13 then
-                -- Guard is standing right on top of this egg; heavy penalty so we pick a safer egg first
+            if guardDistToEgg < 14 then
                 return -1e9 - distFromPlayer
             end
         end
@@ -2275,6 +2082,98 @@ do
         return chosen
     end
 
+    -- Legit Hatching (PlacedEggRenderer.luau):
+    -- NEVER call PlacedEggRenderer.ActivateLocalEgg(uid) from afar or when EggState.IsReadyToHatch(uid) is false.
+    -- Only hatch when on the plot side (not carrying an egg, not past SeparationLine, not on treadmill),
+    -- walk within <= 5.5 studs of plot.CenterPoint.CFrame * record.Placement.LocalCFrame,
+    -- verify EggState.IsReadyToHatch(uid) == true, and call PlacedEggRenderer.ActivateLocalEgg(uid).
+    local function tryHatchOnePlotEgg()
+        if stopped then return false end
+        ensureModules()
+        if not PlacedEggRenderer or type(PlacedEggRenderer.ActivateLocalEgg) ~= "function" then
+            return false
+        end
+        local carry = EggState.ReadCarryState() or {}
+        if carry.IsCarrying then
+            return false
+        end
+        if isCharacterOnTreadmill() then
+            return false
+        end
+        local root = characterRoot()
+        if not root or isPastSeparationLine(root.Position) then
+            return false
+        end
+        local okPlot, plot = pcall(localPlot)
+        if not okPlot or not plot or not plot.CenterPoint then
+            return false
+        end
+        local now = os.clock()
+        local records = ownedEggs()
+        for uid, record in pairs(records) do
+            local placement = type(record) == "table" and record.Placement or nil
+            if placement
+                and placement.LocalCFrame
+                and not pendingFinish[uid]
+                and now >= (hatchSkipUntil[uid] or 0)
+                and EggState.IsReadyToHatch(uid) == true then
+
+                local eggWorldCf = plot.CenterPoint.CFrame * placement.LocalCFrame
+                if not walkToCFrame(eggWorldCf, 22, {
+                    stopRadius = 4.2,
+                    abortIf = function()
+                        return stopped
+                            or (EggState.ReadCarryState() or {}).IsCarrying == true
+                            or isCharacterOnTreadmill()
+                    end,
+                }) then
+                    hatchSkipUntil[uid] = os.clock() + 1.5
+                    return false
+                end
+
+                local curRoot = characterRoot()
+                if not curRoot
+                    or isPastSeparationLine(curRoot.Position)
+                    or (EggState.ReadCarryState() or {}).IsCarrying == true
+                    or isCharacterOnTreadmill() then
+                    return false
+                end
+                local flatDist = Vector3.new(curRoot.Position.X - eggWorldCf.Position.X, 0, curRoot.Position.Z - eggWorldCf.Position.Z).Magnitude
+                if flatDist > 5.5 then
+                    hatchSkipUntil[uid] = os.clock() + 1.5
+                    return false
+                end
+                if EggState.IsReadyToHatch(uid) ~= true then
+                    hatchSkipUntil[uid] = os.clock() + 1.5
+                    return false
+                end
+
+                unequipBlockingTools()
+                local okAct, activated, activateError = pcall(PlacedEggRenderer.ActivateLocalEgg, uid)
+                if okAct and activated == true then
+                    pendingFinish[uid] = true
+                    plotFullUntil = 0
+                    needEquipBest = true
+                    needClaimIndex = true
+                    runtime.hatchedCount = (runtime.hatchedCount or 0) + 1
+                    task.delay(6.0, function()
+                        pendingFinish[uid] = nil
+                    end)
+                    return true
+                end
+                hatchSkipUntil[uid] = os.clock() + 2.0
+                if not okAct or activateError then
+                    notify("Hatch: " .. tostring(activateError or activated), THEME.Danger)
+                end
+                if type(PlacedEggRenderer.Refresh) == "function" then
+                    pcall(PlacedEggRenderer.Refresh)
+                end
+                return false
+            end
+        end
+        return false
+    end
+
     Backends.SAE.zones = function()
         local list = {
             "Auto (Best For My Speed)",
@@ -2291,10 +2190,6 @@ do
     Backends.SAE.warmup = function()
         pcall(ensureModules)
         pcall(syncAntiCheat)
-        if EggState then
-            pcall(EggState.SyncOwnedEggs)
-            pcall(EggState.SyncFieldEggs)
-        end
     end
 
     Backends.SAE.plantOne = function()
@@ -2302,7 +2197,7 @@ do
         ensureModules()
         plotFullUntil = 0
         local now = os.clock()
-        local records = ownedEggs(true)
+        local records = ownedEggs()
         local okPlot, plot = pcall(localPlot)
         if okPlot and plot and findFreePlotSlot(plot, records) then
             for uid, record in pairs(records) do
@@ -2335,7 +2230,7 @@ do
         -- 2. Only walk back to plant if autoPlant is ON AND the plot actually has a free slot!
         local now = os.clock()
         if state.farm.autoPlant ~= false and now >= plotFullUntil then
-            local records = ownedEggs(true)
+            local records = ownedEggs()
             local okPlot, plot = pcall(localPlot)
             if okPlot and plot and findFreePlotSlot(plot, records) then
                 for uid, record in pairs(records) do
@@ -2349,21 +2244,21 @@ do
             end
         end
 
-        -- 3. Refresh field snapshot periodically
-        if now >= runtime.nextSync then
-            runtime.nextSync = now + 2.5
-            pcall(EggState.SyncFieldEggs)
+        -- 3. If Auto-Hatch is enabled and we are on the plot side with a ready egg, hatch it cleanly
+        if state.farm.hatch then
+            local curRoot = characterRoot()
+            if curRoot and not isPastSeparationLine(curRoot.Position) then
+                if tryHatchOnePlotEgg() then
+                    return "hatched"
+                end
+            end
         end
 
         -- 4. Select best field egg for current speed & zone
         local field = selectBestFieldEgg()
         if not field then
-            pcall(EggState.SyncFieldEggs)
-            field = selectBestFieldEgg()
-            if not field then
-                runtime.walkStatus = "Waiting for safe field egg..."
-                return false
-            end
+            runtime.walkStatus = "Waiting for safe field egg..."
+            return false
         end
 
         local fieldCf = field.BottomCFrame or field.BoundsCFrame
@@ -2375,16 +2270,41 @@ do
         local attemptZoneIdx = ZONE_INDEX[attemptAreaId] or 1
         runtime.activeAttemptZoneIdx = attemptZoneIdx
 
-        -- 5. Walk directly to egg within prompt pickup reach (4.6 studs, MaxActivationDistance is 8)
+        -- 5. Walk across SeparationLine to within <= 4.2 studs of the egg while watching live guard distance
+        local guardAborted = false
         local walkedOk = walkToCFrame(fieldCf, 32, {
-            stopRadius = 4.6,
+            stopRadius = 3.8,
             abortIf = function()
-                -- Abort immediately if a guard strike / speed toll demoted our target zone during the walk
+                local r = characterRoot()
+                if r and isPastSeparationLine(r.Position) and getLiveGuardDistance(attemptAreaId, r.Position) < 11.5 then
+                    guardAborted = true
+                    return true
+                end
                 return runtime.activeAttemptZoneIdx == nil
                     or (runtime.demotedMaxZoneIdx ~= nil and attemptZoneIdx > runtime.demotedMaxZoneIdx)
             end,
         })
-        if not walkedOk or runtime.activeAttemptZoneIdx == nil or (runtime.demotedMaxZoneIdx ~= nil and attemptZoneIdx > runtime.demotedMaxZoneIdx) then
+        if guardAborted then
+            carrySkipUntil[field.Uid] = os.clock() + 4.5
+            runtime.activeAttemptZoneIdx = nil
+            retreatToSafeZone()
+            return false
+        end
+
+        local character = LocalPlayer.Character
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if not root or not humanoid then
+            runtime.activeAttemptZoneIdx = nil
+            return false
+        end
+
+        local flatDistToEgg = Vector3.new(root.Position.X - fieldCf.Position.X, 0, root.Position.Z - fieldCf.Position.Z).Magnitude
+        if not walkedOk
+            or runtime.activeAttemptZoneIdx == nil
+            or (runtime.demotedMaxZoneIdx ~= nil and attemptZoneIdx > runtime.demotedMaxZoneIdx)
+            or not isPastSeparationLine(root.Position)
+            or flatDistToEgg > 4.2 then
             carrySkipUntil[field.Uid] = os.clock() + 4.0
             if attemptZoneIdx > 1 and runtime.activeAttemptZoneIdx ~= nil then
                 demoteTargetZoneFromFailure(attemptZoneIdx, "could not reach egg in zone")
@@ -2393,7 +2313,59 @@ do
             return false
         end
 
-        -- 6. Steal egg with ZERO delay and immediately begin escape sprint across SeparationLine
+        -- 6. Respect CarryAreaEgg ProximityPrompt.HoldDuration:
+        -- Stop moving (humanoid:MoveTo(root.Position)) and hold position for the full HoldDuration
+        -- (1.25s, or 0.28s if Workspace:GetAttribute("FastEggPickupTime") is true)
+        -- while continuously checking live guard distance (>= 11.5 studs; abort and retreat if a guard approaches).
+        pcall(function()
+            humanoid:MoveTo(root.Position)
+        end)
+        local holdDuration = (workspace:GetAttribute("FastEggPickupTime") == true) and 0.28 or 1.25
+        local holdStart = os.clock()
+        local holdDeadline = holdStart + holdDuration
+        while os.clock() < holdDeadline do
+            if shuttingDown or stopped or not root.Parent or not humanoid.Parent or humanoid.Health <= 0 then
+                runtime.activeAttemptZoneIdx = nil
+                return false
+            end
+            if not isPastSeparationLine(root.Position) then
+                carrySkipUntil[field.Uid] = os.clock() + 3.5
+                runtime.activeAttemptZoneIdx = nil
+                return false
+            end
+            if getLiveGuardDistance(attemptAreaId, root.Position) < 11.5 then
+                carrySkipUntil[field.Uid] = os.clock() + 4.5
+                runtime.activeAttemptZoneIdx = nil
+                retreatToSafeZone(root.Position)
+                return false
+            end
+            local liveRecord = EggState.ReadFieldEgg(field.Uid)
+            if not liveRecord or (liveRecord.State ~= "Slot" and liveRecord.State ~= "Dropped") then
+                carrySkipUntil[field.Uid] = os.clock() + 3.0
+                runtime.activeAttemptZoneIdx = nil
+                return false
+            end
+            pcall(function()
+                humanoid:MoveTo(root.Position)
+            end)
+            runtime.walkStatus = string.format("Holding Steal Prompt (%.2fs / %.2fs)", os.clock() - holdStart, holdDuration)
+            task.wait(0.03)
+        end
+
+        if getLiveGuardDistance(attemptAreaId, root.Position) < 11.5 then
+            carrySkipUntil[field.Uid] = os.clock() + 4.5
+            runtime.activeAttemptZoneIdx = nil
+            retreatToSafeZone(root.Position)
+            return false
+        end
+        if not isPastSeparationLine(root.Position)
+            or Vector3.new(root.Position.X - fieldCf.Position.X, 0, root.Position.Z - fieldCf.Position.Z).Magnitude > 4.2 then
+            carrySkipUntil[field.Uid] = os.clock() + 3.5
+            runtime.activeAttemptZoneIdx = nil
+            return false
+        end
+
+        unequipBlockingTools()
         local firstAreaKey
         if AreaEggSlotIdentity and field.Uid and AreaEggSlotIdentity.LooksLikeFirstAreaUid(field.Uid) then
             firstAreaKey = AreaEggSlotIdentity.SlotKey(field.AreaId, field.NestId)
@@ -2430,61 +2402,16 @@ do
 
     Backends.SAE.hatchStep = function()
         if stopped then return false end
-        ensureModules()
-        local now = os.clock()
-        if now >= nextHatchSync then
-            nextHatchSync = now + 1.5
-            pcall(EggState.SyncOwnedEggs)
+        if jobBusy["farm"] or jobBusy["training"] or runtime.mode == "training" then
+            return false
         end
-        local records = ownedEggs(false)
-        for uid in pairs(records) do
-            if not pendingFinish[uid] and now >= (hatchSkipUntil[uid] or 0) and EggState.IsReadyToHatch(uid) then
-                if PlacedEggRenderer and type(PlacedEggRenderer.ActivateLocalEgg) == "function" then
-                    local okAct, activated, activateError = pcall(PlacedEggRenderer.ActivateLocalEgg, uid)
-                    if okAct and activated == true then
-                        pendingFinish[uid] = true
-                        plotFullUntil = 0
-                        runtime.hatchedCount = (runtime.hatchedCount or 0) + 1
-                        task.delay(6.0, function()
-                            pendingFinish[uid] = nil
-                        end)
-                        return true
-                    end
-                    hatchSkipUntil[uid] = now + 1.0
-                    if not okAct or activateError then
-                        notify("Hatch: " .. tostring(activateError or activated), THEME.Danger)
-                    end
-                    if type(PlacedEggRenderer.Refresh) == "function" then
-                        pcall(PlacedEggRenderer.Refresh)
-                    end
-                else
-                    local began, errorText, result = EggState.BeginHatch(uid)
-                    if began then
-                        pendingFinish[uid] = true
-                        plotFullUntil = 0
-                        runtime.hatchedCount = (runtime.hatchedCount or 0) + 1
-                        local delay = result == "MechaUpgraded" and 5.0 or 1.1
-                        task.delay(delay, function()
-                            if not stopped then
-                                pcall(EggState.FinishHatch, uid)
-                                if PlacedEggRenderer and type(PlacedEggRenderer.Refresh) == "function" then
-                                    pcall(PlacedEggRenderer.Refresh)
-                                end
-                            end
-                            pendingFinish[uid] = nil
-                        end)
-                        return true
-                    end
-                    hatchSkipUntil[uid] = now + 2.0
-                    if errorText then
-                        notify(errorText, THEME.Danger)
-                    end
-                end
-            end
-        end
-        return false
+        return tryHatchOnePlotEgg()
     end
 
+    -- Legit Treadmill (TreadmillStaticController.luau):
+    -- Standing on TreadmillBottom automatically triggers TreadmillStaticController's downward raycast
+    -- to call AskWearStill:InvokeServer(). Walk to TreadmillBottom (stopRadius = 2.6) and wait up to 1.6s
+    -- for isCharacterOnTreadmill() to become true naturally before calling Remotes.Treadmill.AskWearStill:InvokeServer() as a fallback.
     Backends.SAE.trainingStep = function()
         if stopped or runtime.mode ~= "training" then
             return false
@@ -2499,15 +2426,40 @@ do
         local cframe = instanceCFrame(target)
         assert(cframe, "TreadmillBottom is missing")
         if not walkToCFrame(cframe, 25, {
-            stopRadius = 3.8,
+            stopRadius = 2.6,
             abortIf = function()
-                return runtime.mode ~= "training"
+                return runtime.mode ~= "training" or isCharacterOnTreadmill()
             end,
         }) then
             return false
         end
         if stopped or runtime.mode ~= "training" then
             return false
+        end
+        local character = LocalPlayer.Character
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if root and humanoid then
+            pcall(function()
+                humanoid:MoveTo(root.Position)
+            end)
+        end
+        local naturalDeadline = os.clock() + 1.6
+        while os.clock() < naturalDeadline do
+            if stopped or runtime.mode ~= "training" then
+                return false
+            end
+            if isCharacterOnTreadmill() then
+                onTreadmill = true
+                runtime.walkStatus = "Training on Treadmill"
+                return true
+            end
+            task.wait(0.05)
+        end
+        if isCharacterOnTreadmill() then
+            onTreadmill = true
+            runtime.walkStatus = "Training on Treadmill"
+            return true
         end
         local treadmill = Remotes.Treadmill
         assert(treadmill and treadmill.AskWearStill, "Treadmill remote is missing")
@@ -2589,17 +2541,34 @@ do
         return false
     end
 
-    Backends.SAE.equipBest = function()
-        if stopped or os.clock() < nextWearBest then return false end
-        nextWearBest = os.clock() + 5.5
+    -- Economy Remote Debounces:
+    -- Haul.WearBest only when needEquipBest flag is set after hatching (with >=5.5s cooldown) or manual button click
+    Backends.SAE.equipBest = function(manual)
+        if stopped then return false end
+        local now = os.clock()
+        if not manual then
+            if not needEquipBest or now < nextWearBest then
+                return false
+            end
+        elseif now < nextWearBest then
+            return false
+        end
         ensureModules()
         local haul = Remotes.Haul
         if not haul or not haul.WearBest then return false end
+        nextWearBest = now + 5.5
+        needEquipBest = false
         return invokeServer(haul.WearBest) == true
     end
 
-    Backends.SAE.collectEarnings = function()
+    -- AwayEarnings.FetchSummary + AskCollect at most every 45s
+    Backends.SAE.collectEarnings = function(manual)
         if stopped then return false end
+        local now = os.clock()
+        if not manual and now < nextAwayCollect then
+            return false
+        end
+        nextAwayCollect = now + 45.0
         ensureModules()
         local away = Remotes.AwayEarnings
         if not away or not away.FetchSummary or not away.AskCollect then return false end
@@ -2614,11 +2583,22 @@ do
         return invokeServer(away.AskCollect, { Kind = "Claim" }) == true
     end
 
-    Backends.SAE.claimIndex = function()
+    -- Codex.AskRedeemAll only when needClaimIndex is set after hatching (with >=8s cooldown) or manual button click
+    Backends.SAE.claimIndex = function(manual)
         if stopped then return false end
+        local now = os.clock()
+        if not manual then
+            if not needClaimIndex or now < nextClaimIndex then
+                return false
+            end
+        elseif now < nextClaimIndex then
+            return false
+        end
         ensureModules()
         local codex = Remotes.Codex
         if not codex or not codex.AskRedeemAll then return false end
+        nextClaimIndex = now + 8.0
+        needClaimIndex = false
         return invokeServer(codex.AskRedeemAll) == true
     end
 
@@ -2669,27 +2649,30 @@ do
         return false
     end
 
+    -- Haul.WriteAutoSell only when the selected rarity signature actually changes
     Backends.SAE.sellStep = function(rarityEnabled)
         if stopped or not state.selling.explicit or not state.selling.autoSell then return false end
         ensureModules()
         local haul = Remotes.Haul
-        if not haul or not haul.WriteAutoSell or not haul.FetchAutoSell then return false end
+        if not haul or not haul.WriteAutoSell then return false end
         local wanted = {}
+        local sigParts = {}
         for _, id in ipairs({ "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic" }) do
-            if rarityEnabled(id) then
+            local enabled = rarityEnabled(id) == true
+            if enabled then
                 wanted[id] = true
             end
+            sigParts[#sigParts + 1] = id .. ":" .. (enabled and "1" or "0")
         end
-        local current = invokeServer(haul.FetchAutoSell) or {}
-        local changed = false
-        for id in pairs(wanted) do
-            if current[id] ~= true then changed = true end
+        local sig = table.concat(sigParts, "|")
+        if sig == lastAutoSellSignature then
+            return false
         end
-        for id, value in pairs(current) do
-            if value == true and not wanted[id] then changed = true end
+        local ok = invokeServer(haul.WriteAutoSell, wanted) == true
+        if ok then
+            lastAutoSellSignature = sig
         end
-        if not changed then return false end
-        return invokeServer(haul.WriteAutoSell, wanted) == true
+        return ok
     end
 
     Backends.SAE.stop = function()
@@ -3993,7 +3976,7 @@ local function buildUI(backend)
     )
     ecoTab:CreateToggle("Auto Equip Best Pets", "economy.autoEquip")
     ecoTab:CreateButton("Equip Best Pets Now", function()
-        local ok, err = pcall(backend.equipBest)
+        local ok, err = pcall(backend.equipBest, true)
         if ok then
             notify("Best pets equipped", THEME.Success)
         else
@@ -4029,8 +4012,8 @@ local function buildUI(backend)
         "economy.indexRewards"
     )
     ecoTab:CreateButton("Collect & Claim All Now", function()
-        pcall(backend.collectEarnings)
-        pcall(backend.claimIndex)
+        pcall(backend.collectEarnings, true)
+        pcall(backend.claimIndex, true)
         notify("Collection & index claim sent", THEME.Success)
     end)
 
@@ -4150,7 +4133,6 @@ end
 -- ============================================================================
 -- Scheduler & Status Loop
 -- ============================================================================
-local jobBusy = {}
 local function runJob(name, interval, callback)
     local now = os.clock()
     local key = "next" .. string.upper(string.sub(name, 1, 1)) .. string.sub(name, 2)
@@ -4247,27 +4229,27 @@ local function startScheduler(backend)
         end
 
         if state.economy.running or state.economy.upgradeSlots or state.economy.autoBuyTrail then
-            runJob("economy", 0.9, function()
+            runJob("economy", 1.5, function()
                 return backend.economyStep(true)
             end)
         end
         if state.economy.autoEquip then
-            runJob("equip", 2.5, function()
-                return backend.equipBest()
+            runJob("equip", 5.5, function()
+                return backend.equipBest(false)
             end)
         end
         if state.economy.autoCollect then
-            runJob("collect", 4.0, function()
-                return backend.collectEarnings()
+            runJob("collect", 45.0, function()
+                return backend.collectEarnings(false)
             end)
         end
         if state.economy.indexRewards then
-            runJob("index", 5.0, function()
-                return backend.claimIndex()
+            runJob("index", 8.0, function()
+                return backend.claimIndex(false)
             end)
         end
         if state.selling.explicit and state.selling.autoSell then
-            runJob("sell", 0.75, function()
+            runJob("sell", 1.0, function()
                 return backend.sellStep(rarityEnabled)
             end)
         end
@@ -4286,12 +4268,10 @@ local function startScheduler(backend)
                 modeText = string.format("Farming Eggs (%d/%d runs)", runtime.runsSinceTraining, state.training.farmRuns)
             end
             local acSummary = string.format(
-                "Master: %s | Guard Strikes Blocked: %d | Stuns Cleared: %d | Idle Spoofed: %d\nLast Event: %s",
+                "Master: %s | UGUIReplay Cloak Hits: %d\nLast Event: %s",
                 state.anticheat.enabled and "ON" or "OFF",
-                runtime.acBlockedStrikes,
-                runtime.acCleanedStuns,
                 runtime.acBlockedTele,
-                tostring(runtime.acLastNote or "Active")
+                tostring(runtime.acLastNote or "Observability.Recorder UI Cloak Active")
             )
             if anticheatParagraph then
                 anticheatParagraph.Set("Protection Status", acSummary)
@@ -4315,14 +4295,14 @@ local function startScheduler(backend)
                 statusParagraph.Set(
                     "Steph HUB v" .. VERSION .. "  |  " .. (gameKey == "sae" and "Steal an Egg" or "Pet Sim 99"),
                     string.format(
-                        "Mode: %s\nSpeed: %s | Zone: %s\nTarget: %s | Movement: %s\nAnti-Cheat: %s (Strikes Blocked: %d)",
+                        "Mode: %s\nSpeed: %s | Zone: %s\nTarget: %s | Movement: %s\nUI Cloak: %s (Cloak Hits: %d)",
                         modeText,
                         tostring(runtime.speedSummary or "Power: 16"),
                         tostring(runtime.zoneSummary or "Auto"),
                         tostring(runtime.targetEggSummary or "None"),
                         tostring(runtime.walkStatus or "Idle"),
-                        state.anticheat.enabled and "ACTIVE" or "OFF",
-                        runtime.acBlockedStrikes
+                        state.anticheat.enabled and "ACTIVE" or "PASSIVE",
+                        runtime.acBlockedTele
                     )
                 )
             end
@@ -4335,6 +4315,7 @@ local backendKey = gameKey == "sae" and "SAE" or "PS99"
 local backend = Backends[backendKey]
 assert(backend, HUB_NAME .. ": backend failed to initialize")
 finishBackend(backend)
+pcall(syncAntiCheat)
 buildUI(backend)
 task.spawn(function()
     if type(backend.warmup) == "function" then
@@ -4362,7 +4343,6 @@ end
 cleanupHub = function()
     shuttingDown = true
     syncAntiAfk()
-    pcall(syncAntiCheat)
     flushConfig()
     for _, connection in ipairs(cleanupConnections) do
         pcall(function()
@@ -4379,6 +4359,7 @@ cleanupHub = function()
     if backend.stop then
         pcall(backend.stop)
     end
+    pcall(syncAntiCheat)
     hubEnv.StehpHubCleanup = nil
 end
 
