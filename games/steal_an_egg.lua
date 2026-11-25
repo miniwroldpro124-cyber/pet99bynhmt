@@ -1,8 +1,8 @@
 --!nolint
--- STEPH_COMPONENT: steal_an_egg 1.8.0
+-- STEPH_COMPONENT: steal_an_egg 1.8.1
 -- Stehp-Hub | Luau / Roblox executor | Steal an Egg + PS99 StephUI Edition
 
-local VERSION = "1.8.0"
+local VERSION = "1.8.1"
 local HUB_NAME = "Steph HUB"
 local CONFIG_FOLDER = "StephHUB_SAE"
 local CONFIG_FILE = CONFIG_FOLDER .. "/config.json"
@@ -1179,8 +1179,8 @@ do
     local nextWearBest = 0
     local nextClaimIndex = 0
     local nextAwayCollect = 0
-    local needEquipBest = false
-    local needClaimIndex = false
+    local needEquipBest = true
+    local needClaimIndex = true
     local lastAutoSellSignature = nil
     local wornTrailSyncedOnce = false
     local wornTrailId = nil
@@ -1262,16 +1262,29 @@ do
         SafeZoneBarriers = SafeZoneBarriers or safeRequire(remoteAt("Shared/Util/SafeZoneBarriers"))
         assert(EggState and PlotState and Save and Remotes, "Steal an Egg modules are not ready")
 
-        if not hatchStartedHooked and PlacedEggRenderer and PlacedEggRenderer.LocalEggHatchStarted then
-            hatchStartedHooked = true
-            local okH, connH = pcall(function()
-                return PlacedEggRenderer.LocalEggHatchStarted:Connect(function()
-                    needEquipBest = true
-                    needClaimIndex = true
+        if not hatchStartedHooked then
+            if PlacedEggRenderer and PlacedEggRenderer.LocalEggHatchStarted then
+                hatchStartedHooked = true
+                local okH, connH = pcall(function()
+                    return PlacedEggRenderer.LocalEggHatchStarted:Connect(function()
+                        needEquipBest = true
+                        needClaimIndex = true
+                    end)
                 end)
-            end)
-            if okH and connH then
-                track(connH)
+                if okH and connH then
+                    track(connH)
+                end
+            end
+            if Save and type(Save.WatchFields) == "function" then
+                hatchStartedHooked = true
+                pcall(function()
+                    track(Save.WatchFields({ "Inventory", "EquippedAssets" }, function()
+                        needEquipBest = true
+                    end))
+                    track(Save.WatchFields({ "Index", "IndexClaimedCategories" }, function()
+                        needClaimIndex = true
+                    end))
+                end)
             end
         end
 
@@ -1443,28 +1456,6 @@ do
         local area = plot and plot.PetArea
         if not center or not area then
             return nil
-        end
-        -- Check base upgrade capacity (Bases.BASES[level].MaxAssets)
-        if Bases and Bases.BASES and Save then
-            local okP, data = pcall(Save.Await, LocalPlayer)
-            local level = (okP and type(data) == "table" and tonumber(data.BaseUpgradeLevel)) or 0
-            local baseDef = Bases.BASES[level]
-            local maxSlots = type(baseDef) == "table"
-                and (tonumber(baseDef.MaxAssets) or tonumber(baseDef.MaxEggs) or tonumber(baseDef.MaxPets) or tonumber(baseDef.Slots))
-                or nil
-            if maxSlots and maxSlots > 0 then
-                local placedEggs = 0
-                for _, rec in pairs(records or {}) do
-                    if rec.Placement ~= nil then
-                        placedEggs = placedEggs + 1
-                    end
-                end
-                local equippedPets = (okP and type(data) == "table" and type(data.EquippedAssets) == "table") and #data.EquippedAssets or 0
-                if placedEggs >= maxSlots or (placedEggs + equippedPets) >= maxSlots then
-                    plotFullUntil = os.clock() + 10.0
-                    return nil
-                end
-            end
         end
         local rayParams
         if PlacedEggRenderer and type(PlacedEggRenderer.AppendRaycastTargets) == "function" then
@@ -1676,11 +1667,17 @@ do
         local bestDist = math.huge
         for _, child in ipairs(areaModel:GetChildren()) do
             if child:IsA("Model") and child.Name == "Guard" then
-                local gRoot = child:FindFirstChild("HumanoidRootPart") or child.PrimaryPart
-                if gRoot and gRoot:IsA("BasePart") then
-                    local d = Vector3.new(refPos.X - gRoot.Position.X, 0, refPos.Z - gRoot.Position.Z).Magnitude
-                    if d < bestDist then
-                        bestDist = d
+                local gState = tostring(child:GetAttribute("GuardState") or "")
+                local gTarget = tostring(child:GetAttribute("TargetPlayer") or "")
+                local isAwakeThreat = (child:GetAttribute("Sleeping") ~= true)
+                    and (gState == "Chasing" or gState == "Waking" or gTarget ~= "")
+                if isAwakeThreat then
+                    local gRoot = child:FindFirstChild("HumanoidRootPart") or child.PrimaryPart
+                    if gRoot and gRoot:IsA("BasePart") then
+                        local d = Vector3.new(refPos.X - gRoot.Position.X, 0, refPos.Z - gRoot.Position.Z).Magnitude
+                        if d < bestDist then
+                            bestDist = d
+                        end
                     end
                 end
             end
@@ -1698,7 +1695,7 @@ do
         if not escapePos then
             return false
         end
-        runtime.walkStatus = "Guard Near (<11.5 studs) - Retreating!"
+        runtime.walkStatus = "Chasing Guard Near (<8.5 studs) - Retreating!"
         return walkToCFrame(CFrame.new(escapePos), 12, {
             stopRadius = 3.2,
             abortIf = function()
@@ -1749,6 +1746,7 @@ do
             reqWalkSpeed = 0,
             guardWalkSpeed = 0,
             guardPos = nil,
+            guardSleeping = true,
             exitPos = nil,
         }
         pcall(function()
@@ -1789,7 +1787,13 @@ do
                     info.exitPos = exitPart.Position
                 end
                 local guardModel = areaModel:FindFirstChild("Guard")
-                local guardRoot = guardModel and guardModel:FindFirstChild("HumanoidRootPart")
+                if guardModel then
+                    local gState = tostring(guardModel:GetAttribute("GuardState") or "")
+                    local gTarget = tostring(guardModel:GetAttribute("TargetPlayer") or "")
+                    info.guardSleeping = (guardModel:GetAttribute("Sleeping") == true)
+                        or (gState ~= "Chasing" and gState ~= "Waking" and gTarget == "")
+                end
+                local guardRoot = guardModel and (guardModel:FindFirstChild("HumanoidRootPart") or guardModel.PrimaryPart)
                 if guardRoot and guardRoot:IsA("BasePart") then
                     info.guardPos = guardRoot.Position
                 end
@@ -1878,9 +1882,9 @@ do
         local cf = record.BottomCFrame or record.BoundsCFrame
         if not cf then return false end
         local eggPos = cf.Position
-        if zoneInfo.guardPos then
+        if zoneInfo.guardPos and not zoneInfo.guardSleeping then
             local guardDistToEgg = Vector3.new(zoneInfo.guardPos.X - eggPos.X, 0, zoneInfo.guardPos.Z - eggPos.Z).Magnitude
-            if guardDistToEgg < 14 then
+            if guardDistToEgg < 10 then
                 return false
             end
         end
@@ -1898,7 +1902,8 @@ do
             local guardStart = zoneInfo.guardPos or eggPos
             local guardDistToExit = Vector3.new(guardStart.X - escapePt.X, 0, guardStart.Z - escapePt.Z).Magnitude
             local guardDistToEgg = Vector3.new(guardStart.X - eggPos.X, 0, guardStart.Z - eggPos.Z).Magnitude
-            local guardInterceptTime = GUARD_WAKE_SEC + (math.max(0, math.min(guardDistToExit, guardDistToEgg + distToExit) - 7.5) / zoneInfo.guardWalkSpeed)
+            local wakeDelay = (zoneInfo.guardSleeping ~= false) and GUARD_WAKE_SEC or 0.0
+            local guardInterceptTime = wakeDelay + (math.max(0, math.min(guardDistToExit, guardDistToEgg + distToExit) - 7.5) / zoneInfo.guardWalkSpeed)
             if playerEscapeTime >= guardInterceptTime then
                 return false
             end
@@ -1914,10 +1919,10 @@ do
         local escapePt = computePerpendicularEscapePoint(eggPos, 7.0)
         local distToExit = escapePt and Vector3.new(eggPos.X - escapePt.X, 0, eggPos.Z - escapePt.Z).Magnitude or distFromPlayer
 
-        -- Check live Guard proximity in all zones (including Forest)
-        if zoneInfo.guardPos then
+        -- Only penalize live guard proximity when the guard is actually awake/chasing
+        if zoneInfo.guardPos and not zoneInfo.guardSleeping then
             local guardDistToEgg = Vector3.new(eggPos.X - zoneInfo.guardPos.X, 0, eggPos.Z - zoneInfo.guardPos.Z).Magnitude
-            if guardDistToEgg < 14 then
+            if guardDistToEgg < 10 then
                 return -1e9 - distFromPlayer
             end
         end
@@ -2021,10 +2026,21 @@ do
                 and now >= (carrySkipUntil[record.Uid] or 0) then
 
                 local reachable = true
-                if rootPos and SafeZoneBarriers and type(SafeZoneBarriers.Separates) == "function" then
+                if SafeZoneBarriers and type(SafeZoneBarriers.Separates) == "function" then
                     local okB, blocked = pcall(function()
                         local fenced = type(SafeZoneBarriers.IsFencedUid) == "function" and SafeZoneBarriers.IsFencedUid(record.Uid) or false
-                        return SafeZoneBarriers.Separates(rootPos, cf.Position, fenced)
+                        local sep = getSeparationLine()
+                        local fieldEntryPos = cf.Position
+                        if sep then
+                            local sepCf = sep.CFrame
+                            local halfWidth = math.max(sep.Size.X * 0.46, 4)
+                            local localEgg = sepCf:PointToObjectSpace(cf.Position)
+                            local clampedX = math.clamp(localEgg.X, -halfWidth, halfWidth)
+                            fieldEntryPos = sepCf:PointToWorldSpace(Vector3.new(clampedX, 0, 0)) + sepCf.LookVector * 4.0
+                        elseif rootPos and isPastSeparationLine(rootPos) then
+                            fieldEntryPos = rootPos
+                        end
+                        return SafeZoneBarriers.Separates(fieldEntryPos, cf.Position, fenced)
                     end)
                     if okB and blocked == true then
                         reachable = false
@@ -2084,9 +2100,10 @@ do
 
     -- Legit Hatching (PlacedEggRenderer.luau):
     -- NEVER call PlacedEggRenderer.ActivateLocalEgg(uid) from afar or when EggState.IsReadyToHatch(uid) is false.
-    -- Only hatch when on the plot side (not carrying an egg, not past SeparationLine, not on treadmill),
+    -- Walk to the ready plot egg (crossing SeparationLine back to plot if needed, as long as not carrying an egg),
     -- walk within <= 5.5 studs of plot.CenterPoint.CFrame * record.Placement.LocalCFrame,
-    -- verify EggState.IsReadyToHatch(uid) == true, and call PlacedEggRenderer.ActivateLocalEgg(uid).
+    -- verify EggState.IsReadyToHatch(uid) == true, and call PlacedEggRenderer.ActivateLocalEgg(uid)
+    -- (with PlacedEggRenderer.Refresh() retry + EggState.BeginHatch/FinishHatch fallback if not yet rendered).
     local function tryHatchOnePlotEgg()
         if stopped then return false end
         ensureModules()
@@ -2101,7 +2118,7 @@ do
             return false
         end
         local root = characterRoot()
-        if not root or isPastSeparationLine(root.Position) then
+        if not root then
             return false
         end
         local okPlot, plot = pcall(localPlot)
@@ -2119,7 +2136,7 @@ do
                 and EggState.IsReadyToHatch(uid) == true then
 
                 local eggWorldCf = plot.CenterPoint.CFrame * placement.LocalCFrame
-                if not walkToCFrame(eggWorldCf, 22, {
+                if not walkToCFrame(eggWorldCf, 26, {
                     stopRadius = 4.2,
                     abortIf = function()
                         return stopped
@@ -2150,12 +2167,37 @@ do
 
                 unequipBlockingTools()
                 local okAct, activated, activateError = pcall(PlacedEggRenderer.ActivateLocalEgg, uid)
+                if (not okAct or activated ~= true) and type(PlacedEggRenderer.Refresh) == "function" then
+                    pcall(PlacedEggRenderer.Refresh)
+                    task.wait(0.08)
+                    okAct, activated, activateError = pcall(PlacedEggRenderer.ActivateLocalEgg, uid)
+                end
+                if (not okAct or activated ~= true)
+                    and EggState.IsReadyToHatch(uid) == true
+                    and type(EggState.BeginHatch) == "function"
+                    and type(EggState.FinishHatch) == "function" then
+                    local okB, begun = pcall(EggState.BeginHatch, uid)
+                    if okB and begun == true then
+                        task.wait(0.25)
+                        local okF, finished, finishErr = pcall(EggState.FinishHatch, uid)
+                        if okF and finished == true then
+                            okAct, activated, activateError = true, true, nil
+                        else
+                            activateError = finishErr or activateError
+                        end
+                    end
+                end
                 if okAct and activated == true then
                     pendingFinish[uid] = true
                     plotFullUntil = 0
                     needEquipBest = true
                     needClaimIndex = true
                     runtime.hatchedCount = (runtime.hatchedCount or 0) + 1
+                    if type(PlacedEggRenderer.Refresh) == "function" then
+                        task.delay(0.35, function()
+                            pcall(PlacedEggRenderer.Refresh)
+                        end)
+                    end
                     task.delay(6.0, function()
                         pendingFinish[uid] = nil
                     end)
@@ -2227,7 +2269,14 @@ do
             return false
         end
 
-        -- 2. Only walk back to plant if autoPlant is ON AND the plot actually has a free slot!
+        -- 2. If Auto-Hatch is enabled and any plot egg is ready, hatch it first (frees up PetArea space before planting)
+        if state.farm.hatch then
+            if tryHatchOnePlotEgg() then
+                return "hatched"
+            end
+        end
+
+        -- 3. Walk back to plant if autoPlant is ON AND the plot has a free slot
         local now = os.clock()
         if state.farm.autoPlant ~= false and now >= plotFullUntil then
             local records = ownedEggs()
@@ -2240,16 +2289,6 @@ do
                         end
                         break
                     end
-                end
-            end
-        end
-
-        -- 3. If Auto-Hatch is enabled and we are on the plot side with a ready egg, hatch it cleanly
-        if state.farm.hatch then
-            local curRoot = characterRoot()
-            if curRoot and not isPastSeparationLine(curRoot.Position) then
-                if tryHatchOnePlotEgg() then
-                    return "hatched"
                 end
             end
         end
@@ -2270,13 +2309,13 @@ do
         local attemptZoneIdx = ZONE_INDEX[attemptAreaId] or 1
         runtime.activeAttemptZoneIdx = attemptZoneIdx
 
-        -- 5. Walk across SeparationLine to within <= 4.2 studs of the egg while watching live guard distance
+        -- 5. Walk across SeparationLine to within <= 4.2 studs of the egg while watching live awake/chasing guard distance
         local guardAborted = false
         local walkedOk = walkToCFrame(fieldCf, 32, {
             stopRadius = 3.8,
             abortIf = function()
                 local r = characterRoot()
-                if r and isPastSeparationLine(r.Position) and getLiveGuardDistance(attemptAreaId, r.Position) < 11.5 then
+                if r and isPastSeparationLine(r.Position) and getLiveGuardDistance(attemptAreaId, r.Position) < 8.5 then
                     guardAborted = true
                     return true
                 end
@@ -2316,7 +2355,7 @@ do
         -- 6. Respect CarryAreaEgg ProximityPrompt.HoldDuration:
         -- Stop moving (humanoid:MoveTo(root.Position)) and hold position for the full HoldDuration
         -- (1.25s, or 0.28s if Workspace:GetAttribute("FastEggPickupTime") is true)
-        -- while continuously checking live guard distance (>= 11.5 studs; abort and retreat if a guard approaches).
+        -- while continuously checking live awake/chasing guard distance (>= 8.5 studs; abort and retreat if a chasing guard approaches).
         pcall(function()
             humanoid:MoveTo(root.Position)
         end)
@@ -2333,7 +2372,7 @@ do
                 runtime.activeAttemptZoneIdx = nil
                 return false
             end
-            if getLiveGuardDistance(attemptAreaId, root.Position) < 11.5 then
+            if getLiveGuardDistance(attemptAreaId, root.Position) < 8.5 then
                 carrySkipUntil[field.Uid] = os.clock() + 4.5
                 runtime.activeAttemptZoneIdx = nil
                 retreatToSafeZone(root.Position)
@@ -2352,7 +2391,7 @@ do
             task.wait(0.03)
         end
 
-        if getLiveGuardDistance(attemptAreaId, root.Position) < 11.5 then
+        if getLiveGuardDistance(attemptAreaId, root.Position) < 8.5 then
             carrySkipUntil[field.Uid] = os.clock() + 4.5
             runtime.activeAttemptZoneIdx = nil
             retreatToSafeZone(root.Position)
@@ -2400,9 +2439,9 @@ do
         return false
     end
 
-    Backends.SAE.hatchStep = function()
+    Backends.SAE.hatchStep = function(manual)
         if stopped then return false end
-        if jobBusy["farm"] or jobBusy["training"] or runtime.mode == "training" then
+        if not manual and (jobBusy["farm"] or jobBusy["training"] or runtime.mode == "training") then
             return false
         end
         return tryHatchOnePlotEgg()
@@ -2424,7 +2463,10 @@ do
         local plot = localPlot()
         local target = firstDescendant(plot.PlotFolder, "TreadmillBottom")
         local cframe = instanceCFrame(target)
-        assert(cframe, "TreadmillBottom is missing")
+        if not cframe then
+            Backends.SAE.treadmillStep()
+            return false
+        end
         if not walkToCFrame(cframe, 25, {
             stopRadius = 2.6,
             abortIf = function()
@@ -2476,8 +2518,30 @@ do
         ensureModules()
         local data = profile()
         if not data then return false end
+        local baseLevel = tonumber(data.BaseUpgradeLevel) or 0
+        if baseLevel <= 0 then
+            local baseCost = 1000
+            if Bases and type(Bases.GetCost) == "function" then
+                local okC, c = pcall(Bases.GetCost, LocalPlayer, 1)
+                if okC and tonumber(c) then
+                    baseCost = tonumber(c)
+                end
+            end
+            if cashValue() - baseCost >= state.economy.reserve then
+                if BaseUpgrade and type(BaseUpgrade.PurchaseNextTier) == "function" then
+                    local okUp, queued = pcall(BaseUpgrade.PurchaseNextTier)
+                    if okUp and queued == true then
+                        return true
+                    end
+                end
+                if Remotes and Remotes.Homestead and Remotes.Homestead.AskBaseTierRaise then
+                    return fireServer(Remotes.Homestead.AskBaseTierRaise)
+                end
+            end
+            return false
+        end
         local level = tonumber(data.TreadmillUpgradeLevel) or 1
-        local nextConfig = Treadmills.GetByUpgradeLevel(level + 1)
+        local nextConfig = Treadmills and type(Treadmills.GetByUpgradeLevel) == "function" and Treadmills.GetByUpgradeLevel(level + 1)
         if not nextConfig then return false end
         local cash = cashValue()
         local cost = tonumber(nextConfig.Price) or tonumber(nextConfig.Cost) or math.huge
@@ -2502,14 +2566,29 @@ do
         ensureModules()
         local data = profile()
         if not data then return false end
-        if state.economy.upgradeSlots and Bases and Bases.BASES and Bases.GetCost then
+        local didWork = false
+        if state.economy.upgradeSlots and Bases and Bases.BASES then
             local level = tonumber(data.BaseUpgradeLevel) or 0
-            if Bases.BASES[level + 1] then
-                local ok, cost = pcall(Bases.GetCost, LocalPlayer, level + 1)
-                if ok and cashValue() - (tonumber(cost) or math.huge) >= state.economy.reserve then
+            local nextDef = Bases.BASES[level + 1]
+            if nextDef then
+                local cost = tonumber(nextDef.Price) or tonumber(nextDef.Cost) or math.huge
+                if type(Bases.GetCost) == "function" then
+                    local okC, c = pcall(Bases.GetCost, LocalPlayer, level + 1)
+                    if okC and tonumber(c) then
+                        cost = tonumber(c)
+                    end
+                end
+                if cashValue() - cost >= state.economy.reserve then
+                    local upgraded = false
                     if BaseUpgrade and type(BaseUpgrade.PurchaseNextTier) == "function" then
                         local okUp, queued = pcall(BaseUpgrade.PurchaseNextTier)
-                        return okUp and queued == true
+                        upgraded = (okUp and queued == true)
+                    end
+                    if not upgraded and Remotes and Remotes.Homestead and Remotes.Homestead.AskBaseTierRaise then
+                        upgraded = fireServer(Remotes.Homestead.AskBaseTierRaise)
+                    end
+                    if upgraded then
+                        didWork = true
                     end
                 end
             end
@@ -2526,28 +2605,31 @@ do
                         local bought = invokeServer(trailwear.AskPurchase, id)
                         if bought == true then
                             wornTrailId = id
-                            return true
+                            didWork = true
                         end
                     end
                 elseif inventory[id] and equipped ~= id and trailwear and trailwear.AskChoose then
                     local chosen = invokeServer(trailwear.AskChoose, id)
                     if chosen == true then
                         wornTrailId = id
-                        return true
+                        didWork = true
                     end
                 end
             end
         end
-        return false
+        return didWork
     end
 
     -- Economy Remote Debounces:
-    -- Haul.WearBest only when needEquipBest flag is set after hatching (with >=5.5s cooldown) or manual button click
+    -- Haul.WearBest when needEquipBest flag is set (with >=5.5s cooldown), periodic re-check (>=18s), or manual button click
     Backends.SAE.equipBest = function(manual)
         if stopped then return false end
         local now = os.clock()
         if not manual then
-            if not needEquipBest or now < nextWearBest then
+            if now < nextWearBest then
+                return false
+            end
+            if not needEquipBest and now < (nextWearBest + 12.5) then
                 return false
             end
         elseif now < nextWearBest then
@@ -2583,12 +2665,15 @@ do
         return invokeServer(away.AskCollect, { Kind = "Claim" }) == true
     end
 
-    -- Codex.AskRedeemAll only when needClaimIndex is set after hatching (with >=8s cooldown) or manual button click
+    -- Codex.AskRedeemAll when needClaimIndex is set (with >=8s cooldown), periodic re-check (>=25s), or manual button click
     Backends.SAE.claimIndex = function(manual)
         if stopped then return false end
         local now = os.clock()
         if not manual then
-            if not needClaimIndex or now < nextClaimIndex then
+            if now < nextClaimIndex then
+                return false
+            end
+            if not needClaimIndex and now < (nextClaimIndex + 17.0) then
                 return false
             end
         elseif now < nextClaimIndex then
@@ -2649,9 +2734,13 @@ do
         return false
     end
 
+    Backends.SAE.resetAutoSell = function()
+        lastAutoSellSignature = nil
+    end
+
     -- Haul.WriteAutoSell only when the selected rarity signature actually changes
     Backends.SAE.sellStep = function(rarityEnabled)
-        if stopped or not state.selling.explicit or not state.selling.autoSell then return false end
+        if stopped or not state.selling.autoSell then return false end
         ensureModules()
         local haul = Remotes.Haul
         if not haul or not haul.WriteAutoSell then return false end
@@ -3792,8 +3881,16 @@ local function buildUI(backend)
         farmTab:CreateToggle("Auto-Plant Stolen Eggs (Only When Slot Free)", "farm.autoPlant")
     end
     farmTab:CreateToggle("Auto-Hatch Ready Eggs", "farm.hatch")
-    farmTab:CreateToggle("Auto-Equip Best Pets", "economy.autoEquip")
-    farmTab:CreateToggle("Auto-Collect Plot / Away Earnings", "economy.autoCollect")
+    farmTab:CreateToggle("Auto-Equip Best Pets", "economy.autoEquip", function(val)
+        if val and backend.equipBest then
+            task.spawn(function() pcall(backend.equipBest, true) end)
+        end
+    end)
+    farmTab:CreateToggle("Auto-Collect Plot / Away Earnings", "economy.autoCollect", function(val)
+        if val and backend.collectEarnings then
+            task.spawn(function() pcall(backend.collectEarnings, true) end)
+        end
+    end)
     farmTab:CreateToggle(
         backend.key == "ps99" and "Auto-Upgrade Pet Slots (Cash)" or "Auto-Upgrade Treadmill (Cash)",
         "farm.treadmill"
@@ -3839,7 +3936,7 @@ local function buildUI(backend)
             task.spawn(function()
                 local count = 0
                 for _ = 1, 12 do
-                    local ok, res = pcall(backend.hatchStep)
+                    local ok, res = pcall(backend.hatchStep, true)
                     if ok and res then
                         count = count + 1
                         task.wait(0.15)
@@ -3972,9 +4069,20 @@ local function buildUI(backend)
     ecoTab:CreateSection("Cash Upgrades & Gear")
     ecoTab:CreateToggle(
         backend.key == "ps99" and "Auto-Upgrade Pet & Egg Slots (Cash)" or "Auto-Upgrade Base Slots (Cash)",
-        "economy.upgradeSlots"
+        "economy.upgradeSlots",
+        function(val)
+            if val then
+                state.economy.running = true
+                refreshControl("economy.running")
+                task.spawn(function() pcall(backend.economyStep, true) end)
+            end
+        end
     )
-    ecoTab:CreateToggle("Auto Equip Best Pets", "economy.autoEquip")
+    ecoTab:CreateToggle("Auto Equip Best Pets", "economy.autoEquip", function(val)
+        if val and backend.equipBest then
+            task.spawn(function() pcall(backend.equipBest, true) end)
+        end
+    end)
     ecoTab:CreateButton("Equip Best Pets Now", function()
         local ok, err = pcall(backend.equipBest, true)
         if ok then
@@ -3985,7 +4093,13 @@ local function buildUI(backend)
     end)
     if backend.supportsTrails ~= false then
         local trailDropdown = ecoTab:CreateDropdown("Cash Trail To Buy", "economy.trail", { state.economy.trail or "None" })
-        ecoTab:CreateToggle("Auto-Buy Selected Trail (Cash)", "economy.autoBuyTrail")
+        ecoTab:CreateToggle("Auto-Buy Selected Trail (Cash)", "economy.autoBuyTrail", function(val)
+            if val then
+                state.economy.running = true
+                refreshControl("economy.running")
+                task.spawn(function() pcall(backend.economyStep, true) end)
+            end
+        end)
         task.spawn(function()
             task.wait(0.2)
             if backend.trails then
@@ -4006,10 +4120,19 @@ local function buildUI(backend)
         end
     end)
     ecoTab:CreateSection("Earnings & Codex Rewards")
-    ecoTab:CreateToggle("Auto-Collect Offline/Away Earnings", "economy.autoCollect")
+    ecoTab:CreateToggle("Auto-Collect Offline/Away Earnings", "economy.autoCollect", function(val)
+        if val and backend.collectEarnings then
+            task.spawn(function() pcall(backend.collectEarnings, true) end)
+        end
+    end)
     ecoTab:CreateToggle(
         backend.key == "ps99" and "Auto-Claim Rank Rewards" or "Auto-Claim Codex Index Rewards",
-        "economy.indexRewards"
+        "economy.indexRewards",
+        function(val)
+            if val and backend.claimIndex then
+                task.spawn(function() pcall(backend.claimIndex, true) end)
+            end
+        end
     )
     ecoTab:CreateButton("Collect & Claim All Now", function()
         pcall(backend.collectEarnings, true)
@@ -4042,14 +4165,19 @@ local function buildUI(backend)
                 notify("Bulk sale request failed", THEME.Danger)
             end
         end)
+        local function onAutoSellToggleChanged()
+            if backend.resetAutoSell then
+                pcall(backend.resetAutoSell)
+            end
+        end
         sellTab:CreateSection("Auto-Sell Rarities")
-        sellTab:CreateToggle("Auto-Sell New Pets By Rarity", "selling.autoSell")
-        sellTab:CreateToggle("Sell Future Common", "selling.common")
-        sellTab:CreateToggle("Sell Future Uncommon", "selling.uncommon")
-        sellTab:CreateToggle("Sell Future Rare", "selling.rare")
-        sellTab:CreateToggle("Sell Future Epic", "selling.epic")
-        sellTab:CreateToggle("Sell Future Legendary", "selling.legendary")
-        sellTab:CreateToggle("Sell Future Mythic", "selling.mythic")
+        sellTab:CreateToggle("Auto-Sell New Pets By Rarity", "selling.autoSell", onAutoSellToggleChanged)
+        sellTab:CreateToggle("Sell Future Common", "selling.common", onAutoSellToggleChanged)
+        sellTab:CreateToggle("Sell Future Uncommon", "selling.uncommon", onAutoSellToggleChanged)
+        sellTab:CreateToggle("Sell Future Rare", "selling.rare", onAutoSellToggleChanged)
+        sellTab:CreateToggle("Sell Future Epic", "selling.epic", onAutoSellToggleChanged)
+        sellTab:CreateToggle("Sell Future Legendary", "selling.legendary", onAutoSellToggleChanged)
+        sellTab:CreateToggle("Sell Future Mythic", "selling.mythic", onAutoSellToggleChanged)
     end
 
     -- Teleports / Movement Tab
@@ -4248,7 +4376,7 @@ local function startScheduler(backend)
                 return backend.claimIndex(false)
             end)
         end
-        if state.selling.explicit and state.selling.autoSell then
+        if state.selling.autoSell then
             runJob("sell", 1.0, function()
                 return backend.sellStep(rarityEnabled)
             end)
