@@ -1,5 +1,5 @@
--- STEPH_COMPONENT: ps99_engine 3.3.1
-local VERSION = "3.3.1"
+-- STEPH_COMPONENT: ps99_engine 3.4.0
+local VERSION = "3.4.0"
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local UIS = game:GetService("UserInputService")
@@ -78,7 +78,7 @@ local CFG = {
     QuestBackoff = 25,
     EnsureBackoff = 45,
     QuestMaxRequests = 2,
-    DoQuestInterval = 0.6,
+    DoQuestInterval = 1.2,
     RankInterval = 4,
     RebirthInterval = 20,
     EggInterval = 0.6,
@@ -279,12 +279,15 @@ local target = {}
 local orbRecords = setmetatable({}, {__mode = "kv"})
 -- record -> the _superMagnet it had before we forced it on (restore on OFF).
 local orbOffsets = setmetatable({}, {__mode = "k"})
-local orbState = {cursor = 1}
+local orbState = {cursor = 1, origPickup = nil, origCollect = nil, sentIds = {}}
 -- false marks "the record had no magnet flag before we set it" so the weak key
 -- survives; a nil value would drop the entry and lose the restore.
 local function magnetize(record)
+    if type(record) ~= "table" then return end
     if orbOffsets[record] == nil then orbOffsets[record] = record._superMagnet or false end
     record._superMagnet = true
+    record._pickupDelay = 0
+    record._anchored = false
 end
 local assignedQuests = {}
 local secretTried = {}
@@ -340,7 +343,6 @@ local REMOTE_TYPES = {
     ["TechKey_Unlock"] = "RemoteFunction",
     ["VoidKey_Unlock"] = "RemoteFunction",
     ["FantasyKey_Unlock"] = "RemoteFunction",
-    ["SecretKey_Unlock"] = "RemoteFunction",
     ["PrisonKey_Combine"] = "RemoteFunction",
     ["PrisonKey_Use"] = "RemoteFunction",
     ["Eggs_RequestUnlock"] = "RemoteFunction",
@@ -354,7 +356,7 @@ local REMOTE_TYPES = {
     ["GiftBag_Open"] = "RemoteFunction",
     ["Fruits: Consume"] = "RemoteEvent",
     ["Potions: Consume"] = "RemoteEvent",
-    ["XPPotions: Consume"] = "RemoteEvent",
+    ["XPPotions: Consume"] = "RemoteFunction",
     ["Redeem Free Gift"] = "RemoteFunction",
     ["Ultimates: Activate"] = "RemoteFunction",
     ["Daycare: Enroll"] = "RemoteFunction",
@@ -384,6 +386,7 @@ local REMOTE_TYPES = {
     ["KX_Release"] = "RemoteFunction",
     ["Lootables_Open"] = "RemoteFunction",
     ["Spinny Wheel: Request Spin"] = "RemoteFunction",
+    ["Spinny Wheel: Request Ticket"] = "RemoteEvent",
     ["Enchants_Equip"] = "RemoteEvent",
     ["Enchants_ClearSlot"] = "RemoteEvent",
     ["EggHatchSlotsMachine_RequestPurchase"] = "RemoteFunction",
@@ -568,6 +571,55 @@ function CFG.BootstrapModules()
     tryReq("pumpkinTycoon", "PumpkinTycoonCmds")
     tryReq("rankCmds", "RankCmds")
     tryReq("questCmds", "QuestCmds")
+    tryReq("potionCmds", "PotionCmds")
+    tryReq("fruitCmds", "FruitCmds")
+    tryReq("boostCmds", "BoostCmds")
+    tryReq("eggCmds", "EggCmds")
+    tryReq("spinnyWheelCmds", "SpinnyWheelCmds")
+    tryReq("tabController", "TabController")
+    if not modules.orb then
+        local orbCmdsMod = cli:FindFirstChild("OrbCmds")
+        local orbChild = orbCmdsMod and orbCmdsMod:FindFirstChild("Orb")
+        if orbChild then
+            local okOrb, orbMod = pcall(require, orbChild)
+            if okOrb and type(orbMod) == "table" then
+                modules.orb = orbMod
+            end
+        end
+    end
+    local utilFolder = lib and lib:FindFirstChild("Util")
+    if utilFolder then
+        if not modules.eggsUtil then
+            local m = utilFolder:FindFirstChild("EggsUtil")
+            if m then
+                local okU, mod = pcall(require, m)
+                if okU and type(mod) == "table" then modules.eggsUtil = mod end
+            end
+        end
+        if not modules.ptButtons then
+            local m = utilFolder:FindFirstChild("PumpkinTycoonButtons")
+            if m then
+                local okU, mod = pcall(require, m)
+                if okU and type(mod) == "table" then modules.ptButtons = mod end
+            end
+        end
+    end
+    if not modules.directory then
+        local dirMod = lib and lib:FindFirstChild("Directory")
+        if dirMod then
+            local okD, dir = pcall(require, dirMod)
+            if okD and type(dir) == "table" then
+                modules.directory = dir
+                if type(dir.Quests) == "table" then
+                    for qid, qdef in pairs(dir.Quests) do
+                        if type(qdef) == "table" and not questDirs[qid] then
+                            questDirs[qid] = qdef
+                        end
+                    end
+                end
+            end
+        end
+    end
 
     local liveSave = probeSaveModule(modules.save)
     if not liveSave and not snap.cache then
@@ -1152,7 +1204,7 @@ local function needsNative()
     -- waste taps on NoTapping breakables. Plain tap and Aura keep using the
     -- folder walk so they still cost no heap scan.
     if enabled.farm and not modules.breakables then return true end
-    if (enabled.vacuum or enabled.farm) and (not modules.orb or orbBackfillNeeded) then return true end
+    if (enabled.vacuum or enabled.farm or enabled.fastFarmBeta) and not modules.orb then return true end
     if enabled.autoEgg and next(eggByNumber) == nil then return true end
     if enabled.worldTele then
         local ready = false
@@ -1177,9 +1229,12 @@ local function needsNative()
         or enabled.ptAutoFlannelGifts or enabled.ptAutoHuntWild or enabled.ptAutoCatchWild
         or enabled.ptAutoBuyNets or enabled.ptAutoFightTurkey or enabled.ptAutoCatchRare) then return true end
     if enabled.autoRebirth and save and not rebirths[save.Rebirths + 1] then return true end
-    if (enabled.autoQuest or enabled.autoDoQuest) and save and type(save.NPCQuests) == "table" then
+    if (enabled.autoQuest or enabled.autoDoQuest) and save and type(save.NPCQuests) == "table" and not CFG.QuestDirScanned then
         for id, data in pairs(save.NPCQuests) do
-            if type(data) == "table" and data.Completed ~= true and not questDirs[id] then return true end
+            if type(data) == "table" and data.Completed ~= true and not questDirs[id] then
+                CFG.QuestDirScanned = true
+                return true
+            end
         end
     end
     return false
@@ -1220,16 +1275,41 @@ end
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Include
 rayParams.IgnoreWater = true
+local cachedFakeGround = nil
+local cachedZoneId = nil
+local cachedZoneAt = -math.huge
 local function currentZone()
+    local now = os.clock()
+    if now - cachedZoneAt < 0.25 and cachedZoneId ~= nil then
+        return cachedZoneId
+    end
     local ground, point = thingsFolder("__FAKE_GROUND"), position()
     if not ground or not point then return nil end
-    rayParams.FilterDescendantsInstances = {ground}
+    if ground ~= cachedFakeGround then
+        cachedFakeGround = ground
+        rayParams.FilterDescendantsInstances = {ground}
+    end
     -- The ground model can be destroyed mid-call by the game's own teardown;
     -- a filter holding a destroyed instance makes Raycast throw.
     local ok, hit = pcall(workspace.Raycast, workspace, point + Vector3.new(0, 8, 0), Vector3.new(0, -200, 0), rayParams)
     if not ok or not hit then return nil end
     local id = hit.Instance.Name
+    cachedZoneId = id
+    cachedZoneAt = now
     return id
+end
+
+local function ownsZone(save, zoneId)
+    if type(zoneId) ~= "string" or #zoneId == 0 then return true end
+    if save and type(save.UnlockedZones) == "table" and save.UnlockedZones[zoneId] == true then
+        return true
+    end
+    local zc = modules.zoneCmds
+    if zc and type(zc.Owns) == "function" then
+        local ok, res = pcall(zc.Owns, zoneId)
+        if ok and res == true then return true end
+    end
+    return false
 end
 
 local function maxOwned(save)
@@ -1793,49 +1873,128 @@ local function tapTick()
 end
 
 local function restoreOrbCapture()
-    if orbState.module and orbState.module.new == orbState.hook then
-        local ok, err = pcall(function() orbState.module.new = orbState.original end)
-        if not ok then warn("[PS99 CLEAN] orb restore: " .. tostring(err)) end
+    if orbState.module then
+        if orbState.module.new == orbState.hook and orbState.original then
+            local ok, err = pcall(function() orbState.module.new = orbState.original end)
+            if not ok then warn("[PS99 CLEAN] orb restore: " .. tostring(err)) end
+        end
+        if orbState.origPickup ~= nil then
+            pcall(function() orbState.module.DefaultPickupDistance = orbState.origPickup end)
+        end
+        if orbState.origCollect ~= nil then
+            pcall(function() orbState.module.CollectDistance = orbState.origCollect end)
+        end
     end
     for record, previous in pairs(orbOffsets) do
-        pcall(function() record._superMagnet = previous or nil end)
+        pcall(function() record._superMagnet = previous or false end)
     end
     table.clear(orbOffsets)
+    if orbState.sentIds then table.clear(orbState.sentIds) end
     orbState.module, orbState.original, orbState.hook = nil, nil, nil
+    orbState.origPickup, orbState.origCollect = nil, nil
+end
+
+local function ensureOrbModule()
+    if modules.orb then return modules.orb end
+    local lib = RS:FindFirstChild("Library")
+    local cli = lib and lib:FindFirstChild("Client")
+    local orbCmdsMod = cli and cli:FindFirstChild("OrbCmds")
+    local orbChild = orbCmdsMod and orbCmdsMod:FindFirstChild("Orb")
+    if orbChild then
+        local ok, mod = pcall(require, orbChild)
+        if ok and type(mod) == "table" then
+            modules.orb = mod
+            return mod
+        end
+    end
+    return nil
 end
 
 local function vacuumTick()
-    if not orbState.hook and modules.orb then
-        local mod, original = modules.orb, modules.orb.new
-        local hook = function(...)
-            local orb = original(...)
-            if alive and type(orb) == "table" and orb._part then
-                orbRecords[orb._part] = orb
-                if enabled.vacuum or enabled.farm then magnetize(orb) end
+    local mod = ensureOrbModule()
+    if mod then
+        if orbState.origPickup == nil then
+            orbState.origPickup = tonumber(mod.DefaultPickupDistance) or 20
+        end
+        if orbState.origCollect == nil then
+            orbState.origCollect = tonumber(mod.CollectDistance) or 2.5
+        end
+        -- Infinite magnet: expand OrbCmds's native pickup & instant-collect distances so
+        -- every orb and lootbag anywhere on the map (including pre-existing ones) collects immediately.
+        if mod.DefaultPickupDistance ~= 999999999 then
+            pcall(function() mod.DefaultPickupDistance = 999999999 end)
+        end
+        if mod.CollectDistance ~= 999999 then
+            pcall(function() mod.CollectDistance = 999999 end)
+        end
+        if not orbState.hook and type(mod.new) == "function" then
+            local original = mod.new
+            local hook = function(...)
+                local orb = original(...)
+                if alive and type(orb) == "table" and orb._part then
+                    orbRecords[orb._part] = orb
+                    if enabled.vacuum or enabled.farm or enabled.fastFarmBeta or enabled.ptAutoBreakPumpkins or enabled.autoTimeTrial or enabled.autoDoQuest then
+                        magnetize(orb)
+                    end
+                end
+                return orb
             end
-            return orb
-        end
-        local ok = pcall(function() mod.new = hook end)
-        if ok then orbState.module, orbState.original, orbState.hook = mod, original, hook end
-    end
-    local root, point = thingsFolder("Orbs"), position()
-    if not root or not point then notes.vacuum = "waiting for orbs/character"; return end
-    local children = root:GetChildren()
-    local flagged, total = 0, 0
-    for _ = 1, math.min(#children, CFG.BreakableScanCap) do
-        if orbState.cursor > #children then orbState.cursor = 1 end
-        local child = children[orbState.cursor]
-        orbState.cursor += 1
-        local record = orbRecords[child]
-        if type(record) == "table" and not record._destroyed and record._part == child then
-            total += 1
-            if orbOffsets[record] == nil then orbOffsets[record] = record._superMagnet end
-            if record._superMagnet ~= true then record._superMagnet = true end
-            flagged += 1
+            local ok = pcall(function() mod.new = hook end)
+            if ok then orbState.module, orbState.original, orbState.hook = mod, original, hook end
+        else
+            orbState.module = orbState.module or mod
         end
     end
-    if total == 0 then notes.vacuum = "waiting for orb records; " .. notes.heap; return end
-    notes.vacuum = ("%d/%d orbs magnetized"):format(flagged, total)
+
+    local root = thingsFolder("Orbs")
+    local now = os.clock()
+    local flagged, total, collectedBatch = 0, 0, {}
+    if root then
+        local children = root:GetChildren()
+        local cap = math.min(#children, CFG.BreakableScanCap)
+        for _ = 1, cap do
+            if orbState.cursor > #children then orbState.cursor = 1 end
+            local child = children[orbState.cursor]
+            orbState.cursor += 1
+            if child and child.Parent then
+                local record = orbRecords[child]
+                if type(record) == "table" and not record._destroyed and record._part == child then
+                    total += 1
+                    magnetize(record)
+                    flagged += 1
+                else
+                    local oid = tonumber(child.Name)
+                    if oid and oid > 0 then
+                        total += 1
+                        local lastSent = orbState.sentIds[oid] or 0
+                        if now - lastSent >= 0.35 and #collectedBatch < 100 then
+                            orbState.sentIds[oid] = now
+                            collectedBatch[#collectedBatch + 1] = oid
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if #collectedBatch > 0 then
+        fire("Orbs: Collect", collectedBatch)
+    end
+    -- Prune old sentIds periodically so the table stays tiny
+    if (orbState.lastPrune or 0) + 10 < now then
+        orbState.lastPrune = now
+        for oid, ts in pairs(orbState.sentIds) do
+            if now - ts > 5 then orbState.sentIds[oid] = nil end
+        end
+    end
+    if mod then
+        notes.vacuum = ("inf magnet active (%d tracked, %d claimed)"):format(flagged, #collectedBatch)
+    elseif #collectedBatch > 0 then
+        notes.vacuum = ("direct collect x%d orbs"):format(#collectedBatch)
+    elseif total == 0 then
+        notes.vacuum = "inf magnet idle (no orbs)"
+    else
+        notes.vacuum = ("%d/%d orbs magnetized"):format(flagged, total)
+    end
 end
 
 -- Finds the zone folder in Directory cache or workspace.Map / Map2 / Map3 / Map4 (Zones 1-279+).
@@ -1986,7 +2145,7 @@ local function zoneCenter(id, preferEgg)
                 end
             end
             if count > 0 then
-                local topY = math.max(maxY, liveCount > 0 and liveMaxY or maxY)
+                local topY = maxY
                 local mid = liveCount >= 3
                     and Vector3.new(math.clamp(liveSum.X / liveCount, minX + 2, maxX - 2), topY, math.clamp(liveSum.Z / liveCount, minZ + 2, maxZ - 2))
                     or Vector3.new(sum.X / count, topY, sum.Z / count)
@@ -2049,8 +2208,8 @@ local function snapTo(point)
     if hum and hum.Sit then
         pcall(function() hum.Sit = false end)
     end
-    -- Teleport higher (+12 studs) to avoid clipping under floors or falling into the void
-    local highPos = point + Vector3.new(0, 12, 0)
+    -- Teleport slightly above ground (+4 studs) for clean breakable-zone footing without void clipping
+    local highPos = point + Vector3.new(0, 4, 0)
     pcall(fire, "RequestStreaming", point)
     local ok = pcall(function()
         root.AssemblyLinearVelocity = Vector3.zero
@@ -2066,12 +2225,12 @@ local function snapTo(point)
             local rp = RaycastParams.new()
             rp.FilterType = Enum.RaycastFilterType.Exclude
             rp.FilterDescendantsInstances = { character }
-            local hit = workspace:Raycast(highPos, Vector3.new(0, -65, 0), rp)
+            local hit = workspace:Raycast(highPos + Vector3.new(0, 4, 0), Vector3.new(0, -65, 0), rp)
             if not hit and root and root.Parent then
                 pcall(function() root.Anchored = true end)
                 local deadline = os.clock() + 1.2
                 while alive and root and root.Parent and os.clock() < deadline do
-                    hit = workspace:Raycast(highPos, Vector3.new(0, -65, 0), rp)
+                    hit = workspace:Raycast(highPos + Vector3.new(0, 4, 0), Vector3.new(0, -65, 0), rp)
                     if hit then break end
                     task.wait(0.1)
                 end
@@ -2079,7 +2238,7 @@ local function snapTo(point)
                     if hit then
                         pcall(function()
                             root.AssemblyLinearVelocity = Vector3.zero
-                            character:PivotTo(CFrame.new(hit.Position + Vector3.new(0, 6, 0)))
+                            character:PivotTo(CFrame.new(hit.Position + Vector3.new(0, 3.5, 0)))
                         end)
                     end
                     pcall(function() root.Anchored = false end)
@@ -2281,11 +2440,48 @@ local function teleTick()
     end
     local now = os.clock()
     if now < nextAt.tele then return end
+    -- Event focus guard: when inside the Event (Pumpkin Tycoon), keep teleporting focused on the
+    -- Event breakable/farm zone instead of leaving the event instance to pull the player to a main world.
+    if CFG.Event and CFG.Event.InInstance and CFG.Event.InInstance() then
+        local plot = CFG.Event.Plot and CFG.Event.Plot()
+        if plot then
+            nextAt.tele = now + math.max(CFG.TeleInterval, 0.8)
+            local bestFarmZ = CFG.Event.BestFarmZone(plot)
+            local targetPos = CFG.Event.FarmCenter(plot, bestFarmZ)
+            if targetPos then
+                local pos = position()
+                local dist2D = pos and (Vector3.new(pos.X, 0, pos.Z) - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude or math.huge
+                if dist2D > 6 or (pos and math.abs(pos.Y - targetPos.Y) > 10) then
+                    CFG.Event.MoveTo(targetPos)
+                end
+                local zName = (CFG.Event.ZONES[bestFarmZ] and CFG.Event.ZONES[bestFarmZ].Name) or ("Zone " .. tostring(bestFarmZ))
+                notes.tele = "event farm zone: " .. zName
+                return
+            end
+        end
+        notes.tele = "event focus (waiting for plot)"
+        return
+    end
     local save = getSave()
     if not save then notes.tele = "waiting for profile"; return end
-    local best = maxOwned(save)
-    if not best then notes.tele = "waiting for zone map"; return end
-    local id = zones[best].id
+    local id = nil
+    if pickCount(picked.zones) > 0 then
+        local bestPickNum = -1
+        for zId, on in pairs(picked.zones) do
+            if on then
+                local num = zoneNumbers[zId] or 0
+                if num > bestPickNum then
+                    bestPickNum = num
+                    id = zId
+                end
+            end
+        end
+    end
+    if not id then
+        local best = maxOwned(save)
+        if not best then notes.tele = "waiting for zone map"; return end
+        id = zones[best].id
+    end
     local hereW = detectActiveWorld()
     local targetW = zoneWorldNumber(id)
     if targetW ~= hereW then
@@ -2486,7 +2682,17 @@ local function rebirthTick()
     if ok == true then nextAt.save = 0 end
 end
 
+local eggModelCache = {}
 local function findEggModel(targetEggId, point)
+    if targetEggId then
+        local cached = eggModelCache[targetEggId]
+        if cached and cached.model and cached.model.Parent then
+            local at = modelPosition(cached.model)
+            if at then
+                return cached.model, cached.number, at
+            end
+        end
+    end
     local targetNum
     for num, id in pairs(eggByNumber) do
         if id == targetEggId then targetNum = num; break end
@@ -2509,6 +2715,7 @@ local function findEggModel(targetEggId, point)
                             local at = modelPosition(child)
                             if at then
                                 if targetEggId and (child.Name == targetEggId or (targetNum and number == targetNum) or child.Name:find(targetEggId, 1, true)) then
+                                    eggModelCache[targetEggId] = { model = child, number = number or targetNum }
                                     return child, number or targetNum, at
                                 end
                                 if number and point then
@@ -2628,6 +2835,12 @@ local function worldTeleTick()
     end
     local now = os.clock()
     if now < nextAt.worldTele then return end
+    if CFG.Event and type(CFG.Event.InInstance) == "function" and CFG.Event.InInstance() then
+        nextAt.worldTele = now + CFG.WorldInterval
+        local okE, msgE = CFG.Event.TeleToFarm()
+        notes.world = okE and ("event focus: " .. tostring(msgE)) or ("paused in event (" .. tostring(msgE or "PumpkinTycoon") .. ")")
+        return
+    end
     local save = getSave()
     if not save then notes.world = "waiting for profile"; return end
     local hereWorld = currentWorldNumber()
@@ -2663,6 +2876,10 @@ end
 CFG.AdvanceTick = function()
     if CFG.TimeTrial and CFG.TimeTrial.BlocksOtherTele() then
         notes.advance = "paused (Time Trial active)"
+        return
+    end
+    if CFG.Event and type(CFG.Event.InInstance) == "function" and CFG.Event.InInstance() then
+        notes.advance = "paused (focused on Event)"
         return
     end
     local now = os.clock()
@@ -3026,12 +3243,7 @@ local KEY_PAIRS = {
     {name = "TechKey_Combine", lower = "Tech Key Lower Half", upper = "Tech Key Upper Half"},
     {name = "VoidKey_Combine", lower = "Void Key Lower Half", upper = "Void Key Upper Half"},
     {name = "FantasyKey_Combine", lower = "Fantasy Key Lower Half", upper = "Fantasy Key Upper Half"},
-    {name = "MVPKey_Combine", lower = "MVP Key Lower Half", upper = "MVP Key Upper Half"},
     {name = "SecretKey_Combine", lower = "Secret Key Lower Half", upper = "Secret Key Upper Half"},
-    {name = "TreasureHideout_Combine", lower = "Treasure Hideout Key Lower Half", upper = "Treasure Hideout Key Upper Half"},
-    {name = "TN_Bind", lower = "Fiesta Key Lower Half", upper = "Fiesta Key Upper Half"},
-    {name = "MW_Reduce", lower = "Fiesta Boss Key Lower Half", upper = "Fiesta Boss Key Upper Half"},
-    {name = "PrisonKey_Combine", lower = "Prison Key"},
 }
 
 local BAG_KINDS = {
@@ -3213,9 +3425,10 @@ local function pickItems(category)
         for _, id in ipairs(cat.items) do out[#out + 1] = id end
     elseif category == "tickets" then
         for _, name in ipairs({
-            "Spinny Wheel Ticket", "Tech Spinny Wheel Ticket", "Void Spinny Wheel Ticket",
-            "Fantasy Spinny Wheel Ticket", "Exclusive Raffle Ticket", "Tower Raffle Ticket",
-            "Arcade Ticket", "Golden Paw Ticket", "Millionaire Ticket", "Mystery Ticket",
+            "Spinny Wheel Ticket",
+            "Tech Spinny Wheel Ticket",
+            "Void Spinny Wheel Ticket",
+            "Fantasy Spinny Wheel Ticket",
         }) do
             out[#out + 1] = name
         end
@@ -3233,13 +3446,57 @@ local function allowAll(store, id)
 end
 
 local KEY_UNLOCKS = {
-    {item = "Crystal Key", remote = "CrystalKey_Unlock", pick = "CrystalKey_Combine"},
-    {item = "Tech Key", remote = "TechKey_Unlock", pick = "TechKey_Combine"},
-    {item = "Void Key", remote = "VoidKey_Unlock", pick = "VoidKey_Combine"},
-    {item = "Fantasy Key", remote = "FantasyKey_Unlock", pick = "FantasyKey_Combine"},
-    {item = "Secret Key", remote = "SecretKey_Unlock", pick = "SecretKey_Combine"},
-    {item = "Prison Key", remote = "PrisonKey_Use", pick = "PrisonKey_Combine"},
+    {item = "Crystal Key", remote = "CrystalKey_Unlock", pick = "CrystalKey_Combine", world = 1, batch = true},
+    {item = "Tech Key",    remote = "TechKey_Unlock",    pick = "TechKey_Combine",    world = 2, batch = true},
+    {item = "Void Key",    remote = "VoidKey_Unlock",    pick = "VoidKey_Combine",    world = 3, batch = true},
+    {item = "Fantasy Key", remote = "FantasyKey_Unlock", pick = "FantasyKey_Combine", world = 4, batch = true},
 }
+
+-- Secret Key unlocks "Crystal Key Castle" in World 1 Zone 54 ("Fairy Castle") and spins "CrystalKeyWheel"
+local function useSecretKeyCrystalWheel(save, haveSecretKeys)
+    if not save then return false, "no save" end
+    if CFG.Event and type(CFG.Event.InInstance) == "function" and CFG.Event.InInstance() then
+        return false, "in event instance"
+    end
+    local unlockedRooms = type(save.SecretRooms) == "table" and save.SecretRooms or {}
+    if unlockedRooms["Crystal Key Castle"] == true then
+        local okSpin = invoke("Spinny Wheel: Request Spin", "CrystalKeyWheel")
+        if okSpin then
+            if CFG.Spin and type(CFG.Spin.BypassAndReopen) == "function" then
+                pcall(CFG.Spin.BypassAndReopen, "CrystalKeyWheel")
+            end
+            nextAt.save = 0
+            return true, "spun CrystalKeyWheel (Crystal Key Castle)"
+        end
+    end
+    if (tonumber(haveSecretKeys) or 0) <= 0 then
+        return false, "no Secret Key"
+    end
+    if not ownsZone(save, "Fairy Castle") then
+        return false, "requires Zone 54 (Fairy Castle)"
+    end
+    if detectActiveWorld() ~= 1 then
+        return false, "Secret Key Castle is in World 1 (Zone 54)"
+    end
+    local okUnlock, unlockMsg = invoke("SecretRoom_Unlock", "Crystal Key Castle")
+    if okUnlock ~= true then
+        if currentZone() ~= "Fairy Castle" then
+            teleportToIslandMiddle("Fairy Castle")
+            task.wait(0.25)
+            okUnlock, unlockMsg = invoke("SecretRoom_Unlock", "Crystal Key Castle")
+        end
+    end
+    if okUnlock == true then
+        task.wait(0.1)
+        local okSpin = invoke("Spinny Wheel: Request Spin", "CrystalKeyWheel")
+        if okSpin and CFG.Spin and type(CFG.Spin.BypassAndReopen) == "function" then
+            pcall(CFG.Spin.BypassAndReopen, "CrystalKeyWheel")
+        end
+        nextAt.save = 0
+        return true, okSpin and "Secret Key -> spun CrystalKeyWheel" or "unlocked Crystal Key Castle"
+    end
+    return false, tostring(unlockMsg or "Crystal Key Castle rejected")
+end
 
 local function keyTick()
     local now = os.clock()
@@ -3266,14 +3523,27 @@ local function keyTick()
         if not alive or not enabled.autoKeys then return end
         local have = halves[unlock.item] or 0
         if have > 0 and allowAll(picked.keys, unlock.pick) then
-            nextAt.key = now + CFG.KeyInterval
-            local ok, message = invoke(unlock.remote)
-            if not alive or not enabled.autoKeys then return end
-            if ok == true then
-                notes.keys = "unlocked " .. unlock.item
-                nextAt.save = 0
-                return
+            if unlock.item ~= "Crystal Key" or save.CastleUnlocked ~= false then
+                nextAt.key = now + CFG.KeyInterval
+                local amount = unlock.batch and math.min(have, 100) or 1
+                local ok = unlock.batch and invoke(unlock.remote, amount) or invoke(unlock.remote)
+                if not alive or not enabled.autoKeys then return end
+                if ok == true then
+                    notes.keys = ("unlocked %s x%d"):format(unlock.item, amount)
+                    nextAt.save = 0
+                    return
+                end
             end
+        end
+    end
+    local haveSecret = halves["Secret Key"] or 0
+    local secretRoomOpen = type(save.SecretRooms) == "table" and save.SecretRooms["Crystal Key Castle"] == true
+    if (haveSecret > 0 or secretRoomOpen) and allowAll(picked.keys, "SecretKey_Combine") then
+        nextAt.key = now + CFG.KeyInterval
+        local okS, msgS = useSecretKeyCrystalWheel(save, haveSecret)
+        if okS then
+            notes.keys = msgS
+            return
         end
     end
     notes.keys = "no selected keys to combine or unlock"
@@ -3381,9 +3651,10 @@ function CFG.Spin.ClaimPopup()
 end
 
 function CFG.Spin.BypassAndReopen(wheelId)
-    local tabCtrl, swCmds = nil, nil
-    pcall(function() tabCtrl = require(RS.Library.Client.TabController) end)
-    pcall(function() swCmds = require(RS.Library.Client.SpinnyWheelCmds) end)
+    local tabCtrl = modules.tabController
+    local swCmds = modules.spinnyWheelCmds
+    if not tabCtrl then pcall(function() tabCtrl = require(RS.Library.Client.TabController); modules.tabController = tabCtrl end) end
+    if not swCmds then pcall(function() swCmds = require(RS.Library.Client.SpinnyWheelCmds); modules.spinnyWheelCmds = swCmds end) end
     -- Trick: closing the SpinnyWheel tab triggers SpinnyWheelCmds's CloseListener
     -- (u120 = true; u119:Disconnect()), immediately skipping the 5s animation + 1s wait.
     if tabCtrl and type(tabCtrl.CloseTab) == "function" then
@@ -3413,35 +3684,7 @@ function CFG.Spin.BypassAndReopen(wheelId)
 end
 
 function CFG.Spin.CollectWheels()
-    local list = {}
-    local seen = {}
-    for _, w in ipairs(SPINNY_WHEELS) do
-        list[#list + 1] = w
-        seen[w.id] = true
-    end
-    pcall(function()
-        local dir = require(RS.Library.Directory.SpinnyWheels)
-        if type(dir) == "table" then
-            for id, entry in pairs(dir) do
-                if not seen[id] and type(entry) == "table" and type(entry.RequiredItem) == "table" then
-                    local req = entry.RequiredItem
-                    local isMisc = (req._class == "Misc") or (type(req.Class) == "table" and req.Class.Name == "Misc")
-                    local ticketId = (type(req.GetId) == "function" and select(2, pcall(req.GetId, req)))
-                        or (req._data and req._data.id) or req._id or req.id
-                    if isMisc and type(ticketId) == "string" and #ticketId > 0 then
-                        list[#list + 1] = {
-                            id = tostring(id),
-                            ticket = ticketId,
-                            zone = entry.ParentType == 1 and entry.ParentId or nil,
-                            rebirths = 0,
-                        }
-                        seen[id] = true
-                    end
-                end
-            end
-        end
-    end)
-    return list
+    return SPINNY_WHEELS
 end
 
 local function spinTick()
@@ -3458,8 +3701,7 @@ local function spinTick()
     local serverNow = workspace:GetServerTimeNow()
     local cooldowns = type(save.SpinnyWheelCooldowns) == "table" and save.SpinnyWheelCooldowns or {}
     local rebirths = tonumber(save.Rebirths) or 0
-    local wheels = CFG.Spin.CollectWheels()
-    for _, w in ipairs(wheels) do
+    for _, w in ipairs(SPINNY_WHEELS) do
         if not alive or not enabled.autoSpinTickets then return end
         local unlocked = true
         if w.id == "StarterWheel" then
@@ -3487,37 +3729,21 @@ local function spinTick()
             end
         end
     end
-    -- Support Raffle tickets when owned & allowed by ticket picker
-    for _, raffleTicket in ipairs({ "Exclusive Raffle Ticket", "Tower Raffle Ticket" }) do
-        local have = counts[raffleTicket] or 0
-        if have > 0 and allowAll(picked.tickets, raffleTicket) then
-            nextAt.spin = now + 0.35
-            local ok = invoke("Raffle_Submit", math.min(have, 10))
-            if ok then
-                CFG.Spin.total += 1
-                notes.spin = ("submitted %s"):format(raffleTicket)
-                nextAt.save = 0
-                return
-            end
-        end
-    end
     pcall(function()
-        local tabCtrl = require(RS.Library.Client.TabController)
+        local tabCtrl = modules.tabController or require(RS.Library.Client.TabController)
         if tabCtrl and type(tabCtrl.Get) == "function" and tabCtrl.Get() == "SpinnyWheel" then
             tabCtrl.CloseTab()
         end
     end)
-    notes.spin = CFG.Spin.total > 0 and ("all tickets spun (" .. CFG.Spin.total .. ")") or "no spinny wheel tickets"
+    notes.spin = CFG.Spin.total > 0 and ("all 4 world tickets spun (" .. CFG.Spin.total .. ")") or "no world spinny wheel tickets"
 end
 
+-- 4 World Chests (World 1 Crystal, World 2 Tech, World 3 Void, World 4 Fantasy)
 local ALL_KEY_CHESTS = {
-    { item = "Crystal Key", remote = "CrystalKey_Unlock", batch = true },
-    { item = "Tech Key",    remote = "TechKey_Unlock",    batch = true },
-    { item = "Void Key",    remote = "VoidKey_Unlock",    batch = true },
-    { item = "Fantasy Key", remote = "FantasyKey_Unlock", batch = true },
-    { item = "Hacker Key",  remote = "HackerKey_Unlock",  batch = true },
-    { item = "Secret Key",  remote = "SecretKey_Unlock",  batch = false },
-    { item = "MVP Key",     remote = "MVPKey_Unlock",     batch = true, mvp = true },
+    { item = "Crystal Key", remote = "CrystalKey_Unlock", pick = "CrystalKey_Combine", world = 1, batch = true },
+    { item = "Tech Key",    remote = "TechKey_Unlock",    pick = "TechKey_Combine",    world = 2, batch = true },
+    { item = "Void Key",    remote = "VoidKey_Unlock",    pick = "VoidKey_Combine",    world = 3, batch = true },
+    { item = "Fantasy Key", remote = "FantasyKey_Unlock", pick = "FantasyKey_Combine", world = 4, batch = true },
 }
 
 local function chestTick()
@@ -3530,29 +3756,33 @@ local function chestTick()
     for _, item in ipairs(misc) do
         counts[item.id] = (counts[item.id] or 0) + item.amount
     end
+    -- 1. Open the 4 World Chests for the 4 World Keys
     for _, kc in ipairs(ALL_KEY_CHESTS) do
         if not alive or not enabled.autoOpenChests then return end
         local have = counts[kc.item] or 0
-        if have > 0 then
-            local canRun = true
-            if kc.mvp then
-                local subOk, subMod = pcall(function() return require(RS.Library.Client.SubscriptionCmds) end)
-                if subOk and type(subMod) == "table" and type(subMod.HasMainSubscription) == "function" then
-                    local okH, has = pcall(subMod.HasMainSubscription)
-                    canRun = okH and has == true
-                end
-            end
-            if canRun then
+        if have > 0 and allowAll(picked.keys, kc.pick) then
+            if kc.item ~= "Crystal Key" or save.CastleUnlocked ~= false then
                 nextAt.chest = now + CFG.KeyInterval
                 local amount = kc.batch and math.min(have, 100) or 1
                 local ok = kc.batch and invoke(kc.remote, amount) or invoke(kc.remote)
                 if not alive or not enabled.autoOpenChests then return end
                 if ok == true then
-                    notes.chests = ("unlocked %s x%d"):format(kc.item, amount)
+                    notes.chests = ("unlocked %s Chest x%d"):format(kc.item, amount)
                     nextAt.save = 0
                     return
                 end
             end
+        end
+    end
+    -- 2. Secret Key -> World 1 Zone 54 ("Crystal Key Castle") -> spin CrystalKeyWheel for Crystal Keys
+    local haveSecret = counts["Secret Key"] or 0
+    local secretRoomOpen = type(save.SecretRooms) == "table" and save.SecretRooms["Crystal Key Castle"] == true
+    if (haveSecret > 0 or secretRoomOpen) and allowAll(picked.keys, "SecretKey_Combine") then
+        nextAt.chest = now + CFG.KeyInterval
+        local okS, msgS = useSecretKeyCrystalWheel(save, haveSecret)
+        if okS then
+            notes.chests = msgS
+            return
         end
     end
     for _, item in ipairs(stackList(inventory(save, "Lootbox"))) do
@@ -3583,32 +3813,121 @@ local function chestTick()
             end
         end
     end
-    notes.chests = "no chests or keys in inventory"
+    notes.chests = "no world chests or keys in inventory"
 end
 
 local consumeNext = {Fruit = 0, Potion = 0, potionCooldown = {}}
+local function getActiveFruitCount(save, fruitId)
+    local fc = modules.fruitCmds
+    if fc and type(fc.GetActiveFruits) == "function" then
+        local ok, activeTbl = pcall(fc.GetActiveFruits)
+        if ok and type(activeTbl) == "table" then
+            local entry = activeTbl[fruitId]
+            if type(entry) == "table" then
+                local sh = type(entry.Shiny) == "table" and #entry.Shiny or 0
+                local nm = type(entry.Normal) == "table" and #entry.Normal or 0
+                return sh + nm
+            end
+        end
+    end
+    local fruitsSave = save and type(save.Fruits) == "table" and save.Fruits[fruitId]
+    if type(fruitsSave) == "table" then
+        local sh = type(fruitsSave.Shiny) == "table" and #fruitsSave.Shiny or 0
+        local nm = type(fruitsSave.Normal) == "table" and #fruitsSave.Normal or 0
+        return sh + nm
+    end
+    return 0
+end
+
+local function computeMaxFruitQueue()
+    local limit = tonumber(CFG.FruitQueueLimit) or 20
+    local fc = modules.fruitCmds
+    if fc and type(fc.ComputeFruitQueueLimit) == "function" then
+        local ok, val = pcall(fc.ComputeFruitQueueLimit)
+        if ok and type(val) == "number" and val > 0 then
+            limit = math.max(limit, val)
+        end
+    end
+    return limit
+end
+
 local function fruitTick()
     local now = os.clock()
     if now < consumeNext.Fruit then return end
     local save = getSave()
     if not save then notes.fruits = "waiting for profile"; return end
-    for _, item in ipairs(stackList(inventory(save, "Fruit"))) do
+    local queueLimit = computeMaxFruitQueue()
+    local stacks = stackList(inventory(save, "Fruit"))
+    -- Prefer Shiny fruit stacks first so the active queue gets maximum bonus
+    table.sort(stacks, function(a, b)
+        local aShiny = (type(a.data) == "table" and a.data.sh == true) and 1 or 0
+        local bShiny = (type(b.data) == "table" and b.data.sh == true) and 1 or 0
+        if aShiny ~= bShiny then return aShiny > bShiny end
+        if a.id ~= b.id then return a.id < b.id end
+        return a.amount > b.amount
+    end)
+    local consumedAny = false
+    local lastMsg = nil
+    local remainingByFruit = {}
+    for _, item in ipairs(stacks) do
         if not alive or not enabled.autoFruits then return end
-        if allowAll(picked.fruits, item.id) then
-            consumeNext.Fruit = now + CFG.FruitInterval
-            local count = math.max(1, math.min(item.amount, CFG.FruitQueueLimit))
-            local ok, message = fire("Fruits: Consume", item.uid, count)
-            if not alive then return end
-            notes.fruits = ok and ("consumed " .. item.id .. " x" .. count) or tostring(message or "rejected")
-            if ok then nextAt.save = 0 end
-            return
+        if allowAll(picked.fruits, item.id) and item.amount > 0 then
+            local remNeed = remainingByFruit[item.id]
+            if remNeed == nil then
+                local activeCount = getActiveFruitCount(save, item.id)
+                remNeed = math.max(0, queueLimit - activeCount)
+                remainingByFruit[item.id] = remNeed
+            end
+            if remNeed > 0 then
+                local count = math.max(1, math.min(item.amount, remNeed))
+                local ok, message = fire("Fruits: Consume", item.uid, count)
+                if not alive then return end
+                if ok then
+                    consumedAny = true
+                    remainingByFruit[item.id] = math.max(0, remNeed - count)
+                    lastMsg = ("ate %s x%d (%d/%d full)"):format(item.id, count, queueLimit - remainingByFruit[item.id], queueLimit)
+                else
+                    lastMsg = tostring(message or "rejected")
+                end
+            end
         end
     end
-    notes.fruits = "no selected fruits in inventory"
+    consumeNext.Fruit = now + CFG.FruitInterval
+    if consumedAny then
+        notes.fruits = lastMsg
+        nextAt.save = 0
+        return
+    end
+    notes.fruits = "all selected fruits at full stack (" .. tostring(queueLimit) .. ")"
 end
 
--- Item 5: Select what potion to drink & Drink Highest Tier First (with tier
--- fallback if a high-tier stack is on cooldown or Mastery-gated).
+local function getActivePotionTierAndTime(save, potionId)
+    local bestTier = 0
+    local bestRem = 0
+    local pc = modules.potionCmds
+    if pc and type(pc.GetPotionData) == "function" then
+        local ok, maxT, rem = pcall(pc.GetPotionData, potionId)
+        if ok and type(maxT) == "number" and type(rem) == "number" and rem > 0 then
+            bestTier = maxT
+            bestRem = rem
+        end
+    end
+    local activePotions = save and type(save.Potions) == "table" and save.Potions[potionId]
+    if type(activePotions) == "table" then
+        for tierKey, remSec in pairs(activePotions) do
+            local tNum = tonumber(tierKey) or 0
+            local rNum = tonumber(remSec) or 0
+            if rNum > 0 and tNum >= bestTier then
+                bestTier = tNum
+                if rNum > bestRem then bestRem = rNum end
+            end
+        end
+    end
+    return bestTier, bestRem
+end
+
+-- Item 5: Select what potion to drink & Drink Highest Tier First (no-stack:
+-- skips any potion while an equal or higher tier of that potion is still active).
 local function potionTick()
     local now = os.clock()
     if now < consumeNext.Potion then return end
@@ -3617,21 +3936,36 @@ local function potionTick()
     local minTier = tonumber(CFG.PotionMinTier) or 1
     local maxTier = tonumber(CFG.PotionMaxTier) or 99
     local candidates = {}
+    local skippedActive = 0
     for _, bucketKind in ipairs({"Potion", "XPPotion"}) do
         local isXP = bucketKind == "XPPotion"
         for _, item in ipairs(stackList(inventory(save, bucketKind))) do
             if allowAll(picked.potions, item.id) and item.tier >= minTier and item.tier <= maxTier then
                 local cd = consumeNext.potionCooldown[item.uid] or 0
                 if now >= cd then
-                    item.isXP = isXP
-                    candidates[#candidates + 1] = item
+                    local isXpPotion = isXP or XP_POTION_SET[item.id] == true
+                    local allowedByMastery = isXpPotion or CFG.Quest.CanUsePotionTier(item.tier)
+                    if allowedByMastery then
+                        if not isXpPotion then
+                            local activeTier, activeRem = getActivePotionTierAndTime(save, item.id)
+                            if activeRem > 0 and item.tier <= activeTier then
+                                skippedActive += 1
+                                continue
+                            end
+                        end
+                        item.isXP = isXpPotion
+                        candidates[#candidates + 1] = item
+                    end
                 end
             end
         end
     end
     if #candidates == 0 then
         table.clear(consumeNext.potionCooldown)
-        notes.potions = "no selected potions in inventory"
+        notes.potions = skippedActive > 0
+            and ("active potion timers running (%d skipped, no stack)"):format(skippedActive)
+            or "no selected potions in inventory"
+        consumeNext.Potion = now + CFG.PotionInterval
         return
     end
     table.sort(candidates, function(a, b)
@@ -3648,8 +3982,9 @@ local function potionTick()
     local chosen = candidates[1]
     consumeNext.Potion = now + CFG.PotionInterval
     consumeNext.potionCooldown[chosen.uid] = now + 8
-    local count = math.max(1, math.min(chosen.amount, CFG.PotionMaxConsume))
-    local remoteName = (chosen.isXP or XP_POTION_SET[chosen.id]) and "XPPotions: Consume" or "Potions: Consume"
+    -- Consume 1 bottle at a time for regular potions so timers never stack unnecessarily
+    local count = chosen.isXP and math.max(1, math.min(chosen.amount, CFG.PotionMaxConsume)) or 1
+    local remoteName = chosen.isXP and "XPPotions: Consume" or "Potions: Consume"
     local ok, message = fire(remoteName, chosen.uid, count)
     if not alive then return end
     notes.potions = ok and ("drank %s (Tier %d) x%d"):format(chosen.id, chosen.tier, count) or tostring(message or "rejected")
@@ -4206,8 +4541,9 @@ end
 
 function CFG.Quest.PetsPerGold()
     local red = 0
+    local mc = modules.mastery
     pcall(function()
-        local mc = require(RS.Library.Client.MasteryCmds)
+        if not mc then mc = require(RS.Library.Client.MasteryCmds); modules.mastery = mc end
         if type(mc) == "table" and type(mc.HasPerk) == "function" and mc.HasPerk("Pets", "GoldReduction") then
             red = tonumber(mc.GetPerkPower("Pets", "GoldReduction")) or 0
         end
@@ -4217,8 +4553,9 @@ end
 
 function CFG.Quest.PetsPerRainbow()
     local red = 0
+    local mc = modules.mastery
     pcall(function()
-        local mc = require(RS.Library.Client.MasteryCmds)
+        if not mc then mc = require(RS.Library.Client.MasteryCmds); modules.mastery = mc end
         if type(mc) == "table" and type(mc.HasPerk) == "function" and mc.HasPerk("Pets", "RainbowReduction") then
             red = tonumber(mc.GetPerkPower("Pets", "RainbowReduction")) or 0
         end
@@ -4228,8 +4565,9 @@ end
 
 function CFG.Quest.CanUsePotionTier(tier)
     local allowed = true
+    local mc = modules.mastery
     pcall(function()
-        local mc = require(RS.Library.Client.MasteryCmds)
+        if not mc then mc = require(RS.Library.Client.MasteryCmds); modules.mastery = mc end
         if type(mc) == "table" and type(mc.CanUsePotion) == "function" then
             local okC = mc.CanUsePotion(tier)
             if okC == false then allowed = false end
@@ -4240,8 +4578,9 @@ end
 
 function CFG.Quest.HasPotionBulk()
     local bulk = false
+    local mc = modules.mastery
     pcall(function()
-        local mc = require(RS.Library.Client.MasteryCmds)
+        if not mc then mc = require(RS.Library.Client.MasteryCmds); modules.mastery = mc end
         if type(mc) == "table" and type(mc.HasPerk) == "function" and mc.HasPerk("Potions", "BulkConsume") then
             bulk = true
         end
@@ -4249,11 +4588,22 @@ function CFG.Quest.HasPotionBulk()
     return bulk
 end
 
+local bestEggInfoCache = { at = -math.huge, maxEggNum = nil, maxHatch = nil }
 function CFG.Quest.BestEggInfo(save)
-    local maxEggNum = tonumber(save and save.MaximumAvailableEgg) or nil
+    local now = os.clock()
+    local saveMaxEgg = tonumber(save and save.MaximumAvailableEgg) or nil
+    local saveHatch = tonumber(save and save.EggHatchCount) or nil
+    if now - bestEggInfoCache.at < 5.0
+        and bestEggInfoCache.bestEggId
+        and (not saveMaxEgg or bestEggInfoCache.maxEggNum == saveMaxEgg)
+        and (not saveHatch or bestEggInfoCache.saveHatch == saveHatch) then
+        return bestEggInfoCache.bestEggId, bestEggInfoCache.bestEggPets, bestEggInfoCache.petCount, bestEggInfoCache.maxEggNum, bestEggInfoCache.maxHatch
+    end
+    local maxEggNum = saveMaxEgg
     local maxHatch = nil
     pcall(function()
-        local eggCmds = require(RS.Library.Client.EggCmds)
+        local eggCmds = modules.eggCmds or require(RS.Library.Client.EggCmds)
+        modules.eggCmds = eggCmds
         if type(eggCmds) == "table" then
             if not maxEggNum and type(eggCmds.GetHighestEggNumberAvailable) == "function" then
                 local ok, num = pcall(eggCmds.GetHighestEggNumberAvailable)
@@ -4267,14 +4617,15 @@ function CFG.Quest.BestEggInfo(save)
     end)
     if not maxEggNum then maxEggNum = 1 end
     if not maxHatch then
-        maxHatch = tonumber(save and save.EggHatchCount) or 1
+        maxHatch = saveHatch or 1
     end
     local bestEggId = eggByNumber[maxEggNum]
     local bestEggPets = {}
     local petCount = 0
     -- Primary: exact game lookup via EggsUtil.GetByNumber(save.MaximumAvailableEgg)
     pcall(function()
-        local eggsUtil = require(RS.Library.Util.EggsUtil)
+        local eggsUtil = modules.eggsUtil or require(RS.Library.Util.EggsUtil)
+        modules.eggsUtil = eggsUtil
         if type(eggsUtil) == "table" and type(eggsUtil.GetByNumber) == "function" then
             local entry = eggsUtil.GetByNumber(maxEggNum)
             if type(entry) == "table" then
@@ -4294,7 +4645,8 @@ function CFG.Quest.BestEggInfo(save)
     -- Fallback: Directory.Eggs scan
     if petCount == 0 or not bestEggId or #bestEggId == 0 then
         pcall(function()
-            local dir = require(RS.Library.Directory)
+            local dir = modules.directory or require(RS.Library.Directory)
+            modules.directory = dir
             local eggs = dir and dir.Eggs
             if type(eggs) == "table" then
                 local entry = (bestEggId and #bestEggId > 0) and eggs[bestEggId] or nil
@@ -4320,7 +4672,15 @@ function CFG.Quest.BestEggInfo(save)
         end)
     end
     if not bestEggId or #bestEggId == 0 then bestEggId = eggByNumber[1] end
-    return bestEggId, bestEggPets, petCount, maxEggNum, math.clamp(maxHatch, 1, CFG.EggMaxHatch)
+    local clampedHatch = math.clamp(maxHatch, 1, CFG.EggMaxHatch)
+    bestEggInfoCache.at = now
+    bestEggInfoCache.bestEggId = bestEggId
+    bestEggInfoCache.bestEggPets = bestEggPets
+    bestEggInfoCache.petCount = petCount
+    bestEggInfoCache.maxEggNum = maxEggNum
+    bestEggInfoCache.maxHatch = clampedHatch
+    bestEggInfoCache.saveHatch = saveHatch
+    return bestEggId, bestEggPets, petCount, maxEggNum, clampedHatch
 end
 
 function CFG.Quest.HatchBestEgg(save, desiredCount)
@@ -4422,8 +4782,8 @@ local function doQuestTick()
     if now < nextAt.doQuest then return end
     local save = getSave()
     if not save then notes.doQuest = "waiting for profile"; return end
-    if enabled.autoQuest then pcall(questTick) end
-    if enabled.autoRank then pcall(rankTick) end
+    if enabled.autoQuest and not workers.quest then pcall(questTick) end
+    if enabled.autoRank and not workers.rank then pcall(rankTick) end
     local activeGoals = collectActiveGoals(save)
     if #activeGoals == 0 then
         notes.doQuest = "no active incomplete quest goals"
@@ -4864,23 +5224,31 @@ local function doQuestTick()
         elseif gtype == 56 then
             if invoke("CrystalKey_Unlock") == true then notes.doQuest = "quest crystal chest unlocked"; return end
         elseif gtype == 55 then
-            if invoke("SecretKey_Unlock") == true then notes.doQuest = "quest secret chest unlocked"; return end
+            local okS, msgS = useSecretKeyCrystalWheel(save, 1)
+            if okS then notes.doQuest = "quest secret key: " .. tostring(msgS); return end
         elseif gtype == 61 then
             if invoke("Spinny Wheel: Request Spin", "DiamondWheel") == true then notes.doQuest = "quest spun diamond wheel"; return end
         end
     end
     -- Fallback for breakable/currency/crit/lootbag/mini-chest goals (Types 1, 7, 8, 9, 21, 39, 63, 64, 75, 99):
-    -- make sure the player is standing in the middle of the best unlocked island and tapping + routing pets + vacuuming.
-    local best = maxOwned(save)
-    if best and zones[best] then
-        local id = zones[best].id
-        if currentZone() ~= id then
-            teleportToIslandMiddle(id)
+    -- stay focused on the Event farm zone when inside the Event, or stand in the middle of the best unlocked island.
+    if CFG.Event and type(CFG.Event.InInstance) == "function" and CFG.Event.InInstance() then
+        local plot = CFG.Event.Plot()
+        if plot then
+            CFG.Event.TeleNearestFarm(now, plot)
+        end
+    else
+        local best = maxOwned(save)
+        if best and zones[best] then
+            local id = zones[best].id
+            if currentZone() ~= id then
+                teleportToIslandMiddle(id)
+            end
         end
     end
-    pcall(petTick)
-    pcall(tapTick)
-    pcall(vacuumTick)
+    if not workers.pet then pcall(petTick) end
+    if not workers.tap then pcall(tapTick) end
+    if not workers.vacuum then pcall(vacuumTick) end
     local topTitle = CFG.Quest.GoalTitle(activeGoals[1].goal)
     CFG.Quest.currentDoing = topTitle
     notes.doQuest = ("Doing: %s"):format(topTitle)
@@ -6016,12 +6384,12 @@ function CFG.Event.TeleToFarm()
         task.wait(0.2)
     end
     if not plot then return false, "event plot not loaded yet" end
-    local bestZ = CFG.Event.OwnedZones(plot)
+    local bestZ = CFG.Event.BestFarmZone(plot)
     local targetPos = CFG.Event.FarmCenter(plot, bestZ)
     if not targetPos then return false, "event farm center unavailable" end
     local okM = CFG.Event.MoveTo(targetPos)
     local zName = (CFG.Event.ZONES[bestZ] and CFG.Event.ZONES[bestZ].Name) or ("Zone " .. tostring(bestZ))
-    return okM, okM and ("teleported to middle of event farm: " .. zName) or "character unavailable"
+    return okM, okM and ("teleported to middle of event breakable zone: " .. zName) or "character unavailable"
 end
 
 function CFG.Event.InInstance()
@@ -6235,6 +6603,41 @@ function CFG.Event.OwnedZones(plot)
     return maxZ, btns or {}
 end
 
+function CFG.Event.BestFarmZone(plot)
+    local maxOwnedZ, btns = CFG.Event.OwnedZones(plot)
+    local ptBtns = modules.ptButtons
+    if not ptBtns then
+        pcall(function() ptBtns = require(RS.Library.Util.PumpkinTycoonButtons); modules.ptButtons = ptBtns end)
+    end
+    if ptBtns and type(ptBtns.FarmZone) == "function" then
+        local okF, fz = pcall(ptBtns.FarmZone, btns, #CFG.Event.ZONES)
+        if okF and type(fz) == "number" and fz >= 1 then
+            return fz, btns
+        end
+    end
+    local bestFarm = 1
+    for i = 1, #CFG.Event.ZONES do
+        local z = CFG.Event.ZONES[i]
+        if btns and btns[z.Section .. "_Zone"] ~= nil and btns[z.Section .. "_Zone"] ~= false then
+            bestFarm = i
+        end
+    end
+    return math.max(bestFarm, maxOwnedZ), btns
+end
+
+function CFG.Event.FindSection(container, sectionId)
+    if not container or type(sectionId) ~= "string" then return nil end
+    local direct = container:FindFirstChild(sectionId, true)
+    if direct then return direct end
+    local sectionsFolder = container:FindFirstChild("Sections") or container
+    for _, child in ipairs(sectionsFolder:GetChildren()) do
+        if child:GetAttribute("TycoonSection") == sectionId or child.Name == sectionId then
+            return child
+        end
+    end
+    return nil
+end
+
 function CFG.Event.ZonePos(plot, zIdx)
     if not plot then return nil, nil end
     local z = CFG.Event.ZONES[zIdx]
@@ -6344,91 +6747,85 @@ end
 
 function CFG.Event.FarmCenter(plot, zIdx)
     if not plot then return nil end
+    zIdx = tonumber(zIdx) or CFG.Event.BestFarmZone(plot) or 1
     local z = CFG.Event.ZONES[zIdx]
     local model = type(plot.GetModel) == "function" and plot:GetModel() or nil
     local island = CFG.Event.Feature("Island")
     local decor = island and type(island.Decor) == "function" and island.Decor(plot) or nil
 
-    -- 0. First priority: live breakable items on the player's event plot near this zone
-    local zoneHint = nil
-    for _, container in ipairs({ decor, model }) do
-        if container and z then
-            local sec = container:FindFirstChild(z.Section, true)
-            if sec then
-                zoneHint = modelPosition(sec)
-                if zoneHint then break end
+    -- 1. Primary: exact breakable zone slab via PumpkinTycoonButtons.ZoneSlab(model, zIdx) or BREAK_ZONES
+    local ptBtns = modules.ptButtons
+    if not ptBtns then
+        pcall(function() ptBtns = require(RS.Library.Util.PumpkinTycoonButtons); modules.ptButtons = ptBtns end)
+    end
+    local slabPart = nil
+    if model and ptBtns and type(ptBtns.ZoneSlab) == "function" then
+        local okS, s = pcall(ptBtns.ZoneSlab, model, zIdx)
+        if okS and typeof(s) == "Instance" then
+            slabPart = s:IsA("BasePart") and s or s:FindFirstChildWhichIsA("BasePart", true)
+        end
+    end
+    if not slabPart and z then
+        for _, container in ipairs({ model, decor }) do
+            if container then
+                local bz = container:FindFirstChild("BREAK_ZONES", true)
+                if bz then
+                    for _, child in ipairs(bz:GetChildren()) do
+                        if child.Name == (z.Section .. "_Zone") or tonumber(child:GetAttribute("ZoneNumber")) == zIdx then
+                            slabPart = child:IsA("BasePart") and child or child:FindFirstChildWhichIsA("BasePart", true)
+                            if slabPart then break end
+                        end
+                    end
+                end
+                if slabPart then break end
             end
         end
     end
+    local slabCenter = slabPart and Vector3.new(slabPart.Position.X, slabPart.Position.Y + slabPart.Size.Y * 0.5 + 3, slabPart.Position.Z) or nil
+
+    -- 2. Live non-pedestal breakables inside this breakable zone slab
+    local sectionInst = (decor and z and CFG.Event.FindSection(decor, z.Section))
+        or (model and z and CFG.Event.FindSection(model, z.Section))
+    local zoneHint = slabCenter or (sectionInst and modelPosition(sectionInst)) or nil
     local okB, liveBreakables = pcall(CFG.Event.CollectBreakables)
-    if okB and type(liveBreakables) == "table" then
+    if okB and type(liveBreakables) == "table" and zoneHint then
         local bSum, bCount, bMaxY = Vector3.zero, 0, -math.huge
         for _, rec in pairs(liveBreakables) do
-            local pos = rec and (rec.position or (rec.model and modelPosition(rec.model)))
-            if typeof(pos) == "Vector3" then
-                if not zoneHint or (Vector3.new(pos.X, 0, pos.Z) - Vector3.new(zoneHint.X, 0, zoneHint.Z)).Magnitude <= 90 then
-                    bSum += pos
-                    bCount += 1
-                    if pos.Y > bMaxY then bMaxY = pos.Y end
+            local attrs = type(rec) == "table" and rec.clientAttributes
+            local isPedestal = type(attrs) == "table" and (type(attrs.PumpkinPedestal) == "number" or attrs.PumpkinTurkey == true)
+            if not isPedestal then
+                local pos = rec and (rec.position or (rec.model and modelPosition(rec.model)))
+                if typeof(pos) == "Vector3" then
+                    if (Vector3.new(pos.X, 0, pos.Z) - Vector3.new(zoneHint.X, 0, zoneHint.Z)).Magnitude <= 65 then
+                        bSum += pos
+                        bCount += 1
+                        if pos.Y > bMaxY then bMaxY = pos.Y end
+                    end
                 end
             end
         end
         if bCount >= 1 then
-            return Vector3.new(bSum.X / bCount, bMaxY + 2, bSum.Z / bCount)
+            return Vector3.new(bSum.X / bCount, math.max(bMaxY + 2, zoneHint.Y), bSum.Z / bCount)
         end
     end
 
-    -- 1. Explicit farm / breakable zone parts inside the zone section
-    for _, container in ipairs({ decor, model }) do
-        if container and z then
-            local section = container:FindFirstChild(z.Section, true)
-            if section then
-                for _, key in ipairs({ "BREAK_ZONES", "BreakZone", "BreakableZone", "FarmArea", "FarmZone", "Patch", "WildArea_" .. zIdx }) do
-                    local hit = section:FindFirstChild(key, true)
-                    if hit then
-                        if hit:IsA("BasePart") then
-                            return Vector3.new(hit.Position.X, hit.Position.Y + hit.Size.Y * 0.5 + 2, hit.Position.Z)
-                        elseif hit:IsA("Model") or hit:IsA("Folder") then
-                            local sum, n, maxY = Vector3.zero, 0, -math.huge
-                            for _, p in ipairs(hit:GetDescendants()) do
-                                if p:IsA("BasePart") then
-                                    sum += p.Position
-                                    n += 1
-                                    if p.Position.Y + p.Size.Y * 0.5 > maxY then maxY = p.Position.Y + p.Size.Y * 0.5 end
-                                end
-                            end
-                            if n > 0 then
-                                return Vector3.new(sum.X / n, maxY + 2, sum.Z / n)
-                            end
-                        end
-                    end
-                end
-                -- 2. Average pumpkin pedestals inside the section to get exact middle of the farm patch
-                local sum, n, maxY = Vector3.zero, 0, -math.huge
-                for _, desc in ipairs(section:GetDescendants()) do
-                    local nm = desc.Name:lower()
-                    if nm:find("pedestal", 1, true) or nm:find("pumpkin", 1, true) or nm:find("plot", 1, true) then
-                        local pos = desc:IsA("BasePart") and desc.Position or (desc:IsA("Model") and modelPosition(desc))
-                        if pos then
-                            sum += pos
-                            n += 1
-                            if pos.Y > maxY then maxY = pos.Y end
-                        end
-                    end
-                end
-                if n >= 2 then
-                    return Vector3.new(sum.X / n, maxY + 2, sum.Z / n)
-                end
-                -- 3. Section model bounding-box upper center (never below floor)
-                if section:IsA("Model") then
-                    local okBox, cf, size = pcall(function() return section:GetBoundingBox() end)
-                    if okBox and cf and size then
-                        return Vector3.new(cf.Position.X, cf.Position.Y + size.Y * 0.15 + 2, cf.Position.Z)
-                    end
-                end
-                local sp = modelPosition(section)
-                if sp then return sp + Vector3.new(0, 4, 0) end
+    if slabCenter then
+        return slabCenter
+    end
+
+    -- 3. Section model bounding-box or WildArea fallback
+    if sectionInst then
+        if sectionInst:IsA("Model") then
+            local okBox, cf, size = pcall(function() return sectionInst:GetBoundingBox() end)
+            if okBox and cf and size then
+                return Vector3.new(cf.Position.X, cf.Position.Y + size.Y * 0.15 + 3, cf.Position.Z)
             end
+        end
+        local sp = modelPosition(sectionInst)
+        if sp then return sp + Vector3.new(0, 4, 0) end
+    end
+    for _, container in ipairs({ decor, model }) do
+        if container then
             local wildArea = container:FindFirstChild("WildArea_" .. zIdx, true)
             if wildArea then
                 local wp = wildArea:IsA("BasePart") and wildArea.Position or modelPosition(wildArea)
@@ -6436,8 +6833,7 @@ function CFG.Event.FarmCenter(plot, zIdx)
             end
         end
     end
-    local fallback = CFG.Event.ZonePos(plot, zIdx)
-    return fallback
+    return CFG.Event.ZonePos(plot, zIdx)
 end
 
 function CFG.Event.TeleNearestFarm(now, plot)
@@ -6445,26 +6841,19 @@ function CFG.Event.TeleNearestFarm(now, plot)
     CFG.Event.next.nearFarm = now + 1.0
     local myPos = position()
     if not myPos then return end
-    -- Force find the nearest breakable zone (preferring live breakable clusters) and snap to its middle
-    local bestZ = CFG.Event.OwnedZones(plot)
-    local nearestPos, nearestDist = nil, math.huge
-    local bestPos = nil
-    for zIdx = 1, bestZ do
-        local zPos = CFG.Event.FarmCenter(plot, zIdx)
-        if zPos then
-            if zIdx == bestZ then bestPos = zPos end
-            local d = (Vector3.new(myPos.X, 0, myPos.Z) - Vector3.new(zPos.X, 0, zPos.Z)).Magnitude
-            if d < nearestDist then
-                nearestDist = d
-                nearestPos = zPos
-            end
+    -- Focus on the player's highest owned breakable farm zone in the Event
+    local bestZ = CFG.Event.BestFarmZone(plot)
+    local targetPos = CFG.Event.FarmCenter(plot, bestZ)
+    if not targetPos then
+        for zIdx = bestZ - 1, 1, -1 do
+            targetPos = CFG.Event.FarmCenter(plot, zIdx)
+            if targetPos then break end
         end
     end
-    local targetPos = nearestPos or bestPos
     if targetPos then
         local d2 = (Vector3.new(myPos.X, 0, myPos.Z) - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude
-        if d2 > 8 then
-            snapTo(targetPos)
+        if d2 > 10 then
+            CFG.Event.MoveTo(targetPos)
         end
     end
 end
@@ -6760,6 +7149,39 @@ function CFG.Event.Cocoa(now, plot, save)
     end
 end
 
+local EVENT_BOOST_PREFIX = {
+    ["Pumpkin Coin Boost"] = "PumpkinTycoonCoins",
+    ["Pumpkin Damage Boost"] = "PumpkinTycoonDamage",
+    ["Island Egg Luck Boost"] = "PumpkinTycoonIslandLuck",
+}
+
+local function getActiveEventBoostTier(save, itemId)
+    local prefix = EVENT_BOOST_PREFIX[itemId]
+    if not prefix then return 0, 0 end
+    local bc = modules.boostCmds
+    if not bc then
+        pcall(function() bc = require(RS.Library.Client.BoostCmds); modules.boostCmds = bc end)
+    end
+    local bestTier, bestRem = 0, 0
+    local boostsSave = save and type(save.Boosts) == "table" and save.Boosts or nil
+    for t = 1, 3 do
+        local key = prefix .. tostring(t)
+        local rem = 0
+        if bc and type(bc.GetTimer) == "function" then
+            local ok, val = pcall(bc.GetTimer, key)
+            if ok and type(val) == "number" then rem = val end
+        end
+        if rem <= 0 and boostsSave and tonumber(boostsSave[key]) then
+            rem = tonumber(boostsSave[key]) or 0
+        end
+        if rem > 0 and t >= bestTier then
+            bestTier = t
+            if rem > bestRem then bestRem = rem end
+        end
+    end
+    return bestTier, bestRem
+end
+
 function CFG.Event.UseBoosts(now, save)
     if now < CFG.Event.next.boost then return end
     CFG.Event.next.boost = now + 4.0
@@ -6774,7 +7196,13 @@ function CFG.Event.UseBoosts(now, save)
                 local okA, res = pcall(ptBoostUtil.Allowed, LocalPlayer, item.tier)
                 if okA then okAllow = res == true end
             end
-            if okAllow then list[#list + 1] = item end
+            if okAllow then
+                -- Do not stack or consume lower/same tier while an active boost timer is running
+                local activeTier, activeRem = getActiveEventBoostTier(save, item.id)
+                if activeRem <= 0 or item.tier > activeTier then
+                    list[#list + 1] = item
+                end
+            end
         end
     end
     if #list == 0 then return end
@@ -7894,7 +8322,10 @@ end
 function CFG.RankHUD.Update()
     if not CFG.RankHUD.gui or not CFG.RankHUD.gui.Parent then return end
     local save = getSave()
-    local uiRank, uiStars, uiGoals = readRankGoalsFromGui()
+    local uiRank, uiStars, uiGoals = nil, nil, nil
+    if not save then
+        uiRank, uiStars, uiGoals = readRankGoalsFromGui()
+    end
     local rank = (save and save.Rank ~= nil and tostring(save.Rank)) or uiRank or "?"
     local stars = (save and save.RankStars ~= nil and tostring(save.RankStars)) or uiStars or "0"
     local zone = "?"
@@ -8003,7 +8434,7 @@ function CFG.RankHUD.Sync()
         CFG.RankHUD.Build()
     end
     pcall(CFG.RankHUD.Update)
-    ensureWorker("rankHud", true, 0.5, CFG.RankHUD.Update)
+    ensureWorker("rankHud", true, 1.0, CFG.RankHUD.Update)
 end
 
 -- Auto Season Pass (EventPass_Get + EventPass_Buy) & Auto Claim Free Zone Gifts (DailyRewards, Free Gifts, Free Vending, Forever Pack)
@@ -8364,6 +8795,9 @@ local controller = {
         return teleportToWorldOrBestIsland(bestW)
     end,
     TeleportToFarm = function()
+        if CFG.Event and type(CFG.Event.InInstance) == "function" and CFG.Event.InInstance() then
+            return CFG.Event.TeleToFarm()
+        end
         local save = getSave()
         if not save then return false, "waiting for profile" end
         local best = maxOwned(save)

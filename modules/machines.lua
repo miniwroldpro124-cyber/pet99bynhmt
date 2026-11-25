@@ -5,10 +5,10 @@ return function(ctx)
     local ui = ctx.ui
     local engine = ctx.engine
 
-    ui.section(tab, "Auto Spin Tickets (Choose Menu)")
+    ui.section(tab, "Auto Spin Tickets (4 Worlds)")
     ui.toggle(tab, {
         name = "Auto Spin Selected Tickets", key = "autoSpinTickets", default = false,
-        note = "Spins chosen (or all if none chosen) Spinny Wheel & Raffle tickets with close/reopen animation bypass + auto-click Claim.",
+        note = "Spins chosen (or all 4 world) Spinny Wheel tickets with animation skip + auto-claim popup.",
     })
 
     local allTickets = {
@@ -16,12 +16,6 @@ return function(ctx)
         "Tech Spinny Wheel Ticket",
         "Void Spinny Wheel Ticket",
         "Fantasy Spinny Wheel Ticket",
-        "Exclusive Raffle Ticket",
-        "Tower Raffle Ticket",
-        "Arcade Ticket",
-        "Golden Paw Ticket",
-        "Millionaire Ticket",
-        "Mystery Ticket",
     }
     local chosenTicket = allTickets[1]
     ui.dropdown(tab, {

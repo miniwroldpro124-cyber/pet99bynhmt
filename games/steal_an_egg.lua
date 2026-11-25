@@ -1,8 +1,8 @@
 --!nolint
--- STEPH_COMPONENT: sae_hub 1.6.0
+-- STEPH_COMPONENT: sae_hub 1.7.0
 -- Stehp-Hub | Luau / Roblox executor | Steal an Egg + PS99 StephUI Edition
 
-local VERSION = "1.6.0"
+local VERSION = "1.7.0"
 local HUB_NAME = "Steph HUB"
 local CONFIG_FOLDER = "StephHUB_SAE"
 local CONFIG_FILE = CONFIG_FOLDER .. "/config.json"
@@ -85,7 +85,7 @@ local DEFAULTS = {
         priorityMode = "Best Earning & Rarity",
         respectSpeed = true,
         prioritizeRarity = true,
-        speedSafetyPct = 90,
+        speedSafetyPct = 100,
         autoPlant = true,
     },
     training = {
@@ -234,7 +234,8 @@ if type(readfile) == "function" and type(isfile) == "function" then
 end
 
 local migratedFromV1 = (tonumber(config.version) or 1) < 2
-config.version = 2
+local migratedFromV2 = (tonumber(config.version) or 1) < 3
+config.version = 3
 
 if type(config.games) ~= "table" then
     config.games = {}
@@ -248,6 +249,14 @@ local state = config.games[placeKey]
 if migratedFromV1 and type(state.training) == "table" then
     state.training.between = false
     state.training.only = false
+end
+if migratedFromV2 and type(state.farm) == "table" then
+    if (tonumber(state.farm.speedSafetyPct) or 0) < 100 then
+        state.farm.speedSafetyPct = 100
+    end
+end
+if type(state.teleports) == "table" then
+    state.teleports.walkToEggs = true
 end
 
 local function coerceState(target, defaults)
@@ -265,7 +274,7 @@ local function coerceState(target, defaults)
     end
 end
 coerceState(state, DEFAULTS)
-state.farm.speedSafetyPct = math.clamp(tonumber(state.farm.speedSafetyPct) or 90, 50, 120)
+state.farm.speedSafetyPct = math.clamp(tonumber(state.farm.speedSafetyPct) or 100, 50, 120)
 state.training.seconds = math.clamp(state.training.seconds, 1, 60)
 state.training.farmRuns = math.clamp(state.training.farmRuns, 1, 20)
 state.economy.reserve = math.max(state.economy.reserve, 0)
@@ -386,7 +395,35 @@ local runtime = {
     stolenCount = 0,
     plantedCount = 0,
     hatchedCount = 0,
+    activeAttemptZoneIdx = nil,
+    demotedMaxZoneIdx = nil,
+    demotedAtSpeedPower = 0,
+    lastDemoteAt = -math.huge,
 }
+
+-- True 15-Zone Progression Order verified from Areas/Configs & Guards/Configs
+local ZONE_LADDER = {
+    "Forest",           -- 1  (Guard WS 16)
+    "Lake",             -- 2  (Guard WS 35)
+    "Desert",           -- 3  (Guard WS 62)
+    "Jungle",           -- 4  (Guard WS 82)
+    "Snow",             -- 5  (Guard WS 98)
+    "Volcano",          -- 6  (Guard WS 113)
+    "Abyss Ocean",      -- 7  (Guard WS 130)
+    "Prehistoric",      -- 8  (Guard WS 152)
+    "Stormlands",       -- 9  (Guard WS 180.2)
+    "Cosmic",           -- 10 (Guard WS 200)
+    "Cherry Blossom",   -- 11 (Guard WS 222)
+    "Titan Temple",     -- 12 (Guard WS 229.5)
+    "Light Dark",       -- 13 (Guard WS 244.8)
+    "Enchanted Forest", -- 14 (Guard WS 251.075)
+    "Alien",            -- 15 (Guard WS 279)
+}
+local ZONE_INDEX = {}
+for idx, zName in ipairs(ZONE_LADDER) do
+    ZONE_INDEX[zName] = idx
+end
+local demoteTargetZoneFromFailure
 
 local function notify(message, _color, title)
     if not state.settings.notifications or not notifHolder or not notifHolder.Parent then
@@ -495,10 +532,18 @@ local function remoteAt(path)
     return current
 end
 
+local remoteLastSent = setmetatable({}, { __mode = "k" })
+local REMOTE_MIN_GAP = 0.05
+
 local function fireServer(remoteObject, ...)
     if not remoteObject then
         return false
     end
+    local now = os.clock()
+    if now - (remoteLastSent[remoteObject] or -math.huge) < REMOTE_MIN_GAP then
+        return false
+    end
+    remoteLastSent[remoteObject] = now
     if type(remoteObject) == "table" and type(remoteObject.FireServer) == "function" then
         local sent = pcall(remoteObject.FireServer, remoteObject, ...)
         return sent
@@ -517,6 +562,11 @@ local function invokeServer(remoteObject, ...)
     if not remoteObject then
         return nil
     end
+    local now = os.clock()
+    if now - (remoteLastSent[remoteObject] or -math.huge) < REMOTE_MIN_GAP then
+        return nil
+    end
+    remoteLastSent[remoteObject] = now
     if type(remoteObject) == "table" and type(remoteObject.InvokeServer) == "function" then
         local sent, result = pcall(remoteObject.InvokeServer, remoteObject, ...)
         if sent then
@@ -542,9 +592,20 @@ local function characterRoot()
     return character and character:FindFirstChild("HumanoidRootPart")
 end
 
+local walkToCFrame
 local function teleportToCFrame(cframe)
+    if not cframe then
+        return false
+    end
+    -- Steal an Egg: NEVER teleport (CFrame/PivotTo); exclusively walk!
+    if gameKey == "sae" then
+        if type(walkToCFrame) == "function" then
+            return walkToCFrame(cframe, 35)
+        end
+        return false
+    end
     local root = characterRoot()
-    if not root or not cframe then
+    if not root then
         return false
     end
     local ok = pcall(function()
@@ -729,6 +790,21 @@ syncAntiCheat = function()
         if Remotes.GuardPatrol then
             hookRemoteTable(Remotes.GuardPatrol.ForestStrike, "guard_strike")
             hookRemoteTable(Remotes.GuardPatrol.ForestHandoff, "guard_strike")
+            -- Disarm client ForestGuardRuntime patrol loop by signaling EnabledShifted(false, math.huge)
+            if state.anticheat.blockGuardStrike and Remotes.GuardPatrol.EnabledShifted and type(getconnections) == "function" then
+                pcall(function()
+                    local ev = Remotes.GuardPatrol.EnabledShifted.OnClientEvent
+                    if ev then
+                        for _, conn in ipairs(getconnections(ev)) do
+                            if type(conn.Fire) == "function" then
+                                pcall(conn.Fire, conn, false, math.huge)
+                            elseif type(conn.Function) == "function" then
+                                pcall(conn.Function, false, math.huge)
+                            end
+                        end
+                    end
+                end)
+            end
         end
         if Remotes.Limpness then
             hookRemoteTable(Remotes.Limpness.WriteLimpness, "limpness")
@@ -741,6 +817,45 @@ syncAntiCheat = function()
             hookRemoteTable(Remotes.IdleRescue.SubmitIdleFlag, "idle_false")
             hookRemoteTable(Remotes.IdleRescue.AskRescueHop, "idle_drop")
         end
+    end
+
+    -- 1b. Instance-level __namecall protection for raw RemoteEvent/RemoteFunction calls
+    if not acRuntime.namecallHooked and type(hookmetamethod) == "function" and type(getnamecallmethod) == "function" then
+        acRuntime.namecallHooked = true
+        pcall(function()
+            local oldNamecall
+            oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+                if not shuttingDown and state.anticheat.enabled then
+                    local method = getnamecallmethod()
+                    if method == "FireServer" or method == "InvokeServer" then
+                        local name = tostring(self)
+                        if state.anticheat.blockGuardStrike and (name == "ForestStrike" or name == "ForestHandoff") then
+                            runtime.acBlockedStrikes = runtime.acBlockedStrikes + 1
+                            runtime.acLastNote = "Blocked " .. name .. " (#" .. tostring(runtime.acBlockedStrikes) .. ")"
+                            return nil
+                        elseif state.anticheat.antiRagdollStun and name == "WriteLimpness" then
+                            local isLimp = select(1, ...)
+                            if isLimp == true then
+                                runtime.acCleanedStuns = runtime.acCleanedStuns + 1
+                                return oldNamecall(self, false)
+                            end
+                        elseif state.anticheat.blockIdleTelemetry then
+                            if name == "SubmitIdleState" or name == "SubmitIdleFlag" then
+                                local flag = select(1, ...)
+                                if flag == true then
+                                    runtime.acBlockedTele = runtime.acBlockedTele + 1
+                                    return oldNamecall(self, false)
+                                end
+                            elseif name == "AskIdleHopFlush" or name == "AskRescueHop" then
+                                runtime.acBlockedTele = runtime.acBlockedTele + 1
+                                return method == "InvokeServer" and false or nil
+                            end
+                        end
+                    end
+                end
+                return oldNamecall(self, ...)
+            end)
+        end)
     end
 
     -- 2. Disarm ObbyAntiTPClientController (checks Workspace:GetAttribute("ClientObbyAntiTp") ~= false)
@@ -874,7 +989,7 @@ local function getDirectCrossingPoint(startPos, destPos)
     end
 end
 
-local function walkToCFrame(cframe, timeout, opts)
+walkToCFrame = function(cframe, timeout, opts)
     opts = type(opts) == "table" and opts or {}
     local character = LocalPlayer.Character
     local root = character and character:FindFirstChild("HumanoidRootPart")
@@ -1091,6 +1206,11 @@ local function instanceCFrame(instance)
 end
 
 local function defaultAntiAfk()
+    -- Reset AntiAFKController's UserInputService timer (u11 = os.clock()) via VirtualInputManager
+    pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        vim:SendMouseMoveEvent(1, 1, game)
+    end)
     local camera = workspace.CurrentCamera
     local ok, virtualUser = pcall(function()
         return game:GetService("VirtualUser")
@@ -1231,12 +1351,10 @@ Backends.SAE = finishBackend({
         if Remotes and Remotes.Treadmill and Remotes.Treadmill.AskDoff then
             pcall(invokeServer, Remotes.Treadmill.AskDoff)
         end
-        local function moveForTarget(cf, forceWalk)
+        local function moveForTarget(cf)
             if not cf then return false end
-            if forceWalk or state.teleports.walkToEggs ~= false then
-                return walkToCFrame(cf, 35)
-            end
-            return teleportToCFrame(cf * CFrame.new(0, 3, 0))
+            -- Steal an Egg strictly walks to all locations (never teleports)
+            return walkToCFrame(cf, 35)
         end
         -- Egg targets ALWAYS use walkToCFrame (Requirement #2: Change tele to egg to walk to egg)
         if destination == "Nearest Field Egg" and EggState then
@@ -1346,6 +1464,7 @@ do
     local wornTrailHooked = false
     local carryHooked = false
     local beltHooked = false
+    local guardFailHooked = false
     local onTreadmill = false
     local plotFullUntil = 0
     local plantSkipUntil = {}
@@ -1423,14 +1542,52 @@ do
             carryHooked = true
             local okC, conn = pcall(function()
                 return EggState.CarryChanged:Connect(function(carryState)
-                    if not shuttingDown and not stopped and type(carryState) == "table" and carryState.IsCarrying then
+                    if shuttingDown or stopped or type(carryState) ~= "table" then return end
+                    if carryState.IsCarrying then
                         triggerInstantEscapeSprint()
+                    elseif runtime.activeAttemptZoneIdx and runtime.activeAttemptZoneIdx > 1 then
+                        -- If egg dropped while still inside the guard field (before SeparationLine), demote zone by 1
+                        local root = characterRoot()
+                        if root and isPastSeparationLine(root.Position) and type(demoteTargetZoneFromFailure) == "function" then
+                            demoteTargetZoneFromFailure(runtime.activeAttemptZoneIdx, "egg dropped before crossing safe line")
+                        end
                     end
                 end)
             end)
             if okC and conn then
                 track(conn)
             end
+        end
+
+        if not guardFailHooked and Remotes then
+            guardFailHooked = true
+            pcall(function()
+                if Remotes.GuardPatrol then
+                    if Remotes.GuardPatrol.SpeedTollWarning then
+                        track(Remotes.GuardPatrol.SpeedTollWarning.OnClientEvent:Connect(function()
+                            if not shuttingDown and not stopped and runtime.activeAttemptZoneIdx and type(demoteTargetZoneFromFailure) == "function" then
+                                demoteTargetZoneFromFailure(runtime.activeAttemptZoneIdx, "guard caught / speed toll warning")
+                            end
+                        end))
+                    end
+                    if Remotes.GuardPatrol.SpeedTollOffer then
+                        track(Remotes.GuardPatrol.SpeedTollOffer.OnClientEvent:Connect(function()
+                            if not shuttingDown and not stopped and runtime.activeAttemptZoneIdx and type(demoteTargetZoneFromFailure) == "function" then
+                                demoteTargetZoneFromFailure(runtime.activeAttemptZoneIdx, "guard strike / speed toll offer")
+                            end
+                        end))
+                    end
+                end
+                if Remotes.EggWorld and Remotes.EggWorld.FieldEggRedeemVerdict then
+                    track(Remotes.EggWorld.FieldEggRedeemVerdict.OnClientEvent:Connect(function(verdict)
+                        if not shuttingDown and not stopped and type(verdict) == "table" and verdict.Success == false then
+                            if runtime.activeAttemptZoneIdx and type(demoteTargetZoneFromFailure) == "function" then
+                                demoteTargetZoneFromFailure(runtime.activeAttemptZoneIdx, tostring(verdict.Reason or "redeem rejected"))
+                            end
+                        end
+                    end))
+                end
+            end)
         end
 
         if not beltHooked and Remotes and Remotes.Treadmill and Remotes.Treadmill.AssignedBeltShifted then
@@ -1777,9 +1934,12 @@ do
     end
 
     local function inspectZoneInfo(areaId)
+        local idStr = tostring(areaId or "Forest")
+        local ladderIdx = ZONE_INDEX[idStr] or 1
         local info = {
-            areaId = tostring(areaId or "Forest"),
-            progression = 1,
+            areaId = idStr,
+            zoneIndex = ladderIdx,
+            progression = ladderIdx,
             reqSpeedPower = 0,
             reqWalkSpeed = 0,
             guardWalkSpeed = 0,
@@ -1790,10 +1950,12 @@ do
             if Areas and type(Areas.Directory) == "table" then
                 local areaDef = Areas.Directory[areaId]
                 if type(areaDef) == "table" then
-                    if type(Areas.GetProgressionOrder) == "function" then
-                        info.progression = tonumber(Areas.GetProgressionOrder(areaDef)) or info.progression
-                    elseif type(areaDef.Rarity) == "table" and tonumber(areaDef.Rarity.Rank) then
-                        info.progression = tonumber(areaDef.Rarity.Rank)
+                    if not ZONE_INDEX[idStr] then
+                        if type(Areas.GetProgressionOrder) == "function" then
+                            info.progression = tonumber(Areas.GetProgressionOrder(areaDef)) or info.progression
+                        elseif type(areaDef.Rarity) == "table" and tonumber(areaDef.Rarity.Rank) then
+                            info.progression = tonumber(areaDef.Rarity.Rank)
+                        end
                     end
                     if Guards and type(Guards.Directory) == "table" and areaDef.GuardId then
                         local gDef = Guards.Directory[areaDef.GuardId]
@@ -1806,7 +1968,7 @@ do
             local world = workspace:FindFirstChild("World")
             local areasFolder = world and world:FindFirstChild("Areas")
             local guardAreas = areasFolder and areasFolder:FindFirstChild("GuardAreas")
-            local areaModel = guardAreas and guardAreas:FindFirstChild(tostring(areaId or ""))
+            local areaModel = guardAreas and guardAreas:FindFirstChild(idStr)
             if areaModel then
                 local attr = areaModel:GetAttribute("GuardEscapeSpeeds")
                 if typeof(attr) == "Vector2" then
@@ -1831,28 +1993,107 @@ do
         return info
     end
 
+    -- CARRY_SPEED_RATIO = 0.9 from GuardEscapeRequirement.luau:
+    -- GuardEscapeSpeeds.X = RequiredSpeedPower (already includes 0.9 carry slowdown + 1.05 margin).
+    -- GuardEscapeSpeeds.Y = unencumbered walk speed requirement (before 0.9 carry slowdown).
+    local CARRY_SPEED_RATIO = 0.90
+    local GUARD_WAKE_SEC = 0.63
+
+    demoteTargetZoneFromFailure = function(failedZoneIdx, reason)
+        local zIdx = tonumber(failedZoneIdx) or tonumber(runtime.activeAttemptZoneIdx) or 0
+        if zIdx <= 1 then
+            runtime.activeAttemptZoneIdx = nil
+            return
+        end
+        local now = os.clock()
+        if now - (runtime.lastDemoteAt or -math.huge) < 1.5 then
+            return
+        end
+        runtime.lastDemoteAt = now
+        local curCap = tonumber(runtime.demotedMaxZoneIdx) or #ZONE_LADDER
+        local newMaxIdx = math.max(1, math.min(curCap, zIdx) - 1)
+        runtime.demotedMaxZoneIdx = newMaxIdx
+        local sp = getPlayerSpeedMetrics()
+        runtime.demotedAtSpeedPower = sp
+        runtime.activeAttemptZoneIdx = nil
+        local newZoneName = ZONE_LADDER[newMaxIdx] or "Forest"
+        local oldZoneName = ZONE_LADDER[zIdx] or ("Zone " .. tostring(zIdx))
+        local curTarget = tostring(state.farm.targetZone or "Auto (Best For My Speed)")
+        if ZONE_INDEX[curTarget] and ZONE_INDEX[curTarget] >= zIdx then
+            state.farm.targetZone = newZoneName
+            refreshControl("farm.targetZone")
+            saveConfig()
+        end
+        runtime.zoneSummary = string.format("%s (Fallback from %s)", newZoneName, oldZoneName)
+        notify(
+            string.format("Steal failed in %s (%s) -> stepped back to %s (Zone %d)", oldZoneName, tostring(reason or "guard/speed"), newZoneName, newMaxIdx),
+            THEME.Amber
+        )
+    end
+
     local function isZoneSafeForPlayer(zoneInfo, playerSpeedPower, playerWalkSpeed)
-        if zoneInfo.areaId == "Forest" then
+        if zoneInfo.areaId == "Forest" or zoneInfo.zoneIndex == 1 then
+            return true
+        end
+        if runtime.demotedMaxZoneIdx and zoneInfo.zoneIndex > runtime.demotedMaxZoneIdx then
+            return false
+        end
+        if state.farm.respectSpeed == false then
+            return true
+        end
+        local safetyRatio = math.clamp((tonumber(state.farm.speedSafetyPct) or 100) / 100, 0.5, 1.5)
+        local carriedWalkSpeed = playerWalkSpeed * CARRY_SPEED_RATIO
+
+        if zoneInfo.reqSpeedPower > 0 then
+            if playerSpeedPower < zoneInfo.reqSpeedPower * safetyRatio then
+                return false
+            end
+        end
+        if zoneInfo.reqWalkSpeed > 0 then
+            if carriedWalkSpeed < zoneInfo.reqWalkSpeed * safetyRatio then
+                return false
+            end
+        end
+        if zoneInfo.guardWalkSpeed > 0 then
+            if carriedWalkSpeed < zoneInfo.guardWalkSpeed * 0.92 * safetyRatio then
+                return false
+            end
+        end
+        if zoneInfo.reqSpeedPower <= 0 and zoneInfo.reqWalkSpeed <= 0 and zoneInfo.guardWalkSpeed <= 0 then
+            -- If GuardArea hasn't streamed its GuardEscapeSpeeds attribute yet, only allow Forest
+            return false
+        end
+        return true
+    end
+
+    local function canSafelyEscapeEgg(record, zoneInfo, playerWalkSpeed)
+        if zoneInfo.areaId == "Forest" or zoneInfo.zoneIndex == 1 then
             return true
         end
         if state.farm.respectSpeed == false then
             return true
         end
-        local safetyRatio = math.clamp((tonumber(state.farm.speedSafetyPct) or 90) / 100, 0.4, 1.5)
-        if zoneInfo.reqSpeedPower > 0 then
-            if playerSpeedPower >= zoneInfo.reqSpeedPower * safetyRatio then
-                return true
-            end
-            if zoneInfo.reqWalkSpeed > 0 and playerWalkSpeed >= zoneInfo.reqWalkSpeed * safetyRatio then
-                return true
-            end
-            return false
-        end
-        if zoneInfo.reqWalkSpeed > 0 then
-            return playerWalkSpeed >= zoneInfo.reqWalkSpeed * safetyRatio
-        end
+        local cf = record.BottomCFrame or record.BoundsCFrame
+        if not cf then return false end
+        local eggPos = cf.Position
+        local escapePt = computePerpendicularEscapePoint(eggPos, 6.0)
+        if not escapePt then return true end
+        local distToExit = Vector3.new(eggPos.X - escapePt.X, 0, eggPos.Z - escapePt.Z).Magnitude
+        local carriedWalkSpeed = math.max(playerWalkSpeed * CARRY_SPEED_RATIO, 1)
+        local safetyRatio = math.clamp((tonumber(state.farm.speedSafetyPct) or 100) / 100, 0.5, 1.5)
+        local playerEscapeTime = (distToExit / carriedWalkSpeed) * safetyRatio
+
         if zoneInfo.guardWalkSpeed > 0 then
-            return playerWalkSpeed >= zoneInfo.guardWalkSpeed * 0.85 * safetyRatio
+            local guardStart = zoneInfo.guardPos or eggPos
+            local guardDistToExit = Vector3.new(guardStart.X - escapePt.X, 0, guardStart.Z - escapePt.Z).Magnitude
+            local guardDistToEgg = Vector3.new(guardStart.X - eggPos.X, 0, guardStart.Z - eggPos.Z).Magnitude
+            if guardDistToEgg < 14 then
+                return false
+            end
+            local guardInterceptTime = GUARD_WAKE_SEC + (math.max(0, math.min(guardDistToExit, guardDistToEgg + distToExit) - 7.5) / zoneInfo.guardWalkSpeed)
+            if playerEscapeTime >= guardInterceptTime then
+                return false
+            end
         end
         return true
     end
@@ -1929,7 +2170,22 @@ do
         local rootPos = root and root.Position or nil
         local now = os.clock()
         local playerSpeedPower, playerWalkSpeed = getPlayerSpeedMetrics()
-        runtime.speedSummary = string.format("Power: %s | WalkSpeed: %.1f", formatCompactNumber(playerSpeedPower), playerWalkSpeed)
+        -- If the player trained and increased SpeedPower by >= 8% since a zone demotion, lift the demotion cap by 1 zone
+        if runtime.demotedMaxZoneIdx and (runtime.demotedAtSpeedPower or 0) > 0 and playerSpeedPower >= runtime.demotedAtSpeedPower * 1.08 then
+            if runtime.demotedMaxZoneIdx < #ZONE_LADDER then
+                runtime.demotedMaxZoneIdx = runtime.demotedMaxZoneIdx + 1
+                runtime.demotedAtSpeedPower = playerSpeedPower
+            else
+                runtime.demotedMaxZoneIdx = nil
+            end
+        end
+        runtime.speedSummary = string.format(
+            "Power: %s | WalkSpeed: %.1f (Carry: %.1f)%s",
+            formatCompactNumber(playerSpeedPower),
+            playerWalkSpeed,
+            playerWalkSpeed * CARRY_SPEED_RATIO,
+            runtime.demotedMaxZoneIdx and (" | MaxZone: " .. tostring(ZONE_LADDER[runtime.demotedMaxZoneIdx])) or ""
+        )
 
         local zoneCache = {}
         local function getZone(areaId)
@@ -1944,6 +2200,9 @@ do
         local specificZone = (targetZoneSetting ~= "Auto (Best For My Speed)" and targetZoneSetting ~= "Auto (Nearest Safe Egg)")
             and targetZoneSetting
             or nil
+        if specificZone and runtime.demotedMaxZoneIdx and ZONE_INDEX[specificZone] and ZONE_INDEX[specificZone] > runtime.demotedMaxZoneIdx then
+            specificZone = ZONE_LADDER[runtime.demotedMaxZoneIdx]
+        end
 
         local bestRecord, bestScore, bestZoneInfo
         local fallbackRecord, fallbackScore, fallbackZoneInfo
@@ -1968,10 +2227,11 @@ do
                 if reachable then
                     local zInfo = getZone(record.AreaId)
                     local safe = isZoneSafeForPlayer(zInfo, playerSpeedPower, playerWalkSpeed)
+                        and canSafelyEscapeEgg(record, zInfo, playerWalkSpeed)
                     local score = scoreEggRecord(record, zInfo, rootPos)
 
                     if specificZone then
-                        if tostring(record.AreaId) == specificZone then
+                        if tostring(record.AreaId) == specificZone and (state.farm.respectSpeed == false or safe) then
                             if not bestScore or score > bestScore then
                                 bestRecord, bestScore, bestZoneInfo = record, score, zInfo
                             end
@@ -2019,22 +2279,10 @@ do
         local list = {
             "Auto (Best For My Speed)",
             "Auto (Nearest Safe Egg)",
-            "Forest",
-            "Desert",
-            "Snow",
-            "Jungle",
-            "Lake",
-            "Volcano",
-            "Cherry Blossom",
-            "Enchanted Forest",
-            "Prehistoric",
-            "Abyss Ocean",
-            "Stormlands",
-            "Light Dark",
-            "Alien",
-            "Cosmic",
-            "Titan Temple",
         }
+        for _, zName in ipairs(ZONE_LADDER) do
+            list[#list + 1] = zName
+        end
         return list
     end
 
@@ -2123,8 +2371,25 @@ do
             return false
         end
 
+        local attemptAreaId = tostring(field.AreaId or "Forest")
+        local attemptZoneIdx = ZONE_INDEX[attemptAreaId] or 1
+        runtime.activeAttemptZoneIdx = attemptZoneIdx
+
         -- 5. Walk directly to egg within prompt pickup reach (4.6 studs, MaxActivationDistance is 8)
-        if not walkToCFrame(fieldCf, 32, { stopRadius = 4.6 }) then
+        local walkedOk = walkToCFrame(fieldCf, 32, {
+            stopRadius = 4.6,
+            abortIf = function()
+                -- Abort immediately if a guard strike / speed toll demoted our target zone during the walk
+                return runtime.activeAttemptZoneIdx == nil
+                    or (runtime.demotedMaxZoneIdx ~= nil and attemptZoneIdx > runtime.demotedMaxZoneIdx)
+            end,
+        })
+        if not walkedOk or runtime.activeAttemptZoneIdx == nil or (runtime.demotedMaxZoneIdx ~= nil and attemptZoneIdx > runtime.demotedMaxZoneIdx) then
+            carrySkipUntil[field.Uid] = os.clock() + 4.0
+            if attemptZoneIdx > 1 and runtime.activeAttemptZoneIdx ~= nil then
+                demoteTargetZoneFromFailure(attemptZoneIdx, "could not reach egg in zone")
+            end
+            runtime.activeAttemptZoneIdx = nil
             return false
         end
 
@@ -2138,13 +2403,25 @@ do
         if carried or (EggState.ReadCarryState() or {}).IsCarrying then
             triggerInstantEscapeSprint(fieldCf.Position)
             if deliverCarriedEgg(fieldCf.Position) then
+                runtime.activeAttemptZoneIdx = nil
                 runtime.stolenCount = (runtime.stolenCount or 0) + 1
                 return "stolen"
             end
+            if attemptZoneIdx > 1 then
+                demoteTargetZoneFromFailure(attemptZoneIdx, "failed to escape zone with egg")
+            end
+            runtime.activeAttemptZoneIdx = nil
             return false
         end
 
         carrySkipUntil[field.Uid] = os.clock() + 3.5
+        if attemptZoneIdx > 1 then
+            local errLower = string.lower(tostring(carryError or ""))
+            if errLower == "" or errLower:find("speed", 1, true) or errLower:find("guard", 1, true) or errLower:find("far", 1, true) or errLower:find("area", 1, true) or errLower:find("denied", 1, true) then
+                demoteTargetZoneFromFailure(attemptZoneIdx, tostring(carryError or "carry rejected in zone"))
+            end
+        end
+        runtime.activeAttemptZoneIdx = nil
         if carryError then
             notify("Carry: " .. tostring(carryError), THEME.Amber)
         end
@@ -3794,8 +4071,11 @@ local function buildUI(backend)
 
     -- Teleports / Movement Tab
     local teleTab = CreateTab("Teleports")
-    teleTab:CreateSection("Locations & Walk-to-Egg Navigation")
-    teleTab:CreateToggle("Use Walk-to-Target For Non-Egg Locations", "teleports.walkToEggs")
+    teleTab:CreateSection("Locations & Walk-Only Navigation (Anti-Ban)")
+    teleTab:CreateParagraph(
+        "Strict Walk-Only Mode Active",
+        "All CFrame / PivotTo teleports are disabled in Steal an Egg for anti-ban safety. Every movement uses smooth humanoid walking."
+    )
     local teleportOptions = backend.teleports and backend.teleports() or { "Nearest Field Egg" }
     local teleportDropdown = teleTab:CreateDropdown("Destination", "teleports.selected", teleportOptions)
     teleTab:CreateButton("Go To Selected Location", function()

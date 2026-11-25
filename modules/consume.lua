@@ -29,7 +29,10 @@ return function(ctx)
     end
 
     ui.section(tab, "Potions")
-    ui.toggle(tab, { name = "Auto Drink Potions", key = "autoPotions", default = false })
+    ui.toggle(tab, {
+        name = "Auto Drink Potions (No Stack)", key = "autoPotions", default = false,
+        note = "Drinks 1 bottle per type; skips lower or same tier while a potion timer is active.",
+    })
     ui.toggle(tab, { name = "Drink Highest Tier First", key = "drinkHighestTier", default = false })
     ui.slider(tab, { name = "Min Potion Tier", key = "PotionMinTier", range = { 1, 11 }, increment = 1, value = 1 })
     local potions = (type(cat.potions) == "table" and #cat.potions > 0)
@@ -44,13 +47,22 @@ return function(ctx)
     ui.toggle(tab, { name = "Auto Claim Forever Free Pack", key = "autoForeverPack", default = false })
     ui.toggle(tab, { name = "Auto Free Gifts", key = "autoFreeGifts", default = false })
     ui.toggle(tab, { name = "Auto Dice", key = "autoDice", default = false })
-    ui.toggle(tab, { name = "Auto Fruits", key = "autoFruits", default = false })
+    ui.toggle(tab, {
+        name = "Auto Fruits (Full Queue)", key = "autoFruits", default = false,
+        note = "Eats all selected fruits (Shiny first) up to your exact Fruit Queue limit.",
+    })
     ui.toggle(tab, { name = "Auto Gift Bags & Lootboxes", key = "autoGiftBags", default = false })
-    ui.toggle(tab, { name = "Auto Keys (Combine & Unlock)", key = "autoKeys", default = false })
-    ui.toggle(tab, { name = "Auto Open All Chests", key = "autoOpenChests", default = false })
+    ui.toggle(tab, {
+        name = "Auto Keys (Combine & Unlock 4 Worlds + Secret)", key = "autoKeys", default = false,
+        note = "Combines key halves, opens the 4 world chests, and uses Secret Keys only in Crystal Key Castle (spin for Crystal Keys).",
+    })
+    ui.toggle(tab, {
+        name = "Auto Open 4 World Chests + Secret Key Spin", key = "autoOpenChests", default = false,
+        note = "Opens Crystal/Tech/Void/Fantasy chests (Worlds 1-4) and uses Secret Keys exclusively for Crystal Key Castle spin.",
+    })
 
     ui.section(tab, "Item Filters (Optional)")
     addPicker("fruits", "Fruit", type(cat.fruits) == "table" and #cat.fruits > 0 and cat.fruits or { "Apple", "Orange", "Banana", "Pineapple", "Watermelon", "Rainbow" })
     addPicker("bags", "Gift Bag / Lootbox", type(cat.bags) == "table" and #cat.bags > 0 and cat.bags or { "Gift Bag", "Large Gift Bag", "Mini Chest", "Hype Egg" })
-    addPicker("keys", "Key", { "Crystal Key", "Tech Key", "Void Key", "Fantasy Key", "Hacker Key", "Secret Key", "MVP Key" })
+    addPicker("keys", "Key", { "Crystal Key", "Tech Key", "Void Key", "Fantasy Key", "Secret Key" })
 end
