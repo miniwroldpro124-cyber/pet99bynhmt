@@ -1,38 +1,32 @@
 #!/usr/bin/env python3
 """
-Steph HUB - Prometheus Vmify Custom Bytecode + 24-Bit Sponge Dual-VM Obfuscator (v5.0)
-======================================================================================
+Steph HUB - Prometheus Vmify Polymorphic Luau Dual-VM Obfuscator & Bundler Pipeline (v6.0)
+==========================================================================================
 1. Backs up clean unobfuscated Luau sources FIRST to:
    - C:\\Users\\LaptopAT\\AppData\\Local\\Real\\workspace\\stephhub-src\\ (clean tree + *.unobf.lua)
    - C:\\Users\\LaptopAT\\.gemini\\antigravity\\scratch\\pet99bynhmt_unobf\\
    - C:\\Users\\LaptopAT\\.gemini\\antigravity\\scratch\\pet99bynhmt\\unobf\\ (gitignored)
-2. Stage-2 Inner Custom Bytecode VM (Prometheus `Vmify` + Metatable-Free Ring-Buffered Constant Pool):
-   - Compiles the full Luau AST (`+=`, `continue`, `//`, ternary `if-then-else`, closures, varargs)
-     into custom register VM bytecode instructions (`Compiler:compile(ast)`) with per-file shuffled
-     opcode IDs (`1..56`), shuffled operand slots (`2..5`), and randomized prototype field keys.
-   - Serializes the compiled prototype hierarchy into a compact binary bytecode stream where:
-     * Every instruction opcode & operand-type mask is dynamically XOR-masked with per-prototype
-       rolling salts derived from Stage-1's final FNV-1a chain CRC (`R[reg_chain_crc] % 256`).
-     * Every constant string is encrypted with a per-prototype rolling XOR + affine stream cipher
-       keyed by Stage-1's dynamic `_ksalt` and decrypted on demand through a metatable-free 8-slot
-       ring-buffered getter closure `K(idx)` (zero `setmetatable`, zero `rawset`, and at most 8
-       decrypted strings resident per prototype at any instant).
-     * Integer constants inside the bytecode stream are offset-masked by per-prototype salts.
-   - All inner Stage-2 runtime primitives (`tonumber`, `select`, `math.floor`, `error`, `unpack`,
-     `getfenv`, `setfenv`) are bound directly as lexical upvalues to the verified Stage-1 outer
-     locals (`__UPV_*__` -> `v_tonum`, `v_sel`, `v_mflr`, `v_err`, `v_unpack`, `v_getfenv`, `v_setfenv`),
-     eliminating late `_ENV` global lookups inside Stage-2.
-3. Stage-1 Outer Hardened 24-Bit Sponge Dual-LCG PCBC VM (v5.0):
-   - Captures all 15 runtime primitives into outer locals at line 1 before any payload runs.
-   - Replaces the 1-bit `CZkE` trust flag with a 24-Bit Entropic Sponge (`acc`) absorbing:
-     * Behavioral metamethod & C-dumper trap (`behav = 3257` untampered, without `3257` in code)
-     * 3-way cross-runtime algebraic C-closure & 2-arg Lua canary probes (`w_probe = 23575`,
-       `can_val = 42` across Luau `debug.info`, Lua 5.1 `debug.getinfo`, and `string.dump`,
-       failing closed to `0` if both `debug` and `string.dump` are stripped, without `23575` in code)
-     * Pointer uniqueness verification (`seen[fn]`, adding `dup = 911` on any aliased C closure)
-     * Branchless executor probes (`iscclosure`, `islclosure`, `ishooked`/`isfunctionhooked`)
-   - Seeds the 16-slot runtime anchor table `v_anchor[1..16]` directly from the sponge output `acc`
-     computed at compile time by `compute_untampered_seed(build_salt, 15)`.
+2. Unified Payload Encryption (Shuffled Base85 + Xorshift32 with Ciphertext Feedback):
+   - Packs Stage-1 VM instructions + Stage-2 serialized prototype hierarchy into ONE continuous
+     binary stream with an encrypted 4-byte original byte-length header BEFORE encrypting.
+   - Encrypts the unified binary stream with a 32-bit Xorshift32 + Ciphertext Feedback (CFB)
+     nonlinear stream cipher (`state * 1664525 + c + 1013904223` mod 2^32, IEEE-754 exact `< 2^53`).
+   - Encodes ciphertext using a per-build shuffled 85-character printable ASCII Base85 alphabet
+     with cyclic digit rotation and zero padding characters, slicing into random-length segments
+     only AFTER Base85 encoding.
+3. Polymorphic `--target=luau` Bootstrap & Anti-Pre-Hook Seed Poisoning:
+   - Removes Lua 5.1 bitwise fallback tables when `--target=luau`, passing shuffled native `bit32`
+     and Luau runtime primitives + randomized dummy arguments into the outer IIFE.
+   - Enters a Control-Flow Flattened (`while st ~= 0 do`) state machine immediately at top of IIFE
+     with per-build randomized hex state constants and shuffled `if/elseif` branch ordering.
+   - Verifies all C primitives via `debug.info(fn, "sla")`, pointer uniqueness, `coroutine.isyieldable`,
+     and behavioral metamethod traps, silently poisoning the 32-bit cipher `seed` on any hook/tamper
+     with zero diagnostic strings and zero `table.concat` calls across Stage-1 and Stage-2.
+4. Stage-2 Polymorphic VM + Bounded <=8-Slot Ring-Buffered Lazy `K(idx)` Constant Pool:
+   - Integrates with per-build Stage-2 opcode permutations, 4-group operand slot permutations,
+     7 jump-safe fused super-instructions, and 4..6 decoy handlers.
+   - Keeps string constants encrypted as byte arrays in `_enc_k`, lazily decrypting on demand via
+     Xorshift32+CFB and chunked `string.char(unpack(...))` binary-tree reduction into an 8-slot FIFO ring.
 """
 
 from __future__ import annotations
@@ -44,6 +38,7 @@ import os
 import random
 import re
 import shutil
+import struct
 import sys
 import time
 from typing import Dict, List, Optional, Tuple
@@ -67,34 +62,426 @@ STATIC_CONST_ARITH_RE = re.compile(r"\(-?\d+[\+\-%]-?\d+\)")
 FORBIDDEN_MAGIC_NUMS = {23575, 3257, 3008093, 8314969, 5441028}
 FORBIDDEN_MAGIC_STRS = ("23575", "3257", "3008093", "8314969", "5441028")
 
-SAFE_B64_POOL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$"
+# 90 safe single-byte printable ASCII characters (0x21..0x7E excluding `"`, `'`, `\`, `` ` ``)
+# Each build samples & shuffles 85 distinct characters from this pool for padding-free Base85.
+BASE85_SAFE_ASCII_POOL = "".join(
+    chr(c) for c in range(33, 127) if chr(c) not in ('"', "'", "\\", "`")
+)
+
 PROBE_SYMBOLS = [
-    "dump",
-    "debug",
-    "info",
-    "getinfo",
-    "iscclosure",
-    "islclosure",
-    "ishooked",
-    "isfunctionhooked",
-    "loadstring",
-    "load",
-    "short_src",
-    "what",
-    "linedefined",
+    "dump",              # 1
+    "debug",             # 2
+    "info",              # 3
+    "getinfo",           # 4
+    "iscclosure",        # 5
+    "islclosure",        # 6
+    "ishooked",          # 7
+    "isfunctionhooked",  # 8
+    "loadstring",        # 9
+    "load",              # 10
+    "short_src",         # 11
+    "what",              # 12
+    "linedefined",       # 13
+    "concat",            # 14
 ]
 
 
-def compute_untampered_seed(build_salt: int, num_funcs: int = 15) -> int:
+# =============================================================================
+# Luau Mock Runtime Bootstrap for Lua 5.1 (`lupa`) Test Harness
+# =============================================================================
+TEST_LUAU_ENV_LUA = r"""
+local function _install_luau_test_env()
+    local orig_debug = debug
+    local orig_getinfo = debug and debug.getinfo
+    local orig_dump = string.dump
+    local orig_byte = string.byte
+    local orig_sub = string.sub
+    local orig_floor = math.floor
+    local orig_select = select
+    local orig_unpack = unpack or table.unpack
+    local orig_type = type
+    local orig_pcall = pcall
+    local orig_coro_running = coroutine and coroutine.running
+
+    local MOD32 = 4294967296
+    local XOR8 = {}
+    for i = 0, 255 do
+        local row = {}
+        XOR8[i] = row
+        for j = 0, 255 do
+            local r, p, a, b = 0, 1, i, j
+            while a > 0 or b > 0 do
+                local ra, rb = a % 2, b % 2
+                if ra ~= rb then r = r + p end
+                a = (a - ra) / 2
+                b = (b - rb) / 2
+                p = p * 2
+            end
+            row[j] = r
+        end
+    end
+    local AND8 = {}
+    for i = 0, 255 do
+        local row = {}
+        AND8[i] = row
+        for j = 0, 255 do
+            row[j] = ((i + j) - XOR8[i][j]) / 2
+        end
+    end
+    local POW2 = {}
+    for k = 0, 31 do POW2[k] = 2 ^ k end
+
+    local function bxor2(a, b)
+        a = orig_floor(a % MOD32)
+        b = orig_floor(b % MOD32)
+        local a0 = a % 256; a = (a - a0) / 256
+        local a1 = a % 256; a = (a - a1) / 256
+        local a2 = a % 256; local a3 = (a - a2) / 256
+        local b0 = b % 256; b = (b - b0) / 256
+        local b1 = b % 256; b = (b - b1) / 256
+        local b2 = b % 256; local b3 = (b - b2) / 256
+        return XOR8[a0][b0] + XOR8[a1][b1] * 256 + XOR8[a2][b2] * 65536 + XOR8[a3][b3] * 16777216
+    end
+
+    local function band2(a, b)
+        a = orig_floor(a % MOD32)
+        b = orig_floor(b % MOD32)
+        if b == 255 then return a % 256 end
+        if b == 4294967295 then return a end
+        if a == 255 then return b % 256 end
+        if a == 4294967295 then return b end
+        local a0 = a % 256; a = (a - a0) / 256
+        local a1 = a % 256; a = (a - a1) / 256
+        local a2 = a % 256; local a3 = (a - a2) / 256
+        local b0 = b % 256; b = (b - b0) / 256
+        local b1 = b % 256; b = (b - b1) / 256
+        local b2 = b % 256; local b3 = (b - b2) / 256
+        return AND8[a0][b0] + AND8[a1][b1] * 256 + AND8[a2][b2] * 65536 + AND8[a3][b3] * 16777216
+    end
+
+    local function bor2(a, b)
+        a = orig_floor(a % MOD32)
+        b = orig_floor(b % MOD32)
+        return (a + b) - band2(a, b)
+    end
+
+    local b_bxor = function(a, b, ...)
+        if b == nil then
+            if a == nil then return 0 end
+            return orig_floor(a % MOD32)
+        end
+        local r = bxor2(a, b)
+        local n = orig_select("#", ...)
+        for i = 1, n do r = bxor2(r, orig_select(i, ...)) end
+        return r
+    end
+
+    local b_band = function(a, b, ...)
+        if b == nil then
+            if a == nil then return 4294967295 end
+            return orig_floor(a % MOD32)
+        end
+        local r = band2(a, b)
+        local n = orig_select("#", ...)
+        for i = 1, n do r = band2(r, orig_select(i, ...)) end
+        return r
+    end
+
+    local b_bor = function(a, b, ...)
+        if b == nil then
+            if a == nil then return 0 end
+            return orig_floor(a % MOD32)
+        end
+        local r = bor2(a, b)
+        local n = orig_select("#", ...)
+        for i = 1, n do r = bor2(r, orig_select(i, ...)) end
+        return r
+    end
+
+    local b_bnot = function(a)
+        return 4294967295 - orig_floor(a % MOD32)
+    end
+
+    local b_lshift = function(a, disp)
+        a = orig_floor(a % MOD32)
+        disp = orig_floor(disp)
+        if disp < 0 then
+            disp = -disp
+            if disp >= 32 then return 0 end
+            return orig_floor(a / POW2[disp])
+        end
+        if disp >= 32 then return 0 end
+        return (a * POW2[disp]) % MOD32
+    end
+
+    local b_rshift = function(a, disp)
+        a = orig_floor(a % MOD32)
+        disp = orig_floor(disp)
+        if disp < 0 then
+            disp = -disp
+            if disp >= 32 then return 0 end
+            return (a * POW2[disp]) % MOD32
+        end
+        if disp >= 32 then return 0 end
+        return orig_floor(a / POW2[disp])
+    end
+
+    bit32 = {
+        bxor = b_bxor,
+        band = b_band,
+        bor = b_bor,
+        bnot = b_bnot,
+        lshift = b_lshift,
+        rshift = b_rshift,
+    }
+
+    local c_isyieldable = function()
+        if orig_coro_running then
+            return orig_coro_running() ~= nil
+        end
+        return false
+    end
+    if orig_type(coroutine) == "table" then
+        coroutine.isyieldable = c_isyieldable
+    end
+
+    local t_create = function(n, val)
+        local out = {}
+        if val ~= nil and orig_type(n) == "number" and n > 0 then
+            for i = 1, n do out[i] = val end
+        end
+        return out
+    end
+    table.create = t_create
+    table.unpack = table.unpack or orig_unpack
+
+    local function parse_lua51_arity(fn)
+        if not orig_dump then return 0, true end
+        local ok, bin = orig_pcall(orig_dump, fn)
+        if not ok or orig_type(bin) ~= "string" or #bin < 28 then
+            return 0, true
+        end
+        local sz_int = orig_byte(bin, 8)
+        local sz_size_t = orig_byte(bin, 9)
+        local pos = 13
+        local str_len, mult = 0, 1
+        for i = 0, sz_size_t - 1 do
+            str_len = str_len + orig_byte(bin, pos + i) * mult
+            mult = mult * 256
+        end
+        pos = pos + sz_size_t + str_len + 2 * sz_int
+        if pos + 2 > #bin then return 0, true end
+        local numparams = orig_byte(bin, pos + 1)
+        local is_vararg = (orig_byte(bin, pos + 2) ~= 0)
+        return numparams, is_vararg
+    end
+
+    local host_c_set = {
+        [b_bxor] = true, [b_band] = true, [b_bor] = true,
+        [b_bnot] = true, [b_lshift] = true, [b_rshift] = true,
+        [c_isyieldable] = true, [t_create] = true,
+    }
+
+    local sim_dump = function(fn, ...)
+        if host_c_set[fn] then
+            error("unable to dump given function", 0)
+        end
+        return orig_dump(fn, ...)
+    end
+    host_c_set[sim_dump] = true
+    string.dump = sim_dump
+
+    local sim_debug_info
+    sim_debug_info = function(target, what)
+        local gi = nil
+        local is_c = false
+        local fn_ref = nil
+        if orig_type(target) == "number" then
+            if orig_type(what) ~= "string" then return nil end
+            gi = orig_getinfo and orig_getinfo(target + 1, "Snluf") or nil
+            if not gi then return nil end
+            fn_ref = gi.func
+            is_c = (fn_ref and host_c_set[fn_ref]) or (gi.what == "C")
+        elseif orig_type(target) == "function" then
+            if orig_type(what) ~= "string" then
+                error("invalid argument #2 to 'info' (string expected)", 0)
+            end
+            fn_ref = target
+            if host_c_set[target] then
+                is_c = true
+            elseif orig_getinfo then
+                gi = orig_getinfo(target, "Snlu")
+                is_c = (gi and gi.what == "C") or false
+            end
+        else
+            error("invalid argument #1 to 'info' (function or number expected)", 0)
+        end
+
+        local s, l, a, va, n
+        if is_c then
+            s, l, a, va, n = "[C]", -1, 0, true, (gi and gi.name) or ""
+        else
+            s = (gi and gi.short_src and gi.short_src ~= "[C]") and gi.short_src or "[string]"
+            if orig_type(target) == "number" then
+                l = (gi and gi.currentline and gi.currentline > 0) and gi.currentline
+                    or ((gi and gi.linedefined and gi.linedefined > 0) and gi.linedefined or 1)
+            else
+                l = (gi and gi.linedefined and gi.linedefined > 0) and gi.linedefined or 1
+            end
+            a, va = parse_lua51_arity(fn_ref)
+            n = (gi and gi.name) or ""
+        end
+
+        if what == "sl" then return s, l end
+        if what == "sla" then return s, l, a, va end
+        if what == "s" then return s end
+        if what == "l" then return l end
+
+        local out, k = {}, 0
+        for i = 1, #what do
+            local ch = orig_sub(what, i, i)
+            if ch == "s" then k = k + 1; out[k] = s
+            elseif ch == "l" then k = k + 1; out[k] = l
+            elseif ch == "n" then k = k + 1; out[k] = n
+            elseif ch == "f" then k = k + 1; out[k] = fn_ref
+            elseif ch == "a" then
+                k = k + 1; out[k] = a
+                k = k + 1; out[k] = va
+            end
+        end
+        return orig_unpack(out, 1, k)
+    end
+    host_c_set[sim_debug_info] = true
+
+    debug = {
+        info = sim_debug_info,
+        traceback = orig_debug and orig_debug.traceback or nil,
+    }
+    return host_c_set, orig_debug
+end
+"""
+
+
+def compute_untampered_seed(build_salt: int, num_funcs: int = 20) -> int:
+    """
+    Computes the exact 32-bit untampered sponge seed absorbed from:
+      - Behavioral metamethod & C-dumper trap (`behav = 3257`, never emitted in code)
+      - 2-arg Lua closure canary (`can_val = 42`)
+      - Algebraic C-closure probes (`w_cclosure = 23575`, never emitted in code)
+      - Function type signature (`tsig = 816`) & pointer uniqueness across `num_funcs` primitives
+    Matches IEEE-754 float64 + Luau `bit32` transitions bit-for-bit (`< 2^53`).
+    """
     behav = 3257
     can_val = 42
     w_cclosure = 23575
     tsig = 816  # ord('f') * len("function") = 102 * 8
-    acc = ((build_salt ^ behav) * 65599 + can_val * 257) % 16777216
+    acc = (((build_salt ^ behav) * 1664525) + can_val * 257 + 1013904223) & 0xFFFFFFFF
     for i in range(1, num_funcs + 1):
-        mix = w_cclosure + tsig + i * 73
-        acc = (((acc ^ mix) * 165985) + i * 8191) % 16777216
-    return acc
+        mix = (w_cclosure + tsig + i * 73) & 0xFFFFFF
+        acc = (acc ^ ((acc << 13) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        acc = (acc ^ (acc >> 17)) & 0xFFFFFFFF
+        acc = (acc ^ ((acc << 5) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        acc = (((acc ^ mix) * 1664525) + i * 8191 + 1013904223) & 0xFFFFFFFF
+    return acc if acc != 0 else 0x6D2B79F5
+
+
+def encrypt_xorshift32_cfb(plaintext: bytes, seed: int) -> bytes:
+    """
+    Nonlinear 32-bit Xorshift32 + Ciphertext Feedback (CFB) stream cipher.
+    Exact bit-for-bit match with Luau `bit32`:
+      state = bxor(state, lshift(state, 13))
+      state = bxor(state, rshift(state, 17))
+      state = bxor(state, lshift(state, 5))
+      c = band(bxor(plain, state), 0xFF)
+      state = band(state * 1664525 + c + 1013904223, 0xFFFFFFFF)
+    Note: `0xFFFFFFFF * 1664525 + 255 + 1013904223 = 7,149,067,872,595,153 < 2^53`.
+    """
+    state = seed & 0xFFFFFFFF
+    if state == 0:
+        state = 0x6D2B79F5
+    out = bytearray(len(plaintext))
+    for i, p in enumerate(plaintext):
+        state = (state ^ ((state << 13) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        state = (state ^ (state >> 17)) & 0xFFFFFFFF
+        state = (state ^ ((state << 5) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        c = (p ^ state) & 0xFF
+        out[i] = c
+        state = (state * 1664525 + c + 1013904223) & 0xFFFFFFFF
+    return bytes(out)
+
+
+def decrypt_xorshift32_cfb(ciphertext: bytes, seed: int) -> bytes:
+    """Inverse of `encrypt_xorshift32_cfb`."""
+    state = seed & 0xFFFFFFFF
+    if state == 0:
+        state = 0x6D2B79F5
+    out = bytearray(len(ciphertext))
+    for i, c in enumerate(ciphertext):
+        state = (state ^ ((state << 13) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        state = (state ^ (state >> 17)) & 0xFFFFFFFF
+        state = (state ^ ((state << 5) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        p = (c ^ state) & 0xFF
+        out[i] = p
+        state = (state * 1664525 + c + 1013904223) & 0xFFFFFFFF
+    return bytes(out)
+
+
+def base85_encode(data: bytes, alpha85: str) -> str:
+    """
+    Padding-free Base85 encoder (4 binary bytes -> 5 printable ASCII chars) using
+    per-build shuffled 85-char alphabet `alpha85` and cyclic block digit rotation.
+    Pads final partial 1..3 bytes with zero bytes ONLY before the 4->5 tuple math;
+    callers slice at the exact decrypted 4-byte length header.
+    """
+    if len(alpha85) != 85 or len(set(alpha85)) != 85:
+        raise ValueError("alpha85 must contain exactly 85 unique ASCII characters")
+    rem = len(data) % 4
+    padded = data + (b"\x00" * (4 - rem) if rem else b"")
+    out: List[str] = []
+    blk_idx = 0
+    for i in range(0, len(padded), 4):
+        w = (padded[i] << 24) | (padded[i + 1] << 16) | (padded[i + 2] << 8) | padded[i + 3]
+        d4 = w % 85
+        w //= 85
+        d3 = w % 85
+        w //= 85
+        d2 = w % 85
+        w //= 85
+        d1 = w % 85
+        d0 = w // 85
+        shift = blk_idx % 85
+        out.append(
+            alpha85[(d0 + shift) % 85]
+            + alpha85[(d1 + shift) % 85]
+            + alpha85[(d2 + shift) % 85]
+            + alpha85[(d3 + shift) % 85]
+            + alpha85[(d4 + shift) % 85]
+        )
+        blk_idx += 1
+    return "".join(out)
+
+
+def base85_decode(text: str, alpha85: str) -> bytes:
+    """Inverse of `base85_encode`."""
+    if len(text) % 5 != 0:
+        raise ValueError("Base85 text length must be a multiple of 5")
+    rev = {ch: idx for idx, ch in enumerate(alpha85)}
+    out = bytearray()
+    blk_idx = 0
+    for i in range(0, len(text), 5):
+        shift = blk_idx % 85
+        d0 = (rev[text[i]] - shift) % 85
+        d1 = (rev[text[i + 1]] - shift) % 85
+        d2 = (rev[text[i + 2]] - shift) % 85
+        d3 = (rev[text[i + 3]] - shift) % 85
+        d4 = (rev[text[i + 4]] - shift) % 85
+        w = ((((d0 * 85 + d1) * 85 + d2) * 85 + d3) * 85 + d4) & 0xFFFFFFFF
+        out.append((w >> 24) & 0xFF)
+        out.append((w >> 16) & 0xFF)
+        out.append((w >> 8) & 0xFF)
+        out.append(w & 0xFF)
+        blk_idx += 1
+    return bytes(out)
 
 
 def get_target_files(repo_dir: str = REPO_DIR) -> List[str]:
@@ -117,7 +504,7 @@ def get_target_files(repo_dir: str = REPO_DIR) -> List[str]:
 
 def is_vm_obfuscated(source: str) -> bool:
     """
-    Heuristically detects v4.0 (headerless single-line Dual-VM) and legacy v3.0
+    Heuristically detects v6.0 / v5.0 / v4.0 (headerless single-line Dual-VM) and legacy v3.0
     obfuscated files so clean source backups are never overwritten by obfuscated code.
     """
     if LEGACY_VM_MARKER in source:
@@ -126,7 +513,10 @@ def is_vm_obfuscated(source: str) -> bool:
     if not stripped:
         return False
     lines = [ln.strip() for ln in stripped.splitlines() if ln.strip()]
-    if len(lines) <= 4 and any(ln.startswith("return(function(") for ln in lines):
+    if len(lines) <= 4 and any(
+        ln.startswith("return(function(") or ln.startswith("return (function(")
+        for ln in lines
+    ):
         return True
     return False
 
@@ -159,11 +549,20 @@ def backup_and_load_clean_sources(repo_dir: str = REPO_DIR) -> Dict[str, str]:
                 clean_text = curr_text
 
         if clean_text is None:
-            existing = [p for p in backup_candidates if os.path.isfile(p)]
-            existing.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-            for cand in existing:
-                with open(cand, "r", encoding="utf-8") as f:
-                    cand_text = f.read()
+            existing: List[Tuple[float, str]] = []
+            for p in backup_candidates:
+                try:
+                    if os.path.isfile(p):
+                        existing.append((os.path.getmtime(p), p))
+                except PermissionError:
+                    continue
+            existing.sort(key=lambda item: item[0], reverse=True)
+            for _, cand in existing:
+                try:
+                    with open(cand, "r", encoding="utf-8") as f:
+                        cand_text = f.read()
+                except PermissionError:
+                    continue
                 if not is_vm_obfuscated(cand_text):
                     clean_text = cand_text
                     break
@@ -173,19 +572,34 @@ def backup_and_load_clean_sources(repo_dir: str = REPO_DIR) -> Dict[str, str]:
 
         clean_sources[rel] = clean_text
 
-        for dest_root in (UNOBF_LOCAL_DIR, UNOBF_EXTERNAL_DIR, WORKSPACE_SRC_DIR):
-            dest_path = os.path.join(dest_root, rel)
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            with open(dest_path, "w", encoding="utf-8", newline="\n") as f:
+        local_dest = os.path.join(UNOBF_LOCAL_DIR, rel)
+        os.makedirs(os.path.dirname(local_dest), exist_ok=True)
+        with open(local_dest, "w", encoding="utf-8", newline="\n") as f:
+            f.write(clean_text)
+
+        try:
+            ext_dest = os.path.join(UNOBF_EXTERNAL_DIR, rel)
+            os.makedirs(os.path.dirname(ext_dest), exist_ok=True)
+            with open(ext_dest, "w", encoding="utf-8", newline="\n") as f:
+                f.write(clean_text)
+        except PermissionError:
+            pass
+
+        try:
+            ws_dest = os.path.join(WORKSPACE_SRC_DIR, rel)
+            os.makedirs(os.path.dirname(ws_dest), exist_ok=True)
+            with open(ws_dest, "w", encoding="utf-8", newline="\n") as f:
                 f.write(clean_text)
 
-        unobf_copy = os.path.join(
-            WORKSPACE_SRC_DIR,
-            rel[:-4] + ".unobf.lua" if rel.endswith(".lua") else rel + ".unobf.lua",
-        )
-        os.makedirs(os.path.dirname(unobf_copy), exist_ok=True)
-        with open(unobf_copy, "w", encoding="utf-8", newline="\n") as f:
-            f.write(clean_text)
+            unobf_copy = os.path.join(
+                WORKSPACE_SRC_DIR,
+                rel[:-4] + ".unobf.lua" if rel.endswith(".lua") else rel + ".unobf.lua",
+            )
+            os.makedirs(os.path.dirname(unobf_copy), exist_ok=True)
+            with open(unobf_copy, "w", encoding="utf-8", newline="\n") as f:
+                f.write(clean_text)
+        except PermissionError:
+            pass
 
     return clean_sources
 
@@ -202,8 +616,9 @@ def restore_clean_sources(repo_dir: str = REPO_DIR) -> None:
 
 class PrometheusBridge:
     """
-    Lua 5.1 lupa bridge to Prometheus LuaU AST Parser, Vmify Custom Register Bytecode Compiler,
-    Encrypted Binary Prototype Serializer, and MangledShuffled Variable Renamer.
+    Lua 5.1 lupa bridge to Prometheus LuaU AST Parser, Vmify Polymorphic Bytecode Compiler
+    (with super-instructions, per-format operand permutations, & decoy handlers),
+    Xorshift32+CFB Lazy Constant Serializer, and MangledShuffled Variable Renamer.
     """
 
     def __init__(self) -> None:
@@ -238,16 +653,58 @@ class PrometheusBridge:
             NameGenerators = require("prometheus.namegenerators")
             Prometheus.Logger.logLevel = Prometheus.Logger.LogLevel.Error
 
-            local function bxor24(a, b)
-                local r, p = 0, 1
-                while a > 0 or b > 0 do
-                    local ra, rb = a % 2, b % 2
-                    if ra ~= rb then r = r + p end
-                    a = (a - ra) / 2
-                    b = (b - rb) / 2
-                    p = p * 2
+            local MOD32 = 4294967296
+            local XOR8 = {{}}
+            for i = 0, 255 do
+                local row = {{}}
+                XOR8[i] = row
+                for j = 0, 255 do
+                    local r, p, a, b = 0, 1, i, j
+                    while a > 0 or b > 0 do
+                        local ra, rb = a % 2, b % 2
+                        if ra ~= rb then r = r + p end
+                        a = (a - ra) / 2
+                        b = (b - rb) / 2
+                        p = p * 2
+                    end
+                    row[j] = r
                 end
-                return r
+            end
+
+            local function bxor32(a, b)
+                a = math.floor(a % MOD32)
+                b = math.floor(b % MOD32)
+                local a0 = a % 256; a = (a - a0) / 256
+                local a1 = a % 256; a = (a - a1) / 256
+                local a2 = a % 256; local a3 = (a - a2) / 256
+                local b0 = b % 256; b = (b - b0) / 256
+                local b1 = b % 256; b = (b - b1) / 256
+                local b2 = b % 256; local b3 = (b - b2) / 256
+                return XOR8[a0][b0] + XOR8[a1][b1] * 256 + XOR8[a2][b2] * 65536 + XOR8[a3][b3] * 16777216
+            end
+
+            local function lshift32(a, k)
+                return (math.floor(a % MOD32) * (2 ^ k)) % MOD32
+            end
+
+            local function rshift32(a, k)
+                return math.floor(math.floor(a % MOD32) / (2 ^ k))
+            end
+
+            local function encryptConstXorshiftCfb(rawStr, ss, ksalt, idx)
+                local st = (ss * 16777619 + ksalt * 65599 + idx * 2654435761 + 2463534242) % MOD32
+                if st == 0 then st = 2463534242 end
+                local sChars = {{}}
+                for j = 1, #rawStr do
+                    local b = string.byte(rawStr, j)
+                    st = bxor32(st, lshift32(st, 13))
+                    st = bxor32(st, rshift32(st, 17))
+                    st = bxor32(st, lshift32(st, 5))
+                    local encB = bxor32(b, st) % 256
+                    st = (st * 1664525 + encB + 1013904223) % MOD32
+                    sChars[j] = string.char(encB)
+                end
+                return table.concat(sChars)
             end
 
             local function writeVarint(out, n)
@@ -260,7 +717,7 @@ class PrometheusBridge:
             end
 
             local function serializeProto(proto, layout, out, strSalt, opSalt, ksalt256)
-                out[#out + 1] = string.char(bxor24(proto.vararg and 1 or 0, opSalt % 2))
+                out[#out + 1] = string.char(bxor32(proto.vararg and 1 or 0, opSalt % 2))
                 writeVarint(out, proto.maxRegister or 0)
 
                 local params = proto.params or {{}}
@@ -298,28 +755,12 @@ class PrometheusBridge:
                             out[#out + 1] = string.char(4)
                             local s = string.format("%.17g", c)
                             writeVarint(out, #s)
-                            local sChars = {{}}
-                            local k = (strSalt + i * 97) % 256
-                            for j = 1, #s do
-                                local b = string.byte(s, j)
-                                local encB = (bxor24(b, k) + j * 13 + strSalt) % 256
-                                k = (k * 67 + encB + 19) % 256
-                                sChars[j] = string.char(encB)
-                            end
-                            out[#out + 1] = table.concat(sChars)
+                            out[#out + 1] = encryptConstXorshiftCfb(s, strSalt, ksalt256, i)
                         end
                     elseif t == "string" then
                         out[#out + 1] = string.char(5)
                         writeVarint(out, #c)
-                        local sChars = {{}}
-                        local k = (strSalt + i * 131 + ksalt256) % 256
-                        for j = 1, #c do
-                            local b = string.byte(c, j)
-                            local encB = (bxor24(b, k) + j * 17 + strSalt) % 256
-                            k = (k * 73 + encB + 29) % 256
-                            sChars[j] = string.char(encB)
-                        end
-                        out[#out + 1] = table.concat(sChars)
+                        out[#out + 1] = encryptConstXorshiftCfb(c, strSalt, ksalt256, i)
                     else
                         error("Unsupported constant type: " .. tostring(t))
                     end
@@ -329,7 +770,7 @@ class PrometheusBridge:
                 writeVarint(out, #code)
                 for i = 1, #code do
                     local enc = layout:encode(code[i])
-                    local maskedOp = bxor24(enc[1], (i * 73 + opSalt) % 256)
+                    local maskedOp = bxor32(enc[1], (i * 73 + opSalt) % 256)
                     out[#out + 1] = string.char(maskedOp)
                     local mask = 0
                     local mult = 1
@@ -348,7 +789,7 @@ class PrometheusBridge:
                         mask = mask + st * mult
                         mult = mult * 4
                     end
-                    out[#out + 1] = string.char(bxor24(mask, (i * 29 + strSalt) % 256))
+                    out[#out + 1] = string.char(bxor32(mask, (i * 29 + strSalt) % 256))
                     for slot = 2, 5 do
                         local v = enc[slot]
                         if v ~= nil then
@@ -397,7 +838,7 @@ class PrometheusBridge:
                 math.randomseed(seed)
                 local ast = Parser:new({{ LuaVersion = "LuaU" }}):parse(code, filename)
                 analyzeBindings(ast)
-                local layout = Layout.new()
+                local layout = Layout.new(seed)
                 local proto = Compiler:compile(ast)
                 local totalInsns, totalConsts, totalProtos = countProtoStats(proto)
 
@@ -415,10 +856,10 @@ class PrometheusBridge:
                 rawRt = rawRt:gsub("nativeError%('unknown VM opcode: '%s*%.%.%s*tostring%(opcode%),%s*0%)", "return")
                 rawRt = rawRt:gsub("if x == nil then __UPV_ERR__%([^%)]+%) end", "if x == nil then return end")
                 rawRt = rawRt:gsub("if x == nil then nativeError%([^%)]+%) end", "if x == nil then return end")
-                rawRt = rawRt:gsub('__UPV_SEL__%("#",%s*%.%.%.%)', "__UPV_SEL__(_cmap[35], ...)")
-                rawRt = rawRt:gsub('nativeSelect%("#",%s*%.%.%.%)', "__UPV_SEL__(_cmap[35], ...)")
+                rawRt = rawRt:gsub('__UPV_SEL__%("#",%s*%.%.%.%)', "__UPV_SEL__(_sharp, ...)")
+                rawRt = rawRt:gsub('nativeSelect%("#",%s*%.%.%.%)', "__UPV_SEL__(_sharp, ...)")
                 rawRt = rawRt:gsub("if opcode == (%d+) then", function(n)
-                    return "if opcode == _bxor(_ck, " .. tostring(bxor24(tonumber(n), chainKey256)) .. ") then"
+                    return "if opcode == _bxor(_ck, " .. tostring(bxor32(tonumber(n), chainKey256)) .. ") then"
                 end)
                 rawRt = rawRt:gsub("if opcode <= (%d+) then", function(n)
                     local d = tonumber(n) - chainKey256
@@ -430,17 +871,45 @@ class PrometheusBridge:
                 end)
 
                 local unpackAndRunSrc = string.format([=[
-return function(_blob, _ck, _ksalt, _bxor, _cmap, _byte, _sub, _concat, ...)
+return function(_blob, _ck, _ksalt, _bxor, _band, _lshift, _rshift, ...)
+    local _sharp = __UPV_CHAR__(35)
     local _pos = 1
+    local function _b2s(_arr, _len)
+        if _len <= 0 then
+            return __UPV_CHAR__()
+        elseif _len <= 32 then
+            return __UPV_CHAR__(__UPV_UNPACK__(_arr, 1, _len))
+        end
+        local _parts, _k = {{}}, 0
+        for _i = 1, _len, 32 do
+            local _j = _i + 31
+            if _j > _len then _j = _len end
+            _k = _k + 1
+            _parts[_k] = __UPV_CHAR__(__UPV_UNPACK__(_arr, _i, _j))
+        end
+        while _k > 1 do
+            local _nk = 0
+            for _i = 1, _k, 2 do
+                _nk = _nk + 1
+                if _i + 1 <= _k then
+                    _parts[_nk] = _parts[_i] .. _parts[_i + 1]
+                else
+                    _parts[_nk] = _parts[_i]
+                end
+            end
+            _k = _nk
+        end
+        return _parts[1]
+    end
     local function _rbyte()
-        local _b = _byte(_blob, _pos)
+        local _b = _blob[_pos] or 0
         _pos = _pos + 1
         return _b
     end
     local function _rvar()
         local _r, _m = 0, 1
         while true do
-            local _b = _byte(_blob, _pos)
+            local _b = _blob[_pos] or 0
             _pos = _pos + 1
             if _b < 128 then
                 return _r + _b * _m
@@ -481,39 +950,51 @@ return function(_blob, _ck, _ksalt, _bxor, _cmap, _byte, _sub, _concat, ...)
             elseif _tag == 4 then
                 local _l = _rvar()
                 local _out = {{}}
-                local _k = (_ss + _i * 97) %% 256
+                local _st = (_ss * 16777619 + _ksalt * 65599 + _i * 2654435761 + 2463534242) %% 4294967296
+                if _st == 0 then _st = 2463534242 end
                 for _j = 1, _l do
-                    local _eb = _byte(_blob, _pos + _j - 1)
-                    local _db = _bxor((_eb - _j * 13 - _ss) %% 256, _k)
-                    _k = (_k * 67 + _eb + 19) %% 256
-                    _out[_j] = _cmap[_db]
+                    local _eb = _blob[_pos] or 0
+                    _pos = _pos + 1
+                    _st = _bxor(_st, _lshift(_st, 13))
+                    _st = _bxor(_st, _rshift(_st, 17))
+                    _st = _bxor(_st, _lshift(_st, 5))
+                    _out[_j] = _band(_bxor(_eb, _st), 255)
+                    _st = _band(_st * 1664525 + _eb + 1013904223, 4294967295)
                 end
-                _pos = _pos + _l
-                _cons[_i] = __UPV_TONUM__(_concat(_out))
+                _cons[_i] = __UPV_TONUM__(_b2s(_out, _l))
             else
                 local _l = _rvar()
-                _enc_k[_i] = _sub(_blob, _pos, _pos + _l - 1)
-                _pos = _pos + _l
+                local _eb_arr = {{}}
+                for _j = 1, _l do
+                    _eb_arr[_j] = _blob[_pos] or 0
+                    _pos = _pos + 1
+                end
+                _enc_k[_i] = _eb_arr
             end
         end
         local _ring_k, _ring_v, _ring_pos = {{}}, {{}}, 1
         _p[%d] = function(_idx)
+            local _s0, _k0 = _ss, _ksalt
             local _lit = _cons[_idx]
             if _lit ~= nil then return _lit end
             for _slot = 1, 8 do
-                if _ring_k[_slot] == _idx then return _ring_v[_slot] end
+                if _ring_k[_slot] == _idx and _ring_v[_slot] ~= nil then return _ring_v[_slot] end
             end
             local _raw = _enc_k[_idx]
             if not _raw then return nil end
+            local _len = #_raw
             local _out = {{}}
-            local _k = (_ss + _idx * 131 + _ksalt) %% 256
-            for _j = 1, #_raw do
-                local _eb = _byte(_raw, _j)
-                local _db = _bxor((_eb - _j * 17 - _ss) %% 256, _k)
-                _k = (_k * 73 + _eb + 29) %% 256
-                _out[_j] = _cmap[_db]
+            local _st = (_s0 * 16777619 + _k0 * 65599 + _idx * 2654435761 + 2463534242) %% 4294967296
+            if _st == 0 then _st = 2463534242 end
+            for _j = 1, _len do
+                local _eb = _raw[_j]
+                _st = _bxor(_st, _lshift(_st, 13))
+                _st = _bxor(_st, _rshift(_st, 17))
+                _st = _bxor(_st, _lshift(_st, 5))
+                _out[_j] = _band(_bxor(_eb, _st), 255)
+                _st = _band(_st * 1664525 + _eb + 1013904223, 4294967295)
             end
-            local _val = _concat(_out)
+            local _val = _b2s(_out, _len)
             _ring_k[_ring_pos], _ring_v[_ring_pos] = _idx, _val
             _ring_pos = (_ring_pos %% 8) + 1
             return _val
@@ -611,95 +1092,6 @@ end
         return int(res), 0
 
 
-def lua_escape_bytes(data: bytes) -> str:
-    out: List[str] = []
-    for b in data:
-        if 32 <= b <= 126 and b not in (34, 92):
-            out.append(chr(b))
-        else:
-            out.append(f"\\{b:03d}")
-    return "".join(out)
-
-
-def custom_b64_encode_with_prexor(
-    data: bytes,
-    alpha64: str,
-    pad_char: str,
-    pre_mask: int,
-    pre_step: int,
-) -> str:
-    """
-    Pre-masks `data` with a rolling XOR `(pre_mask + idx * pre_step) & 0xFF`
-    and encodes into a per-file shuffled 64-character Base-Radix string.
-    """
-    masked = bytes(b ^ ((pre_mask + i * pre_step) & 0xFF) for i, b in enumerate(data))
-    out: List[str] = []
-    n = len(masked)
-    for i in range(0, n, 3):
-        rem = n - i
-        if rem >= 3:
-            w = (masked[i] << 16) | (masked[i + 1] << 8) | masked[i + 2]
-            out.append(
-                alpha64[(w >> 18) & 63]
-                + alpha64[(w >> 12) & 63]
-                + alpha64[(w >> 6) & 63]
-                + alpha64[w & 63]
-            )
-        elif rem == 2:
-            w = (masked[i] << 16) | (masked[i + 1] << 8)
-            out.append(
-                alpha64[(w >> 18) & 63]
-                + alpha64[(w >> 12) & 63]
-                + alpha64[(w >> 6) & 63]
-                + pad_char
-            )
-        else:
-            w = masked[i] << 16
-            out.append(
-                alpha64[(w >> 18) & 63]
-                + alpha64[(w >> 12) & 63]
-                + pad_char
-                + pad_char
-            )
-    return "".join(out)
-
-
-def encrypt_pcbc_dual_lcg(
-    plaintext: bytes,
-    sbox: List[int],
-    seed: int,
-    iv: int,
-    lcg_a1: int,
-    lcg_c1: int,
-    lcg_a2: int,
-    lcg_c2: int,
-    lcg_init2: int,
-) -> Tuple[bytes, int]:
-    """
-    Dual-State 24-bit LCG Stream Cipher with Propagating Cipher Block Chaining (PCBC)
-    and per-file Affine Bijective S-box. Also computes the 24-bit FNV-1a checksum over
-    plaintext bytes for cross-block key & state-transition chaining.
-    """
-    s1 = seed % 16777216
-    s2 = (s1 * 65599 + iv * 4099 + lcg_init2) % 16777216
-    lxz = iv % 256
-    pxz = (s1 % 251) + 1
-    out = bytearray(len(plaintext))
-    crc = 2166136261 % 16777216
-    for i, p in enumerate(plaintext):
-        crc = ((crc ^ p) * 16777619) % 16777216
-        s1 = (s1 * lcg_a1 + lcg_c1) % 16777216
-        s2 = (s2 * lcg_a2 + lcg_c2) % 16777216
-        k_add = (((s1 >> 8) & 0xFF) + (s2 & 0xFF)) & 0xFF
-        k_xor = (s1 & 0xFF) ^ ((s2 >> 16) & 0xFF)
-        x = p ^ k_xor ^ pxz
-        c = (sbox[x] + k_add + lxz) & 0xFF
-        out[i] = c
-        lxz = c
-        pxz = p
-    return bytes(out), crc
-
-
 def make_runtime_int(
     val: int,
     rng: random.Random,
@@ -710,14 +1102,13 @@ def make_runtime_int(
     """
     Emits a runtime-state-dependent expression evaluating to `val` using the
     runtime anchor table `v_anchor[1..16]`.
-    Never emits `(const1 - const2)` or `(const1 + const2)` where both operands are constants,
-    and avoids emitting any forbidden magic probe constant in the mask/diff literal.
+    Never emits static `(const1 + const2)` arithmetic or forbidden magic constants.
     """
     for _ in range(32):
         idx = rng.randint(1, len(anchor_vals))
         ak = anchor_vals[idx - 1]
         mode = rng.randint(0, 2)
-        if mode == 0 and 0 <= val < 16777216:
+        if mode == 0 and 0 <= val <= 0xFFFFFFFF:
             mask = val ^ ak
             if mask not in FORBIDDEN_MAGIC_NUMS:
                 return f"{v_bxor}({v_anchor}[{idx}],{mask})"
@@ -742,6 +1133,8 @@ def generate_identifiers(count: int, rng: random.Random) -> List[str]:
         "and", "break", "do", "else", "elseif", "end", "false", "for",
         "function", "if", "in", "local", "nil", "not", "or", "repeat",
         "return", "then", "true", "until", "while", "continue",
+        "yip", "seen", "acc", "idx", "tsig", "dup", "mix", "wref",
+        "xpen", "scur", "dlen", "pos", "ins", "crc",
     }
     used = set(reserved)
     names: List[str] = []
@@ -754,78 +1147,108 @@ def generate_identifiers(count: int, rng: random.Random) -> List[str]:
     return names
 
 
+def _slice_base85_random_segments(b85_text: str, rng: random.Random) -> List[str]:
+    """
+    Slices the ALREADY-ENCRYPTED, ALREADY-BASE85-ENCODED unified stream into 5..8
+    random-length segments (each >= 68 chars) so no segment ever has individual padding tails.
+    """
+    total = len(b85_text)
+    max_slices = min(8, max(4, total // 80))
+    min_slices = min(5, max_slices)
+    num_slices = rng.randint(min_slices, max_slices)
+    min_seg = 68
+    if total < num_slices * min_seg:
+        num_slices = max(1, total // min_seg)
+    if num_slices <= 1:
+        return [b85_text]
+
+    slack = total - num_slices * min_seg
+    weights = [rng.randint(10, 100) for _ in range(num_slices)]
+    w_sum = sum(weights)
+    extras = [slack * w // w_sum for w in weights]
+    rem = slack - sum(extras)
+    for i in range(rem):
+        extras[i % num_slices] += 1
+
+    slices: List[str] = []
+    pos = 0
+    for i in range(num_slices):
+        seg_len = min_seg + extras[i]
+        slices.append(b85_text[pos : pos + seg_len])
+        pos += seg_len
+    return slices
+
+
 def compile_polymorphic_vm(
     clean_source: str,
     rel_path: str,
     bridge: PrometheusBridge,
     file_seed: Optional[int] = None,
+    target: str = "luau",
 ) -> str:
     """
-    Compiles a Luau source file into v5.0 Dual-VM:
-    Layer 1 (Stage-2 Inner VM): Prometheus `Vmify` Custom Register Bytecode VM + Sealed Lexical Upvalues
-                                + Metatable-Free 8-Slot Ring-Buffered Salted Constant Getter `K(idx)`
-    Layer 2 (Stage-1 Outer VM): 24-Bit Sponge Dual-LCG PCBC VM with Behavioral Metamethod Trap,
-                                3-Way Cross-Runtime Algebraic C-Closure & Lua-Canary Probes,
-                                Pointer Uniqueness (`seen[fn]`), & Direct Seed Generation
+    Compiles a Luau source file into v6.0 Dual-VM (`--target=luau` default or `--target=lua51`):
+      - Single Unified Binary Stream (4-byte original length header + Stage-1 VM bytecode + Stage-2
+        serialized Vmify prototype stream) encrypted in one pass via Xorshift32 + CFB.
+      - Per-build shuffled 85-char printable ASCII Base85 encoding with zero padding tails,
+        sliced into random-length segments only after Base85 encoding.
+      - Shuffled Outer IIFE parameters + dummy arguments + immediate CFF `while st ~= 0 do` loop.
+      - `debug.info` / pointer-uniqueness / `coroutine.isyieldable` / behavioral metamethod sponge
+        that silently poisons the 32-bit Xorshift32+CFB seed on tampering, with zero `table.concat`.
     """
-    digest = hashlib.sha256((rel_path + "::v5::" + clean_source).encode("utf-8")).digest()
+    if target not in ("luau", "lua51"):
+        raise ValueError(f"Unsupported target: {target!r}")
+
+    digest = hashlib.sha256((rel_path + f"::v6::{target}::" + clean_source).encode("utf-8")).digest()
     if file_seed is None:
-        file_seed = int.from_bytes(digest[:4], "big") ^ 0x5F3A9C7D
+        file_seed = int.from_bytes(digest[:4], "big") ^ 0x6A09E667
     rng = random.Random(file_seed)
 
-    # 24-Bit Sponge bootstrap parameters (16 anchor slots seeded directly from `acc = compute_untampered_seed(build_salt, 15)`)
-    build_salt = rng.randint(100000, 16000000)
+    is_luau = target == "luau"
+    num_sponge_funcs = 20 if is_luau else 14
+
+    build_salt = rng.randint(100000, 0x7EFFFFFF)
     while build_salt in FORBIDDEN_MAGIC_NUMS:
-        build_salt = rng.randint(100000, 16000000)
+        build_salt = rng.randint(100000, 0x7EFFFFFF)
+
+    untampered_seed32 = compute_untampered_seed(build_salt, num_sponge_funcs)
+
     boot_lcg_a = rng.randint(25000, 95000) * 4 + 1
     boot_lcg_c = rng.randint(300000, 6000000) * 2 + 1
-
     anchor_vals: List[int] = []
-    s_cur = compute_untampered_seed(build_salt, 15)
+    s_cur = untampered_seed32 % 16777216
     for i in range(1, 17):
         s_cur = (s_cur * boot_lcg_a + boot_lcg_c + i * 4099) % 16777216
         anchor_vals.append(s_cur)
 
-    # Encrypt the 13 probe symbol names so their names never appear in plaintext in the output file
+    # Encode PROBE_SYMBOLS as an encrypted numeric byte array (zero string literals leaked)
     raw_probe_bytes = ("\0".join(PROBE_SYMBOLS) + "\0").encode("utf-8")
     probe_xor = rng.randint(17, 251)
     probe_step = rng.randint(3, 125) * 2 + 1
-    enc_probe_bytes = bytes(
+    enc_probe_nums = [
         ((b ^ probe_xor) + (i + 1) * probe_step) & 0xFF
         for i, b in enumerate(raw_probe_bytes)
-    )
-    enc_probe_literal = lua_escape_bytes(enc_probe_bytes)
+    ]
 
-    # Stage-1 Affine S-Box and Dual-LCG parameters
-    odd_multipliers = [m for m in range(3, 255, 2) if m not in (1, 127, 129, 255)]
-    s_mul = rng.choice(odd_multipliers)
-    s_add = rng.randint(1, 255)
-    sbox = [((x * s_mul) + s_add) & 0xFF for x in range(256)]
-    inv_mul = pow(s_mul, -1, 256)
-
-    lcg_a1 = rng.randint(35000, 115000) * 4 + 1
-    lcg_c1 = rng.randint(400000, 7500000) * 2 + 1
-    lcg_a2 = rng.randint(35000, 115000) * 4 + 1
-    lcg_c2 = rng.randint(400000, 7500000) * 2 + 1
-    lcg_init2 = rng.randint(100000, 15000000)
-
-    b64_list = list(SAFE_B64_POOL)
-    rng.shuffle(b64_list)
-    alpha64 = "".join(b64_list[:64])
-    pad_char = b64_list[64]
-    full_alpha65 = (alpha64 + pad_char).encode("utf-8")
+    # Sample & shuffle 85 safe printable ASCII characters for padding-free Base85
+    alpha85_list = rng.sample(list(BASE85_SAFE_ASCII_POOL), 85)
+    rng.shuffle(alpha85_list)
+    alpha85 = "".join(alpha85_list)
     alpha_mul = rng.randint(3, 251)
     alpha_add = rng.randint(7, 249)
-    enc_alpha65 = bytes((b + (i + 1) * alpha_mul + alpha_add) & 0xFF for i, b in enumerate(full_alpha65))
+    enc_alpha_nums = [
+        (ord(ch) + (i + 1) * alpha_mul + alpha_add) & 0xFF
+        for i, ch in enumerate(alpha85)
+    ]
 
-    # Layer 1 (Stage-2 Inner VM): Compile Luau AST into Vmify custom bytecode & encrypted binary prototype stream
+    # Compile Stage-2 Inner Vmify Custom Bytecode + Polymorphic Layout
     s2_seed = (file_seed & 0x7FFFFFFF) or 1337
     init_chain_key256 = anchor_vals[0] % 256
     init_ksalt256 = (anchor_vals[2] + rng.randint(17, 239)) % 256
     base_str_salt = rng.randint(17, 239)
     base_op_salt = rng.randint(19, 241)
 
-    payload_bytes, minified_rt, _, _, _ = bridge.compile_stage2_vmify(
+    stage2_blob, minified_rt, _, _, _ = bridge.compile_stage2_vmify(
         clean_source,
         rel_path,
         s2_seed,
@@ -835,277 +1258,188 @@ def compile_polymorphic_vm(
         base_op_salt,
     )
 
-    # Layer 2 (Stage-1 Outer VM): Split binary Vmify bytecode into 5..8 Dual-LCG PCBC blocks
-    num_blocks = rng.randint(5, 8) if len(payload_bytes) >= 256 else 3
-    chunk_size = max(1, (len(payload_bytes) + num_blocks - 1) // num_blocks)
-    raw_blocks: List[bytes] = []
-    for idx in range(0, len(payload_bytes), chunk_size):
-        raw_blocks.append(payload_bytes[idx : idx + chunk_size])
-    num_blocks = len(raw_blocks)
-
-    k_entries: List[Dict[str, object]] = [
-        {
-            "kind": "alpha",
-            "id": 0,
-            "b64": lua_escape_bytes(enc_alpha65),
-            "seed": 0,
-            "iv": 0,
-            "crc": 0,
-            "pre_mask": 0,
-            "pre_step": 0,
-        },
-        {
-            "kind": "probe",
-            "id": 0,
-            "b64": enc_probe_literal,
-            "seed": 0,
-            "iv": 0,
-            "crc": 0,
-            "pre_mask": 0,
-            "pre_step": 0,
-        },
-    ]
-
-    for blk_idx, blk in enumerate(raw_blocks):
-        seed_val = rng.randint(50000, 16000000)
-        iv_val = rng.randint(1, 254)
-        pre_mask = rng.randint(1, 254)
-        pre_step = rng.randint(1, 125) * 2 + 1
-        enc_bytes, crc_val = encrypt_pcbc_dual_lcg(
-            blk,
-            sbox,
-            seed_val,
-            iv_val,
-            lcg_a1,
-            lcg_c1,
-            lcg_a2,
-            lcg_c2,
-            lcg_init2,
-        )
-        b64_str = custom_b64_encode_with_prexor(enc_bytes, alpha64, pad_char, pre_mask, pre_step)
-        k_entries.append({
-            "kind": "blk",
-            "id": blk_idx,
-            "b64": b64_str,
-            "seed": seed_val,
-            "iv": iv_val,
-            "crc": crc_val,
-            "pre_mask": pre_mask,
-            "pre_step": pre_step,
-        })
-
-    for dec_id in range(rng.randint(1, 3)):
-        dec_bytes = bytes(rng.randint(0, 255) for _ in range(rng.randint(16, 40)))
-        k_entries.append({
-            "kind": "decoy",
-            "id": dec_id,
-            "b64": custom_b64_encode_with_prexor(dec_bytes, alpha64, pad_char, rng.randint(1, 254), 17),
-            "seed": 0,
-            "iv": 0,
-            "crc": 0,
-            "pre_mask": 0,
-            "pre_step": 0,
-        })
-
-    rng.shuffle(k_entries)
-    k_alpha_idx = 0
-    k_probe_idx = 0
-    blk_k_index: Dict[int, Tuple[int, int, int, int, int, int]] = {}
-    for k_pos, entry in enumerate(k_entries, start=1):
-        if entry["kind"] == "alpha":
-            k_alpha_idx = k_pos
-        elif entry["kind"] == "probe":
-            k_probe_idx = k_pos
-        elif entry["kind"] == "blk":
-            blk_k_index[int(entry["id"])] = (
-                k_pos,
-                int(entry["seed"]),
-                int(entry["iv"]),
-                int(entry["crc"]),
-                int(entry["pre_mask"]),
-                int(entry["pre_step"]),
-            )
-
-    opcode_names = [
-        "OP_SBOX",
-        "OP_ALPHA",
-        "OP_LOADK",
-        "OP_XOR_DEC",
-        "OP_CONCAT",
-        "OP_CRC",
+    # Build Stage-1 Polymorphic VM Instructions (per-build randomized opcodes & operand slot permutation)
+    s1_op_names = [
+        "OP_INIT",
         "OP_MBA",
         "OP_MIX",
+        "OP_SLICE_CRC",
+        "OP_EXTRACT",
         "OP_EXEC",
         "OP_RET",
     ]
-    opcode_pool = rng.sample(range(13, 245), len(opcode_names))
-    op_ids: Dict[str, int] = dict(zip(opcode_names, opcode_pool))
+    s1_op_pool = rng.sample(range(13, 245), len(s1_op_names))
+    s1_op_ids: Dict[str, int] = dict(zip(s1_op_names, s1_op_pool))
 
-    # 4 live states (st_init, st_fetch, st_dispatch, st_step) + 1 loop exit state (st_exit)
-    st_init, st_fetch, st_dispatch, st_step, st_exit = rng.sample(range(105, 945), 5)
+    s1_tuple_width = 6
+    s1_slots = list(range(1, s1_tuple_width + 1))
+    rng.shuffle(s1_slots)
+    slot_op, slot_a, slot_b, slot_c, slot_d, slot_guard = s1_slots
 
-    # 7-tuple instruction layout with dynamic CRC-chained opcode guard and dynamic CRC-chained next-state slot
-    tuple_width = 7
-    all_slots = list(range(1, tuple_width + 1))
-    rng.shuffle(all_slots)
-    slot_op, slot_a, slot_b, slot_c, slot_d, slot_guard, slot_next = all_slots
+    drawn_regs = rng.sample(range(15, 420), 8)
+    reg_chain_crc, reg_mba, reg_mix, reg_s2_arr, reg_exec_res, reg_d1, reg_d2, reg_d3 = drawn_regs
 
-    blk_dec_base = rng.randint(140, 310)
-    reserved_blk_regs = set(range(blk_dec_base, blk_dec_base + num_blocks))
-    candidate_regs = [r for r in range(15, 485) if r not in reserved_blk_regs]
-    drawn_regs = rng.sample(candidate_regs, 10 + num_blocks)
-    reg_iter = iter(drawn_regs)
+    # Partition `stage2_blob` into 4..6 ranges for Stage-1 rolling FNV-1a verification
+    s2_len = len(stage2_blob)
+    num_crc_ranges = rng.randint(4, 6) if s2_len >= 64 else 2
+    range_bounds: List[Tuple[int, int]] = []
+    step_sz = max(1, (s2_len + num_crc_ranges - 1) // num_crc_ranges)
+    for r_start in range(0, s2_len, step_sz):
+        r_end = min(s2_len, r_start + step_sz)
+        range_bounds.append((r_start, r_end))
 
-    reg_sbox = next(reg_iter)
-    reg_alpha = next(reg_iter)
-    reg_chain_crc = next(reg_iter)
-    reg_mba = next(reg_iter)
-    reg_mix = next(reg_iter)
-    reg_full_source = next(reg_iter)
-    reg_exec_res = next(reg_iter)
-    reg_decoy_init = next(reg_iter)
+    def fnv1a_24(segment: bytes) -> int:
+        crc = 2166136261 % 16777216
+        for b in segment:
+            crc = ((crc ^ b) * 16777619) % 16777216
+        return crc
 
-    reg_blk_enc = [next(reg_iter) for _ in range(num_blocks)]
-    reg_blk_dec = [blk_dec_base + i for i in range(num_blocks)]
-
-    insns: List[List[int]] = []
     chain_init = anchor_vals[1]
+    running_chain_crc = chain_init
 
-    def encode_insn(
-        op_name: str,
-        a: int,
-        b: int,
-        c: int,
-        d: int,
-        pre_crc: int,
-        post_crc: int,
-    ) -> List[int]:
-        arr = [0] * tuple_width
+    # Pre-plan instruction sequence so we know exact `num_s1_insns` and `s2_start_offset` in `plain_bytes`!
+    range_order = list(range(len(range_bounds)))
+    rng.shuffle(range_order)
+
+    # Count exact Stage-1 instructions:
+    # 1 (OP_INIT) + 1 (OP_MIX) + len(range_order) * 2 (OP_MBA + OP_SLICE_CRC) + (len(range_order)+1)//2 (OP_MIX) + 3 (OP_EXTRACT, OP_EXEC, OP_RET)
+    planned_s1_count = 2 + len(range_order) * 2 + ((len(range_order) + 1) // 2) + 3
+
+    # Layout inside `plain_bytes` (1-indexed in Lua):
+    #   plain_bytes[1..4]   : 4-byte LE `orig_len = len(inner_bytes)`
+    #   plain_bytes[5..6]   : 2-byte LE `num_s1_insns`
+    #   plain_bytes[7 .. 6 + num_s1_insns*24] : `num_s1_insns` * 6 * uint32_le
+    #   next 4 bytes        : 4-byte LE `s2_len`
+    #   next `s2_len` bytes : `stage2_blob` (1-based start in `plain_bytes` is `s2_lua_start = 4 + 2 + num_s1_insns*24 + 4 + 1`)
+    #   next 2 + decoy_len  : 2-byte LE `decoy_len` + random decoy tail bytes (ensures unified Base85 >= 680 chars)
+    s2_lua_start = 11 + planned_s1_count * 24
+
+    s1_insns: List[List[int]] = []
+
+    def encode_s1(op_name: str, a: int, b: int, c: int, d: int, pre_crc: int) -> List[int]:
+        arr = [0] * s1_tuple_width
         guard_val = rng.randint(300, 65000)
         while guard_val in FORBIDDEN_MAGIC_NUMS:
             guard_val = rng.randint(300, 65000)
         arr[slot_guard - 1] = guard_val
-        arr[slot_op - 1] = op_ids[op_name] ^ ((guard_val + (pre_crc % 256)) & 0xFF)
-        arr[slot_a - 1] = a
-        arr[slot_b - 1] = b
-        arr[slot_c - 1] = c
-        arr[slot_d - 1] = d
-        arr[slot_next - 1] = st_step ^ (post_crc & 0xFF)
+        arr[slot_op - 1] = s1_op_ids[op_name] ^ ((guard_val + (pre_crc % 256)) & 0xFF)
+        arr[slot_a - 1] = a & 0xFFFFFFFF
+        arr[slot_b - 1] = b & 0xFFFFFFFF
+        arr[slot_c - 1] = c & 0xFFFFFFFF
+        arr[slot_d - 1] = d & 0xFFFFFFFF
         return arr
 
-    running_chain_crc = chain_init
-    insns.append(encode_insn("OP_SBOX", reg_sbox, inv_mul, s_add, chain_init, running_chain_crc, running_chain_crc))
-    insns.append(encode_insn("OP_ALPHA", reg_alpha, k_alpha_idx, alpha_mul, alpha_add, running_chain_crc, running_chain_crc))
-    insns.append(encode_insn("OP_MIX", reg_mix, rng.randint(50, 9999), rng.randint(50, 9999), rng.randint(1, 255), running_chain_crc, running_chain_crc))
+    s1_insns.append(encode_s1("OP_INIT", reg_chain_crc, chain_init, reg_d1, rng.randint(50, 9999), 0))
+    s1_insns.append(encode_s1("OP_MIX", reg_mix, rng.randint(50, 9999), rng.randint(50, 9999), rng.randint(1, 255), running_chain_crc))
 
-    blk_order = list(range(num_blocks))
-    rng.shuffle(blk_order)
-    for step_idx, blk_id in enumerate(blk_order):
-        k_idx, seed_val, iv_val, crc_val, pre_mask, pre_step = blk_k_index[blk_id]
-        r_enc = reg_blk_enc[blk_id]
-        r_plain = reg_blk_dec[blk_id]
+    for step_idx, r_idx in enumerate(range_order):
+        r_start, r_end = range_bounds[r_idx]
+        seg_crc = fnv1a_24(stage2_blob[r_start:r_end])
+        lua_lo = s2_lua_start + r_start
+        lua_hi = s2_lua_start + r_end - 1
         m1 = rng.randint(20000, 16000000)
         m2 = rng.randint(20000, 16000000)
-        m3 = seed_val ^ running_chain_crc ^ m1 ^ m2
         chain_salt = rng.randint(1000, 900000)
+        m3 = chain_salt ^ running_chain_crc ^ m1 ^ m2
         crc_delta = rng.randint(1000, 500000)
-        next_crc = ((running_chain_crc * 65599 + chain_salt) % 16777216) ^ ((crc_val + crc_delta) % 16777216)
+        next_crc = ((running_chain_crc * 65599 + chain_salt) % 16777216) ^ ((seg_crc + crc_delta) % 16777216)
 
-        insns.append(encode_insn("OP_LOADK", r_enc, k_idx, pre_mask, pre_step, running_chain_crc, running_chain_crc))
-        insns.append(encode_insn("OP_MBA", reg_mba, m1, m2, m3, running_chain_crc, running_chain_crc))
-        insns.append(encode_insn("OP_XOR_DEC", r_plain, r_enc, reg_mba, iv_val, running_chain_crc, running_chain_crc))
-        insns.append(encode_insn("OP_CRC", r_plain, crc_delta, chain_salt, blk_id + 100, running_chain_crc, next_crc))
+        s1_insns.append(encode_s1("OP_MBA", reg_mba, m1, m2, m3, running_chain_crc))
+        s1_insns.append(encode_s1("OP_SLICE_CRC", lua_lo, lua_hi, crc_delta, reg_mba, running_chain_crc))
         running_chain_crc = next_crc
         if step_idx % 2 == 0:
-            insns.append(encode_insn("OP_MIX", reg_mix, rng.randint(100, 9999), rng.randint(100, 9999), blk_id, running_chain_crc, running_chain_crc))
+            s1_insns.append(encode_s1("OP_MIX", reg_mix, rng.randint(100, 9999), rng.randint(100, 9999), r_idx + 1, running_chain_crc))
 
     final_chain_crc = running_chain_crc
     ck_offset = (init_chain_key256 - (final_chain_crc % 256)) % 256
     ksalt_offset = (init_ksalt256 - (final_chain_crc % 256)) % 256
 
-    insns.append(encode_insn("OP_CONCAT", reg_full_source, blk_dec_base, blk_dec_base + num_blocks - 1, 0, final_chain_crc, final_chain_crc))
-    insns.append(encode_insn("OP_EXEC", reg_exec_res, reg_full_source, ck_offset, ksalt_offset, final_chain_crc, final_chain_crc))
-    insns.append(encode_insn("OP_RET", reg_exec_res, 0, 0, 0, final_chain_crc, final_chain_crc))
+    s1_insns.append(encode_s1("OP_EXTRACT", reg_s2_arr, s2_lua_start, s2_len, 0, final_chain_crc))
+    s1_insns.append(encode_s1("OP_EXEC", reg_exec_res, reg_s2_arr, ck_offset, ksalt_offset, final_chain_crc))
+    s1_insns.append(encode_s1("OP_RET", reg_exec_res, 0, 0, 0, final_chain_crc))
 
-    (
-        v_type,
-        v_pcall,
-        v_tonum,
-        v_sel,
-        v_err,
-        v_smt,
-        v_gmt,
-        v_rset,
-        v_rget,
-        v_mflr,
-        v_getfenv,
-        v_setfenv,
-        v_env,
-        v_args,
-        v_argc,
-        v_reg,
-        v_konst,
-        v_code,
-        v_anchor,
-        v_pc,
-        v_state,
-        v_str,
-        v_char,
-        v_byte,
-        v_sub,
-        v_concat,
-        v_unpack,
-        v_bxor,
-        v_band,
-        v_cmap,
-        v_insn,
-        v_op,
-        v_a,
-        v_b,
-        v_c,
-        v_d,
-        v_t1,
-        v_t2,
-        v_t3,
-        v_t4,
-        v_t5,
-        v_t6,
-        v_t7,
-        v_t8,
-        v_vm_fn,
-        v_i,
-        v_j,
-        v_r,
-        v_p,
-        v_n,
-        v_sp_hits,
-        v_sp_tbl,
-        v_sp_behav,
-        v_sp_can,
-        v_sp_okdc,
-        v_sp_dcan,
-        v_sp_fndump,
-        v_sp_fninfo,
-        v_sp_fngeti,
-        v_sp_eb,
-        v_sp_w1,
-        v_sp_r0,
-        v_sp_fnls,
-        v_sp_wprobe,
-        v_sp_canval,
-        v_sp_yip,
-        v_sp_acc,
-        v_sp_seen,
-        v_sp_fn,
-        v_sp_tn,
-        v_sp_tsig,
-        v_sp_dup,
-        v_sp_wp,
-        v_sp_ex,
-        v_sp_mix,
-    ) = generate_identifiers(75, rng)
+    assert len(s1_insns) == planned_s1_count
 
-    # Bind the 7 inner Stage-2 runtime upvalue placeholders to the verified outer Stage-1 local variables
+    # Pack ONE unified binary stream BEFORE encrypting!
+    inner_buf = bytearray()
+    inner_buf.extend(struct.pack("<H", len(s1_insns)))
+    for ins in s1_insns:
+        inner_buf.extend(struct.pack("<6I", *ins))
+    inner_buf.extend(struct.pack("<I", s2_len))
+    inner_buf.extend(stage2_blob)
+
+    min_inner_target = 560
+    if len(inner_buf) + 2 < min_inner_target:
+        decoy_len = (min_inner_target - len(inner_buf)) + rng.randint(16, 64)
+    else:
+        decoy_len = rng.randint(16, 48)
+    inner_buf.extend(struct.pack("<H", decoy_len))
+    inner_buf.extend(bytes(rng.randint(0, 255) for _ in range(decoy_len)))
+
+    unified_plaintext = struct.pack("<I", len(inner_buf)) + bytes(inner_buf)
+    unified_ciphertext = encrypt_xorshift32_cfb(unified_plaintext, untampered_seed32)
+    unified_b85 = base85_encode(unified_ciphertext, alpha85)
+    b85_slices = _slice_base85_random_segments(unified_b85, rng)
+
+    # Permute slice storage order in Lua table so slices aren't even stored sequentially
+    slice_perm = list(range(len(b85_slices)))
+    rng.shuffle(slice_perm)
+    stored_slices = [b85_slices[p] for p in slice_perm]
+    slice_read_order = [slice_perm.index(i) + 1 for i in range(len(b85_slices))]
+
+    # Generate randomized identifiers (strictly keeping outer scope local count < 35!)
+    ids = generate_identifiers(85, rng)
+    id_it = iter(ids)
+
+    v_bxor = next(id_it)
+    v_band = next(id_it)
+    v_lshift = next(id_it)
+    v_rshift = next(id_it)
+    v_byte = next(id_it)
+    v_char = next(id_it)
+    v_sub = next(id_it)
+    v_pcall = next(id_it)
+    v_type = next(id_it)
+    v_tonum = next(id_it)
+    v_sel = next(id_it)
+    v_unpack = next(id_it)
+    v_dbginfo = next(id_it)
+    v_isyield = next(id_it)
+    v_mflr = next(id_it)
+    v_err = next(id_it)
+    v_smt = next(id_it)
+    v_gmt = next(id_it)
+    v_rset = next(id_it)
+    v_rget = next(id_it)
+    v_getfenv = next(id_it)
+    v_setfenv = next(id_it)
+    v_str_lib = next(id_it)
+    v_tbl_lib = next(id_it)
+    v_args = next(id_it)
+    v_dum1 = next(id_it)
+    v_dum2 = next(id_it)
+    v_dum3 = next(id_it)
+
+    # Outer function locals (ONLY 3 locals declared at top of outer IIFE!)
+    v_st = next(id_it)
+    v_ctx = next(id_it)
+    v_anchor = next(id_it)
+
+    # Short-lived branch-scoped locals (reused cleanly inside child blocks so scope stays tiny!)
+    b_t1 = next(id_it)
+    b_t2 = next(id_it)
+    b_t3 = next(id_it)
+    b_t4 = next(id_it)
+    b_t5 = next(id_it)
+    b_t6 = next(id_it)
+    b_t7 = next(id_it)
+    b_t8 = next(id_it)
+    b_i = next(id_it)
+    b_j = next(id_it)
+    b_k = next(id_it)
+    b_r = next(id_it)
+
+    # Bind Stage-2 inner lexical upvalue placeholders directly to verified outer IIFE parameters!
     upv_map = {
         "__UPV_TONUM__": v_tonum,
         "__UPV_SEL__": v_sel,
@@ -1114,6 +1448,7 @@ def compile_polymorphic_vm(
         "__UPV_UNPACK__": v_unpack,
         "__UPV_GETFENV__": v_getfenv,
         "__UPV_SETFENV__": v_setfenv,
+        "__UPV_CHAR__": v_char,
     }
     for placeholder, outer_var in upv_map.items():
         minified_rt = minified_rt.replace(placeholder, outer_var)
@@ -1121,244 +1456,378 @@ def compile_polymorphic_vm(
     def rint(val: int) -> str:
         return make_runtime_int(val, rng, v_anchor, anchor_vals, v_bxor)
 
+    # Randomized integer field keys in `v_ctx`
+    ctx_keys = rng.sample([k for k in range(11, 990) if k not in FORBIDDEN_MAGIC_NUMS], 9)
+    k_seed, k_plain, k_plen, k_s1code, k_reg, k_pc, k_vmfn, k_argc, k_insn = ctx_keys
+
     cnt_key = rng.randint(1024, 999999)
     while cnt_key in FORBIDDEN_MAGIC_NUMS:
         cnt_key = rng.randint(1024, 999999)
 
-    k_literals = ['"' + str(entry["b64"]) + '"' for entry in k_entries]
-    k_table_str = "{" + ",".join(k_literals) + "}"
+    # Choose 6 distinct randomized hex CFF states (`0x1001 .. 0xFFFE`)
+    cff_pool = [s for s in rng.sample(range(0x1021, 0xFEEE), 12) if s not in FORBIDDEN_MAGIC_NUMS]
+    cff_probe, cff_b85_cfb, cff_unpack_s1, cff_s1_fetch, cff_s1_disp, cff_decoy = cff_pool[:6]
 
-    i_literals: List[str] = []
-    for ins in insns:
-        elems = [
-            rint(val) if (rng.random() < 0.45 or val in FORBIDDEN_MAGIC_NUMS) else str(val)
-            for val in ins
+    # Build shuffled outer IIFE parameter & call-argument pairs + 2..3 randomized dummy args
+    if is_luau:
+        iife_pairs: List[Tuple[str, str]] = [
+            (v_bxor, "bit32.bxor"),
+            (v_band, "bit32.band"),
+            (v_lshift, "bit32.lshift"),
+            (v_rshift, "bit32.rshift"),
+            (v_byte, "string.byte"),
+            (v_char, "string.char"),
+            (v_sub, "string.sub"),
+            (v_pcall, "pcall"),
+            (v_type, "type"),
+            (v_tonum, "tonumber"),
+            (v_sel, "select"),
+            (v_unpack, "unpack or table.unpack"),
+            (v_dbginfo, "debug and debug.info"),
+            (v_isyield, "coroutine and coroutine.isyieldable"),
+            (v_mflr, "math.floor"),
+            (v_err, "error"),
+            (v_smt, "setmetatable"),
+            (v_gmt, "getmetatable"),
+            (v_rset, "rawset"),
+            (v_rget, "rawget"),
+            (v_getfenv, "getfenv"),
+            (v_setfenv, "setfenv"),
+            (v_str_lib, "string"),
+            (v_tbl_lib, "table"),
+            (v_args, "{...}"),
         ]
-        i_literals.append("{" + ",".join(elems) + "}")
-    i_table_str = "{" + ",".join(i_literals) + "}"
+    else:
+        iife_pairs = [
+            (v_bxor, "bit32 and bit32.bxor"),
+            (v_band, "bit32 and bit32.band"),
+            (v_lshift, "bit32 and bit32.lshift"),
+            (v_rshift, "bit32 and bit32.rshift"),
+            (v_byte, "string.byte"),
+            (v_char, "string.char"),
+            (v_sub, "string.sub"),
+            (v_pcall, "pcall"),
+            (v_type, "type"),
+            (v_tonum, "tonumber"),
+            (v_sel, "select"),
+            (v_unpack, "unpack or table.unpack"),
+            (v_dbginfo, "debug and debug.info"),
+            (v_isyield, "coroutine and coroutine.isyieldable"),
+            (v_mflr, "math and math.floor"),
+            (v_err, "error"),
+            (v_smt, "setmetatable"),
+            (v_gmt, "getmetatable"),
+            (v_rset, "rawset"),
+            (v_rget, "rawget"),
+            (v_getfenv, "getfenv"),
+            (v_setfenv, "setfenv"),
+            (v_str_lib, "string"),
+            (v_tbl_lib, "table"),
+            (v_args, "{...}"),
+        ]
 
-    decoy_reg_pairs = [
-        f"[{rint(reg_decoy_init)}]={rint(rng.randint(10, 9999))}",
-        f"[{rint(reg_chain_crc)}]={rint(chain_init)}",
+    dummy_candidates = [
+        "math.ldexp",
+        "math.frexp",
+        "math.abs",
+        "math.ceil",
+        "coroutine and coroutine.running",
+        str(rng.randint(13, 991)),
+        str(rng.randint(1025, 8191)),
     ]
-    reg_init_str = "{" + ",".join(decoy_reg_pairs) + "}"
+    rng.shuffle(dummy_candidates)
+    num_dummies = rng.randint(2, 3)
+    dummy_vars = [v_dum1, v_dum2, v_dum3][:num_dummies]
+    for dv, d_expr in zip(dummy_vars, dummy_candidates[:num_dummies]):
+        iife_pairs.append((dv, d_expr))
 
-    # Pre-declare `v_konst` before `anti_hook_bootstrap` so the encrypted probe blob is fetched from `v_konst[k_probe_idx]`
-    # and then declare `v_reg`, `v_code`, `v_vm_fn` in randomized order after `v_anchor` is populated!
-    table_decl_stmts = [
-        f"local {v_reg}={reg_init_str};",
-        f"local {v_code}={i_table_str};",
-        f"local {v_vm_fn}={minified_rt};",
-    ]
-    rng.shuffle(table_decl_stmts)
-    randomized_table_decls = "".join(table_decl_stmts)
+    rng.shuffle(iife_pairs)
+    iife_params_str = ",".join(p for p, _ in iife_pairs)
+    iife_args_str = ",".join(a for _, a in iife_pairs)
 
-    handlers: Dict[int, str] = {
-        op_ids["OP_SBOX"]: (
-            f"{v_t1}={{}};for {v_i}=0,255 do {v_t1}[{v_i}]=({v_i}*{v_b}-{v_c}*{v_b})%256 end;"
-            f"{v_reg}[{v_a}]={v_t1};{v_reg}[{rint(reg_chain_crc)}]={v_d}"
+    # Optional Lua 5.1 bitwise fallback ONLY when `--target=lua51` (100% absent on `--target=luau`!)
+    lua51_fallback_stmt = ""
+    if not is_luau:
+        lua51_fallback_stmt = (
+            f"if not {v_bxor} then "
+            f"local {b_t1}={{}};"
+            f"for {b_i}=0,255 do local {b_t2}={{}};{b_t1}[{b_i}]={b_t2};"
+            f"for {b_j}=0,255 do local {b_r},{b_k},{b_t3},{b_t4}=0,1,{b_i},{b_j};"
+            f"while {b_t3}>0 or {b_t4}>0 do local {b_t5},{b_t6}={b_t3}%2,{b_t4}%2;"
+            f"if {b_t5}~={b_t6} then {b_r}={b_r}+{b_k} end;"
+            f"{b_t3}=({b_t3}-{b_t5})/2;{b_t4}=({b_t4}-{b_t6})/2;{b_k}={b_k}*2 end;"
+            f"{b_t2}[{b_j}]={b_r} end end;"
+            f"{v_bxor}=function({b_i},{b_j})"
+            f"{b_i}={v_mflr}({b_i}%4294967296);{b_j}={v_mflr}({b_j}%4294967296);"
+            f"local {b_r},{b_k}=0,1;"
+            f"while {b_i}>0 or {b_j}>0 do local {b_t3},{b_t4}={b_i}%256,{b_j}%256;"
+            f"{b_r}={b_r}+{b_t1}[{b_t3}][{b_t4}]*{b_k};"
+            f"{b_i}=({b_i}-{b_t3})/256;{b_j}=({b_j}-{b_t4})/256;{b_k}={b_k}*256 end;"
+            f"return {b_r} end;"
+            f"{v_band}=function({b_i},{b_j})"
+            f"{b_i}={v_mflr}({b_i}%4294967296);{b_j}={v_mflr}({b_j}%4294967296);"
+            f"return(({b_i}+{b_j})-{v_bxor}({b_i},{b_j}))/2 end;"
+            f"{v_lshift}=function({b_i},{b_j})return({v_mflr}({b_i}%4294967296)*(2^{b_j}))%4294967296 end;"
+            f"{v_rshift}=function({b_i},{b_j})return {v_mflr}({v_mflr}({b_i}%4294967296)/(2^{b_j}))end;"
+            f"end;"
+        )
+
+    probe_nums_str = "{" + ",".join(str(x) for x in enc_probe_nums) + "}"
+    alpha_nums_str = "{" + ",".join(str(x) for x in enc_alpha_nums) + "}"
+    slices_tbl_str = "{" + ",".join(f'"{s}"' for s in stored_slices) + "}"
+    slice_ord_str = "{" + ",".join(str(idx) for idx in slice_read_order) + "}"
+
+    yip_list_str = (
+        f"{{{v_type},{v_pcall},{v_byte},{v_char},{v_sub},{v_tonum},{v_sel},{v_unpack},"
+        f"{v_smt},{v_gmt},{v_rset},{v_rget},{v_mflr},{v_err},"
+        f"{v_bxor},{v_band},{v_lshift},{v_rshift},{v_dbginfo},{v_isyield}}}"
+        if is_luau
+        else f"{{{v_type},{v_pcall},{v_byte},{v_char},{v_sub},{v_tonum},{v_sel},{v_unpack},"
+        f"{v_smt},{v_gmt},{v_rset},{v_rget},{v_mflr},{v_err}}}"
+    )
+
+    # Branch 1 (`cff_probe`): Decode probe symbols via chunked string.char(unpack(...)), run behavioral
+    # metamethod trap + `debug.info` / `isyieldable` / pointer-uniqueness sponge -> seed & `v_anchor[1..16]`!
+    # Zero error strings, zero early abort — any tamper silently perturbs `acc` (`v_ctx[k_seed]`)!
+    isyield_check_lua = (
+        f"local {b_t7},{b_t8}=false,nil;"
+        f"if {v_type}({v_isyield})=={v_type}({v_pcall})then {b_t7},{b_t8}={v_pcall}({v_isyield})end;"
+        f"local {b_k}=(not {b_t7} or {v_type}({b_t8})~={v_type}(true))and 733 or 0;"
+        if is_luau
+        else f"local {b_k}=0;"
+    )
+
+    branch_probe = (
+        f"{lua51_fallback_stmt}"
+        f"local {b_t1},{b_t2},{b_t3},{b_t4}={{}},{{}},0,{probe_nums_str};"
+        f"for {b_i}=1,#{b_t4} do "
+        f"local {b_r}={v_bxor}(({b_t4}[{b_i}]-{b_i}*{probe_step})%256,{probe_xor});"
+        f"if {b_r}==0 then {b_t1}[#{b_t1}+1]={v_char}({v_unpack}({b_t2},1,{b_t3}));{b_t2},{b_t3}={{}},0 "
+        f"else {b_t3}={b_t3}+1;{b_t2}[{b_t3}]={b_r} end end;"
+        f"local {b_t5}=0;"
+        f"local {b_t6}={v_smt}({{}},{{"
+        f"__metatable=211,"
+        f"__index=function(_,{b_j})local {b_r}={v_type}({b_j})=={v_type}(1)and {b_j} or 19;{b_t5}={b_t5}+{b_r};return {b_r}*3+1 end,"
+        f"__newindex=function(){b_t5}={b_t5}+97 end"
+        f"}});"
+        f"{b_t2}={b_t6}[5];{v_rset}({b_t6},5,42);{b_t3}={b_t6}[5];"
+        f"{b_t4}=({b_t2}*131+{b_t3}*17+({v_rget}({b_t6},9,nil)==nil and 91 or 0)+({v_type}({v_gmt}({b_t6}))=={v_type}(1)and {v_gmt}({b_t6})or 0)+{b_t5}*29)*({v_pcall}({v_smt},{b_t6},{{}})and 3 or 1);"
+        f"{isyield_check_lua}"
+        f"local {b_r}=({v_type}({v_getfenv})=={v_type}({v_pcall})and {v_getfenv}())or _ENV or _G;"
+        f"{b_t5}={v_type}({v_str_lib})=={v_type}({v_ctx})and {v_str_lib}[{b_t1}[1]];"
+        f"{b_t6}={v_type}({b_r}[{b_t1}[2]])=={v_type}({v_ctx})and {b_r}[{b_t1}[2]];"
+        f"{b_t2}={v_dbginfo} or({b_t6} and {v_type}({b_t6}[{b_t1}[3]])=={v_type}({v_pcall})and {b_t6}[{b_t1}[3]]);"
+        f"{b_t3}={b_t6} and {v_type}({b_t6}[{b_t1}[4]])=={v_type}({v_pcall})and {b_t6}[{b_t1}[4]];"
+        f"local {b_i}=function({b_j},{b_t6})return {b_j} end;"
+        f"local {b_j}=function({b_t6})"
+        f"if {v_type}({b_t2})=={v_type}({v_pcall})then "
+        f"local s1,s2,s3,s4,s5={v_pcall}({b_t2},{b_t6},{v_char}(115,108,97));"
+        f"if s1 and {v_type}(s2)=={v_type}({v_char}(65))and #s2>=2 and {v_type}(s3)=={v_type}(1)and {v_type}(s4)=={v_type}(1)then "
+        f"return {v_byte}(s2,1)*256+{v_byte}(s2,2)*4+(#s2-s3)+s4*31+(s5 and 7 or 0)+(s3<0 and 0 or 513)end;"
+        f"return 0 "
+        f"elseif {b_t3} then "
+        f"local s1,s2={v_pcall}({b_t3},{b_t6},{v_char}(83));"
+        f"if s1 and {v_type}(s2)=={v_type}({v_ctx})then "
+        f"local p1,p2,p3=s2[{b_t1}[11]],s2[{b_t1}[12]],s2[{b_t1}[13]];"
+        f"if {v_type}(p1)=={v_type}({v_char}(65))and #p1>=2 and {v_type}(p2)=={v_type}({v_char}(65))and #p2>=1 and {v_type}(p3)=={v_type}(1)then "
+        f"return {v_byte}(p1,1)*256+{v_byte}(p2,1)*4+(#p1-p3)+#p2*7+(p3<0 and 0 or 513)end end;"
+        f"return 0 "
+        f"elseif {v_type}({b_t5})=={v_type}({v_pcall})then "
+        f"local s1,s2={v_pcall}({b_t5},{b_i});"
+        f"if s1 and {v_type}(s2)=={v_type}({v_char}(65))and #s2>=1 then "
+        f"return(not {v_pcall}({b_t5},{b_t6}))and({v_byte}(s2,1)*873+4)or 0 end;"
+        f"return 0 else return 0 end end;"
+        f"{b_t6}=0;"
+        f"if {v_type}({b_t2})=={v_type}({v_pcall})then "
+        f"local s1,_,s3,s4,s5={v_pcall}({b_t2},{b_i},{v_char}(115,108,97));"
+        f"if s1 and {v_type}(s3)=={v_type}(1)and {v_type}(s4)=={v_type}(1)then {b_t6}=(s3>0 and 11 or 0)+s4*13+(s5 and 99 or 5)end "
+        f"elseif {b_t3} then "
+        f"local s1,s2={v_pcall}({b_t3},{b_i},{v_char}(83));"
+        f"if s1 and {v_type}(s2)=={v_type}({v_ctx})then local p2,p3=s2[{b_t1}[12]],s2[{b_t1}[13]];"
+        f"if {v_type}(p2)=={v_type}({v_char}(65))and #p2>=1 and {v_type}(p3)=={v_type}(1)then {b_t6}={v_byte}(p2,1)-#p2*15+(p3>0 and 11 or 0)end end "
+        f"elseif {v_type}({b_t5})=={v_type}({v_pcall})then "
+        f"local s1,s2={v_pcall}({b_t5},{b_i});if s1 and {v_type}(s2)=={v_type}({v_char}(65))and #s2>=1 then {b_t6}={v_byte}(s2,1)+15 end end;"
+        f"do "
+        f"local yip,seen={yip_list_str},{{}};"
+        f"local eb={v_type}({b_r}[{b_t1}[5]])=={v_type}({v_pcall})and {b_r}[{b_t1}[5]];"
+        f"local w1={v_type}({b_r}[{b_t1}[6]])=={v_type}({v_pcall})and {b_r}[{b_t1}[6]];"
+        f"local r0=({v_type}({b_r}[{b_t1}[7]])=={v_type}({v_pcall})and {b_r}[{b_t1}[7]])or({v_type}({b_r}[{b_t1}[8]])=={v_type}({v_pcall})and {b_r}[{b_t1}[8]]);"
+        f"local raw_ls={b_r}[{b_t1}[9]]~=nil and {b_r}[{b_t1}[9]]or {b_r}[{b_t1}[10]];"
+        f"local raw_tc={v_type}({v_tbl_lib})=={v_type}({v_ctx})and {v_rget}({v_tbl_lib},{b_t1}[14])or nil;"
+        f"local acc={v_band}({v_bxor}({build_salt},{b_t4})*1664525+{b_t6}*257+{b_k}+1013904223,4294967295);"
+        f"for idx=1,#yip do "
+        f"local fn=yip[idx];local tn={v_type}(fn);"
+        f"local tsig=(#tn>0 and {v_byte}(tn,1)or 0)*#tn;"
+        f"local dup=seen[fn]and 911 or 0;"
+        f"if fn~=nil then seen[fn]=idx end;"
+        f"local wp=(tn=={v_type}({v_pcall}))and {b_j}(fn)or 0;"
+        f"local ex=0;"
+        f"if eb then ex=ex+{v_bxor}((eb(fn)and 173 or 41)+(eb({b_i})and 88 or 24),197)+{v_bxor}({b_j}(eb),wp)end;"
+        f"if w1 then ex=ex+{v_bxor}((w1(fn)and 91 or 130)+(w1({b_i})and 67 or 19),197)+{v_bxor}({b_j}(w1),wp)end;"
+        f"if r0 then ex=ex+{v_bxor}((r0(fn)and 53 or 144)+(r0({b_i})and 112 or 53),197)+{v_bxor}({b_j}(r0),wp)end;"
+        f"local mix={v_band}({v_bxor}(wp+tsig+idx*73,ex+dup),16777215);"
+        f"acc={v_bxor}(acc,{v_lshift}(acc,13));acc={v_bxor}(acc,{v_rshift}(acc,17));acc={v_bxor}(acc,{v_lshift}(acc,5));"
+        f"acc={v_band}({v_bxor}(acc,mix)*1664525+idx*8191+1013904223,4294967295)end;"
+        f"local wref={b_j}({v_pcall});local xpen=0;"
+        f"if raw_ls~=nil then if {v_type}(raw_ls)~={v_type}({v_pcall})then xpen=xpen+541 else xpen=xpen+(seen[raw_ls]and 911 or 0)+{v_bxor}({b_j}(raw_ls),wref);seen[raw_ls]=98 end end;"
+        f"if raw_tc~=nil then if {v_type}(raw_tc)~={v_type}({v_pcall})then xpen=xpen+677 else xpen=xpen+(seen[raw_tc]and 911 or 0)+{v_bxor}({b_j}(raw_tc),wref);seen[raw_tc]=99 end end;"
+        f"acc={v_band}(acc+xpen,4294967295);"
+        f"if acc==0 then acc=1831565813 end;"
+        f"{v_ctx}[{k_seed}]=acc;"
+        f"local scur=acc%16777216;"
+        f"for idx=1,16 do scur=(scur*{boot_lcg_a}+{boot_lcg_c}+idx*4099)%16777216;{v_anchor}[idx]=scur end;"
+        f"{v_ctx}[{k_argc}]={v_sel}({v_char}(35),{v_unpack}({v_args}));"
+        f"end;"
+        f"{v_st}=0x{cff_b85_cfb:X}"
+    )
+
+    # Branch 2 (`cff_b85_cfb`): Reconstruct shuffled 85-char Base85 lookup map and stream-decode
+    # random-length slices directly through 32-bit Xorshift32 + CFB (`1664525`, `1013904223`)!
+    branch_b85_cfb = (
+        f"local {b_t1},{b_t2},{b_t3},{b_t4}={{}},{alpha_nums_str},{slices_tbl_str},{slice_ord_str};"
+        f"for {b_i}=1,85 do {b_t1}[({b_t2}[{b_i}]-{b_i}*{alpha_mul}-{alpha_add})%256]={b_i}-1 end;"
+        f"local {b_t5},{b_t6},{b_t7},{b_t8}={{}},0,{v_ctx}[{k_seed}],0;"
+        f"local {b_k},{b_r}=0,0;"
+        f"for {b_i}=1,#{b_t4} do "
+        f"local sl={b_t3}[{b_t4}[{b_i}]];"
+        f"for {b_j}=1,#sl do "
+        f"local dv=(({b_t1}[{v_byte}(sl,{b_j})]or 0)-({b_r}%85))%85;"
+        f"{b_k}={b_k}*85+dv;{b_t8}={b_t8}+1;"
+        f"if {b_t8}==5 then "
+        f"local c0,c1,c2,c3={v_band}({v_rshift}({b_k},24),255),{v_band}({v_rshift}({b_k},16),255),{v_band}({v_rshift}({b_k},8),255),{v_band}({b_k},255);"
+        f"{b_t7}={v_bxor}({b_t7},{v_lshift}({b_t7},13));{b_t7}={v_bxor}({b_t7},{v_rshift}({b_t7},17));{b_t7}={v_bxor}({b_t7},{v_lshift}({b_t7},5));"
+        f"{b_t6}={b_t6}+1;{b_t5}[{b_t6}]={v_band}({v_bxor}(c0,{b_t7}),255);{b_t7}={v_band}({b_t7}*1664525+c0+1013904223,4294967295);"
+        f"{b_t7}={v_bxor}({b_t7},{v_lshift}({b_t7},13));{b_t7}={v_bxor}({b_t7},{v_rshift}({b_t7},17));{b_t7}={v_bxor}({b_t7},{v_lshift}({b_t7},5));"
+        f"{b_t6}={b_t6}+1;{b_t5}[{b_t6}]={v_band}({v_bxor}(c1,{b_t7}),255);{b_t7}={v_band}({b_t7}*1664525+c1+1013904223,4294967295);"
+        f"{b_t7}={v_bxor}({b_t7},{v_lshift}({b_t7},13));{b_t7}={v_bxor}({b_t7},{v_rshift}({b_t7},17));{b_t7}={v_bxor}({b_t7},{v_lshift}({b_t7},5));"
+        f"{b_t6}={b_t6}+1;{b_t5}[{b_t6}]={v_band}({v_bxor}(c2,{b_t7}),255);{b_t7}={v_band}({b_t7}*1664525+c2+1013904223,4294967295);"
+        f"{b_t7}={v_bxor}({b_t7},{v_lshift}({b_t7},13));{b_t7}={v_bxor}({b_t7},{v_rshift}({b_t7},17));{b_t7}={v_bxor}({b_t7},{v_lshift}({b_t7},5));"
+        f"{b_t6}={b_t6}+1;{b_t5}[{b_t6}]={v_band}({v_bxor}(c3,{b_t7}),255);{b_t7}={v_band}({b_t7}*1664525+c3+1013904223,4294967295);"
+        f"{b_k},{b_t8},{b_r}=0,0,{b_r}+1 "
+        f"end end end;"
+        f"{v_ctx}[{k_plain}],{v_ctx}[{k_plen}]={b_t5},{b_t6};"
+        f"{v_st}=0x{cff_unpack_s1:X}"
+    )
+
+    # Branch 3 (`cff_unpack_s1`): Validate 4-byte original byte-length header inside decrypted stream
+    # and unpack Stage-1 VM bytecode instructions + Stage-2 VM runner closure!
+    # If `seed` was poisoned by anti-hook, header consistency fails organically -> `s1code = {}` -> exits returning `nil`!
+    branch_unpack_s1 = (
+        f"local {b_t1},{b_t2},{b_t3}={v_ctx}[{k_plain}],{v_ctx}[{k_plen}],{{}};"
+        f"if {b_t2}>=16 then "
+        f"local {b_t4}={b_t1}[1]+{b_t1}[2]*256+{b_t1}[3]*65536+{b_t1}[4]*16777216;"
+        f"if {b_t4}>=12 and {b_t4}+4<={b_t2} and {b_t4}+7>={b_t2} then "
+        f"local {b_t5}={b_t1}[5]+{b_t1}[6]*256;"
+        f"local {b_t6}=2+{b_t5}*24;"
+        f"if {b_t6}+6<={b_t4} then "
+        f"local {b_t7}={b_t1}[4+{b_t6}+1]+{b_t1}[4+{b_t6}+2]*256+{b_t1}[4+{b_t6}+3]*65536+{b_t1}[4+{b_t6}+4]*16777216;"
+        f"local {b_t8}=4+{b_t6}+4+{b_t7};"
+        f"if {b_t8}+2<=4+{b_t4} then "
+        f"local dlen={b_t1}[{b_t8}+1]+{b_t1}[{b_t8}+2]*256;"
+        f"if {b_t6}+4+{b_t7}+2+dlen=={b_t4} then "
+        f"local pos=7;"
+        f"for {b_i}=1,{b_t5} do "
+        f"local ins={{}};"
+        f"for {b_j}=1,6 do "
+        f"ins[{b_j}]={b_t1}[pos]+{b_t1}[pos+1]*256+{b_t1}[pos+2]*65536+{b_t1}[pos+3]*16777216;"
+        f"pos=pos+4 end;"
+        f"{b_t3}[{b_i}]=ins end "
+        f"end end end end end;"
+        f"{v_ctx}[{k_s1code}],{v_ctx}[{k_reg}],{v_ctx}[{k_pc}],{v_ctx}[{k_vmfn}]={b_t3},{{}},1,{minified_rt};"
+        f"{v_st}=0x{cff_s1_fetch:X}"
+    )
+
+    # Branch 4 (`cff_s1_fetch`): Stage-1 Fetch
+    branch_s1_fetch = (
+        f"local {b_t1}={v_ctx}[{k_s1code}][{v_ctx}[{k_pc}]];"
+        f"if not {b_t1} then {v_st}=0 else {v_ctx}[{k_insn}]={b_t1};{v_st}=0x{cff_s1_disp:X} end"
+    )
+
+    # Stage-1 Polymorphic Handlers (inside Branch 5 `cff_s1_disp`)
+    # `b_t1` = `R` (`v_ctx[k_reg]`), `b_t2` = `op`, `b_t3..b_t6` = `A, B, C, D` (unpacked from permuted slots!)
+    s1_handlers: Dict[int, str] = {
+        s1_op_ids["OP_INIT"]: (
+            f"{b_t1}[{b_t3}]={b_t4};{b_t1}[{b_t5}]={b_t6}"
         ),
-        op_ids["OP_ALPHA"]: (
-            f"{v_t1},{v_t2}={{}},{v_konst}[{v_b}];"
-            f"for {v_i}=1,#{v_t2} do {v_t1}[({v_byte}({v_t2},{v_i})-{v_i}*{v_c}-{v_d})%256]={v_i}-1 end;"
-            f"{v_reg}[{v_a}]={v_t1}"
+        s1_op_ids["OP_MBA"]: (
+            f"local m=({b_t4}+{b_t5})-2*{v_band}({b_t4},{b_t5});"
+            f"{b_t1}[{b_t3}]={v_bxor}({v_bxor}(m,{b_t6}),{b_t1}[{rint(reg_chain_crc)}])"
         ),
-        op_ids["OP_LOADK"]: (
-            f"{v_t1},{v_t2},{v_t3},{v_t4}={v_konst}[{v_b}],{v_reg}[{rint(reg_alpha)}],{{}},1;"
-            f"for {v_i}=1,#{v_t1},4 do "
-            f"{v_t5}={v_t2}[{v_byte}({v_t1},{v_i})]*262144+{v_t2}[{v_byte}({v_t1},{v_i}+1)]*4096+({v_t2}[{v_byte}({v_t1},{v_i}+2)]%64)*64+({v_t2}[{v_byte}({v_t1},{v_i}+3)]%64);"
-            f"{v_t6}=({v_t5}-{v_t5}%65536)/65536;"
-            f"{v_t3}[{v_t4}]={v_cmap}[{v_bxor}({v_t6},({v_c}+({v_t4}-1)*{v_d})%256)];{v_t4}={v_t4}+1;"
-            f"if {v_t2}[{v_byte}({v_t1},{v_i}+2)]<64 then "
-            f"{v_t6}=(({v_t5}-{v_t5}%256)/256)%256;"
-            f"{v_t3}[{v_t4}]={v_cmap}[{v_bxor}({v_t6},({v_c}+({v_t4}-1)*{v_d})%256)];{v_t4}={v_t4}+1;"
-            f"if {v_t2}[{v_byte}({v_t1},{v_i}+3)]<64 then "
-            f"{v_t6}={v_t5}%256;"
-            f"{v_t3}[{v_t4}]={v_cmap}[{v_bxor}({v_t6},({v_c}+({v_t4}-1)*{v_d})%256)];{v_t4}={v_t4}+1 "
-            f"end end end;"
-            f"{v_reg}[{v_a}]={v_concat}({v_t3})"
+        s1_op_ids["OP_MIX"]: (
+            f"{b_t1}[{b_t3}]=({b_t4}*37+{b_t5}+{b_t6})%65536"
         ),
-        op_ids["OP_MBA"]: (
-            f"{v_t1}=({v_b}+{v_c})-2*{v_band}({v_b},{v_c});"
-            f"{v_reg}[{v_a}]={v_bxor}({v_bxor}({v_t1},{v_d}),{v_reg}[{rint(reg_chain_crc)}])"
+        s1_op_ids["OP_SLICE_CRC"]: (
+            f"local pb,crc={v_ctx}[{k_plain}],{rint(2166136261 % 16777216)};"
+            f"for {b_i}={b_t3},{b_t4} do crc=({v_bxor}(crc,pb[{b_i}]or 0)*16777619)%16777216 end;"
+            f"{b_t1}[{rint(reg_chain_crc)}]={v_bxor}(({b_t1}[{rint(reg_chain_crc)}]*65599+{b_t1}[{b_t6}])%16777216,(crc+{b_t5})%16777216)"
         ),
-        op_ids["OP_MIX"]: (
-            f"{v_reg}[{v_a}]=({v_b}*37+{v_c}+{v_d})%65536"
+        s1_op_ids["OP_EXTRACT"]: (
+            f"local pb,s2,k={v_ctx}[{k_plain}],{{}},0;"
+            f"for {b_i}={b_t4},{b_t4}+{b_t5}-1 do k=k+1;s2[k]=pb[{b_i}]or 0 end;"
+            f"{v_ctx}[{k_plain}]=nil;{b_t1}[{b_t3}]=s2"
         ),
-        op_ids["OP_XOR_DEC"]: (
-            f"{v_t1}={v_reg}[{v_b}];"
-            f"{v_t2}={v_reg}[{v_c}]%16777216;"
-            f"{v_t3}=({v_t2}*65599+{v_d}*4099+{rint(lcg_init2)})%16777216;"
-            f"{v_t4},{v_t5},{v_t6}={v_d}%256,({v_t2}%251)+1,{{}};"
-            f"for {v_i}=1,#{v_t1} do "
-            f"{v_t7}={v_byte}({v_t1},{v_i});"
-            f"{v_t2}=({v_t2}*{rint(lcg_a1)}+{rint(lcg_c1)})%16777216;"
-            f"{v_t3}=({v_t3}*{rint(lcg_a2)}+{rint(lcg_c2)})%16777216;"
-            f"{v_t8}={v_bxor}({v_bxor}({v_reg}[{rint(reg_sbox)}][({v_t7}-((({v_t2}-{v_t2}%256)/256)%256+{v_t3}%256)%256-{v_t4})%256],{v_bxor}({v_t2}%256,(({v_t3}-{v_t3}%65536)/65536)%256)),{v_t5});"
-            f"{v_t6}[{v_i}]={v_cmap}[{v_t8}];"
-            f"{v_t4},{v_t5}={v_t7},{v_t8} end;"
-            f"{v_reg}[{v_a}]={v_concat}({v_t6})"
+        s1_op_ids["OP_EXEC"]: (
+            f"local s2={b_t1}[{b_t4}];{b_t1}[{b_t4}]=nil;"
+            f"local ck=({b_t1}[{rint(reg_chain_crc)}]%256+{b_t5})%256;"
+            f"local ks=({b_t1}[{rint(reg_chain_crc)}]%256+{b_t6})%256;"
+            f"local pk=function(...)return{{[{rint(cnt_key)}]={v_sel}({v_char}(35),...),...}}end;"
+            f"{b_t1}[{b_t3}]=pk({v_ctx}[{k_vmfn}](s2,ck,ks,{v_bxor},{v_band},{v_lshift},{v_rshift},{v_unpack}({v_args},1,{v_ctx}[{k_argc}])))"
         ),
-        op_ids["OP_CRC"]: (
-            f"{v_t1},{v_t2}={v_reg}[{v_a}],{rint(2166136261 % 16777216)};"
-            f"for {v_i}=1,#{v_t1} do {v_t2}=({v_bxor}({v_t2},{v_byte}({v_t1},{v_i}))*16777619)%16777216 end;"
-            f"{v_reg}[{rint(reg_chain_crc)}]={v_bxor}(({v_reg}[{rint(reg_chain_crc)}]*65599+{v_c})%16777216,({v_t2}+{v_b})%16777216)"
-        ),
-        op_ids["OP_CONCAT"]: (
-            f"{v_t1},{v_t2}={{}},1;"
-            f"for {v_i}={v_b},{v_c} do {v_t1}[{v_t2}]={v_reg}[{v_i}];{v_reg}[{v_i}]=nil;{v_t2}={v_t2}+1 end;"
-            f"{v_reg}[{v_a}]={v_concat}({v_t1})"
-        ),
-        op_ids["OP_EXEC"]: (
-            f"{v_t1}={v_reg}[{v_b}];{v_reg}[{v_b}]=nil;"
-            f"{v_t2}=({v_reg}[{rint(reg_chain_crc)}]%256+{v_c})%256;"
-            f"{v_t4}=({v_reg}[{rint(reg_chain_crc)}]%256+{v_d})%256;"
-            f"{v_t3}=function(...)return{{[{rint(cnt_key)}]={v_sel}({v_cmap}[35],...),...}}end;"
-            f"{v_reg}[{v_a}]={v_t3}({v_vm_fn}({v_t1},{v_t2},{v_t4},{v_bxor},{v_cmap},{v_byte},{v_sub},{v_concat},{v_unpack}({v_args},1,{v_argc})))"
-        ),
-        op_ids["OP_RET"]: (
-            f"{v_t1}={v_reg}[{v_a}];return {v_unpack}({v_t1},1,{v_t1}[{rint(cnt_key)}])"
+        s1_op_ids["OP_RET"]: (
+            f"local rv={b_t1}[{b_t3}];return {v_unpack}(rv,1,rv[{rint(cnt_key)}])"
         ),
     }
 
-    sorted_ops = sorted(handlers.items(), key=lambda kv: kv[0])
+    sorted_s1_ops = sorted(s1_handlers.items(), key=lambda kv: kv[0])
 
-    def emit_dispatch_tree(items: List[Tuple[int, str]]) -> str:
+    def emit_s1_tree(items: List[Tuple[int, str]]) -> str:
         if len(items) == 1:
             op_code, body = items[0]
-            return f"if {v_op}=={rint(op_code)} then {body} end"
+            return f"if {b_t2}=={rint(op_code)} then {body} end"
         mid = len(items) // 2
         split_val = items[mid - 1][0]
-        left_code = emit_dispatch_tree(items[:mid])
-        right_code = emit_dispatch_tree(items[mid:])
-        return f"if {v_op}<={rint(split_val)} then {left_code} else {right_code} end"
+        return (
+            f"if {b_t2}<={rint(split_val)} then "
+            f"{emit_s1_tree(items[:mid])} else {emit_s1_tree(items[mid:])} end"
+        )
 
-    dispatch_tree_code = emit_dispatch_tree(sorted_ops)
-
-    # 24-Bit Sponge Bootstrap (Behavioral Metamethod Trap + 3-Way Cross-Runtime C-Closure & Lua-Canary Probes
-    # + 15-Primitive Pointer Uniqueness + Branchless Executor Checks -> Direct Seed for v_anchor[1..16])
-    anti_hook_bootstrap = (
-        f"local {v_anchor}={{}};"
-        f"do "
-        f"{v_t1},{v_t2},{v_t3},{v_t4}={{}},{{}},1,{v_konst}[{k_probe_idx}];"
-        f"for {v_i}=1,#{v_t4} do "
-        f"{v_t5}={v_bxor}(({v_byte}({v_t4},{v_i})-{v_i}*{probe_step})%256,{probe_xor});"
-        f"if {v_t5}==0 then {v_t1}[#{v_t1}+1]={v_concat}({v_t2});{v_t2},{v_t3}={{}},1 "
-        f"else {v_t2}[{v_t3}]={v_cmap}[{v_t5}];{v_t3}={v_t3}+1 end end;"
-        f"local {v_sp_hits}=0;"
-        f"local {v_sp_tbl}={v_smt}({{}},{{"
-        f"__metatable=211,"
-        f"__index=function(_,{v_j})local {v_r}={v_type}({v_j})=={v_type}(1)and {v_j} or 19;{v_sp_hits}={v_sp_hits}+{v_r};return {v_r}*3+1 end,"
-        f"__newindex=function(){v_sp_hits}={v_sp_hits}+97 end"
-        f"}});"
-        f"{v_t2}={v_sp_tbl}[5];"
-        f"{v_rset}({v_sp_tbl},5,42);"
-        f"{v_t3}={v_sp_tbl}[5];"
-        f"{v_t4}={v_rget}({v_sp_tbl},9,nil)==nil and 13 or 0;"
-        f"{v_t5}={v_gmt}({v_sp_tbl});"
-        f"{v_t6}={v_pcall}({v_smt},{v_sp_tbl},{{}});"
-        f"local {v_sp_behav}=({v_t2}*131+{v_t3}*17+{v_t4}*7+({v_type}({v_t5})=={v_type}(1)and {v_t5} or 0)+{v_sp_hits}*29)*({v_t6} and 3 or 1);"
-        f"local {v_sp_fndump}={v_type}({v_str})=={v_type}({v_anchor})and {v_str}[{v_t1}[1]];"
-        f"{v_t7}={v_type}({v_env}[{v_t1}[2]])=={v_type}({v_anchor})and {v_env}[{v_t1}[2]];"
-        f"local {v_sp_fninfo}={v_t7} and {v_type}({v_t7}[{v_t1}[3]])=={v_type}({v_pcall})and {v_t7}[{v_t1}[3]];"
-        f"local {v_sp_fngeti}={v_t7} and {v_type}({v_t7}[{v_t1}[4]])=={v_type}({v_pcall})and {v_t7}[{v_t1}[4]];"
-        f"local {v_sp_eb}={v_type}({v_env}[{v_t1}[5]])=={v_type}({v_pcall})and {v_env}[{v_t1}[5]];"
-        f"local {v_sp_w1}={v_type}({v_env}[{v_t1}[6]])=={v_type}({v_pcall})and {v_env}[{v_t1}[6]];"
-        f"local {v_sp_r0}=({v_type}({v_env}[{v_t1}[7]])=={v_type}({v_pcall})and {v_env}[{v_t1}[7]])or({v_type}({v_env}[{v_t1}[8]])=={v_type}({v_pcall})and {v_env}[{v_t1}[8]]);"
-        f"local {v_sp_fnls}=({v_type}({v_env}[{v_t1}[9]])=={v_type}({v_pcall})and {v_env}[{v_t1}[9]])or({v_type}({v_env}[{v_t1}[10]])=={v_type}({v_pcall})and {v_env}[{v_t1}[10]]);"
-        f"local {v_sp_can}=function({v_i},{v_j})return {v_i} end;"
-        f"local {v_sp_okdc},{v_sp_dcan}=false,nil;"
-        f"if {v_type}({v_sp_fndump})=={v_type}({v_pcall})then {v_sp_okdc},{v_sp_dcan}={v_pcall}({v_sp_fndump},{v_sp_can})end;"
-        f"local {v_sp_wprobe}=function({v_i})"
-        f"if {v_sp_fninfo} then "
-        f"local {v_j},{v_r},{v_p},{v_t2},{v_t3}={v_pcall}({v_sp_fninfo},{v_i},{v_cmap}[115]..{v_cmap}[108]..{v_cmap}[97]);"
-        f"if {v_j} and {v_type}({v_r})=={v_type}({v_cmap}[0])and #{v_r}>=2 and {v_type}({v_p})=={v_type}(1)and {v_type}({v_t2})=={v_type}(1)then "
-        f"return {v_byte}({v_r},1)*256+{v_byte}({v_r},2)*4+(#{v_r}-{v_p})+{v_t2}*31+({v_t3} and 7 or 0)end;"
-        f"return 0 "
-        f"elseif {v_sp_fngeti} then "
-        f"local {v_j},{v_r}={v_pcall}({v_sp_fngeti},{v_i},{v_cmap}[83]);"
-        f"if {v_j} and {v_type}({v_r})=={v_type}({v_anchor})then "
-        f"local {v_p},{v_t2},{v_t3}={v_r}[{v_t1}[11]],{v_r}[{v_t1}[12]],{v_r}[{v_t1}[13]];"
-        f"if {v_type}({v_p})=={v_type}({v_cmap}[0])and #{v_p}>=2 and {v_type}({v_t2})=={v_type}({v_cmap}[0])and #{v_t2}>=1 and {v_type}({v_t3})=={v_type}(1)then "
-        f"return {v_byte}({v_p},1)*256+{v_byte}({v_t2},1)*4+(#{v_p}-{v_t3})+#{v_t2}*7 end end;"
-        f"return 0 "
-        f"elseif {v_sp_okdc} and {v_type}({v_sp_dcan})=={v_type}({v_cmap}[0])and #{v_sp_dcan}>=1 then "
-        f"local {v_j}={v_pcall}({v_sp_fndump},{v_i});"
-        f"return(not {v_j})and({v_byte}({v_sp_dcan},1)*873+4)or 0 "
-        f"else return 0 end end;"
-        f"local {v_sp_canval}=0;"
-        f"if {v_sp_fninfo} then "
-        f"local {v_j},{v_r},{v_p},{v_t2},{v_t3}={v_pcall}({v_sp_fninfo},{v_sp_can},{v_cmap}[115]..{v_cmap}[108]..{v_cmap}[97]);"
-        f"if {v_j} and {v_type}({v_p})=={v_type}(1)and {v_type}({v_t2})=={v_type}(1)then "
-        f"{v_sp_canval}=({v_p}>0 and 11 or 0)+{v_t2}*13+({v_t3} and 99 or 5)end "
-        f"elseif {v_sp_fngeti} then "
-        f"local {v_j},{v_r}={v_pcall}({v_sp_fngeti},{v_sp_can},{v_cmap}[83]);"
-        f"if {v_j} and {v_type}({v_r})=={v_type}({v_anchor})then "
-        f"local {v_t2},{v_t3}={v_r}[{v_t1}[12]],{v_r}[{v_t1}[13]];"
-        f"if {v_type}({v_t2})=={v_type}({v_cmap}[0])and #{v_t2}>=1 and {v_type}({v_t3})=={v_type}(1)then "
-        f"{v_sp_canval}={v_byte}({v_t2},1)-#{v_t2}*15+({v_t3}>0 and 11 or 0)end end "
-        f"elseif {v_sp_okdc} and {v_type}({v_sp_dcan})=={v_type}({v_cmap}[0])and #{v_sp_dcan}>=1 then "
-        f"{v_sp_canval}={v_byte}({v_sp_dcan},1)+15 end;"
-        f"local {v_sp_yip}={{{v_type},{v_pcall},{v_byte},{v_char},{v_sub},{v_concat},{v_tonum},{v_sel},{v_unpack},{v_smt},{v_gmt},{v_rset},{v_rget},{v_mflr},{v_err}}};"
-        f"local {v_sp_acc}=({v_bxor}({build_salt},{v_sp_behav})*65599+{v_sp_canval}*257)%16777216;"
-        f"local {v_sp_seen}={{}};"
-        f"for {v_i}=1,#{v_sp_yip} do "
-        f"local {v_sp_fn}={v_sp_yip}[{v_i}];"
-        f"local {v_sp_tn}={v_type}({v_sp_fn});"
-        f"local {v_sp_tsig}=(#{v_sp_tn}>0 and {v_byte}({v_sp_tn},1)or 0)*#{v_sp_tn};"
-        f"local {v_sp_dup}={v_sp_seen}[{v_sp_fn}]and 911 or 0;"
-        f"if {v_sp_fn}~=nil then {v_sp_seen}[{v_sp_fn}]={v_i} end;"
-        f"local {v_sp_wp}=({v_sp_tn}=={v_type}({v_pcall}))and {v_sp_wprobe}({v_sp_fn})or 0;"
-        f"local {v_sp_ex}=0;"
-        f"if {v_sp_eb} then {v_sp_ex}={v_sp_ex}+{v_bxor}(({v_sp_eb}({v_sp_fn})and 173 or 41)+({v_sp_eb}({v_sp_can})and 88 or 24),197)+{v_bxor}({v_sp_wprobe}({v_sp_eb}),{v_sp_wp})end;"
-        f"if {v_sp_w1} then {v_sp_ex}={v_sp_ex}+{v_bxor}(({v_sp_w1}({v_sp_fn})and 91 or 130)+({v_sp_w1}({v_sp_can})and 67 or 19),197)+{v_bxor}({v_sp_wprobe}({v_sp_w1}),{v_sp_wp})end;"
-        f"if {v_sp_r0} then {v_sp_ex}={v_sp_ex}+{v_bxor}(({v_sp_r0}({v_sp_fn})and 53 or 144)+({v_sp_r0}({v_sp_can})and 112 or 53),197)+{v_bxor}({v_sp_wprobe}({v_sp_r0}),{v_sp_wp})end;"
-        f"if {v_sp_fnls} then {v_sp_ex}={v_sp_ex}+{v_bxor}({v_sp_wprobe}({v_sp_fnls}),{v_sp_wp})end;"
-        f"local {v_sp_mix}={v_bxor}({v_sp_wp}+{v_sp_tsig}+{v_i}*73,{v_sp_ex}+{v_sp_dup});"
-        f"{v_sp_acc}=({v_bxor}({v_sp_acc},{v_sp_mix})*165985+{v_i}*8191)%16777216 end;"
-        f"for {v_i}=1,16 do {v_sp_acc}=({v_sp_acc}*{boot_lcg_a}+{boot_lcg_c}+{v_i}*4099)%16777216;{v_anchor}[{v_i}]={v_sp_acc} end;"
-        f"end;"
+    branch_s1_disp = (
+        f"local {b_t1},{b_t7}={v_ctx}[{k_reg}],{v_ctx}[{k_insn}];"
+        f"local {b_t8}={b_t1}[{rint(reg_chain_crc)}]or 0;"
+        f"local {b_t2}={v_bxor}({b_t7}[{slot_op}],({b_t7}[{slot_guard}]+{b_t8}%256)%256);"
+        f"local {b_t3},{b_t4},{b_t5},{b_t6}={b_t7}[{slot_a}],{b_t7}[{slot_b}],{b_t7}[{slot_c}],{b_t7}[{slot_d}];"
+        f"{emit_s1_tree(sorted_s1_ops)};"
+        f"{v_ctx}[{k_pc}]={v_ctx}[{k_pc}]+1;{v_st}=0x{cff_s1_fetch:X}"
     )
 
+    # Branch 6 (`cff_decoy`): Realistic decoy CFF state (never entered, varies AST structure)
+    branch_decoy = (
+        f"local {b_t1}={v_bxor}({v_ctx}[{k_seed}]or 1,{rng.randint(1025, 65535)});"
+        f"{v_ctx}[{k_seed}]={v_band}({b_t1}*1664525+1013904223,4294967295);{v_st}=0"
+    )
+
+    cff_branches = [
+        (cff_probe, branch_probe),
+        (cff_b85_cfb, branch_b85_cfb),
+        (cff_unpack_s1, branch_unpack_s1),
+        (cff_s1_fetch, branch_s1_fetch),
+        (cff_s1_disp, branch_s1_disp),
+        (cff_decoy, branch_decoy),
+    ]
+    rng.shuffle(cff_branches)
+
+    if_parts: List[str] = []
+    for idx, (st_val, st_body) in enumerate(cff_branches):
+        kw = "if" if idx == 0 else "elseif"
+        if_parts.append(f"{kw} {v_st}==0x{st_val:X} then {st_body} ")
+    if_parts.append(f"else {v_st}=0 end")
+    cff_if_chain = "".join(if_parts)
+
     vm_body = (
-        f"return(function(...)"
-        f"local {v_type},{v_pcall},{v_tonum},{v_sel},{v_err}=type,pcall,tonumber,select,error;"
-        f"local {v_smt},{v_gmt},{v_rset},{v_rget}=setmetatable,getmetatable,rawset,rawget;"
-        f"local {v_mflr},{v_getfenv},{v_setfenv}=math and math.floor,getfenv,setfenv;"
-        f"local {v_env},{v_args},{v_argc},{v_str},{v_concat},{v_unpack}="
-        f"({v_type}({v_getfenv})=={v_type}({v_pcall})and {v_getfenv}())or _ENV or _G,{{...}},{v_sel}('#',...),string,table.concat,unpack or table.unpack;"
-        f"local {v_char},{v_byte},{v_sub},{v_bxor},{v_band},{v_cmap}={v_str}.char,{v_str}.byte,{v_str}.sub,bit32 and bit32.bxor,bit32 and bit32.band,{{}};"
-        f"local {v_t1},{v_t2},{v_t3},{v_t4},{v_t5},{v_t6},{v_t7},{v_t8},{v_n};"
-        f"if not {v_bxor} then "
-        f"{v_n}={{}};"
-        f"for {v_i}=0,15 do {v_t2}={{}};{v_n}[{v_i}]={v_t2};"
-        f"for {v_j}=0,15 do {v_t3},{v_t4},{v_t5},{v_t6}=0,1,{v_i},{v_j};"
-        f"while {v_t5}>0 or {v_t6}>0 do if {v_t5}%2~={v_t6}%2 then {v_t3}={v_t3}+{v_t4} end;{v_t5}=({v_t5}-{v_t5}%2)/2;{v_t6}=({v_t6}-{v_t6}%2)/2;{v_t4}={v_t4}*2 end;"
-        f"{v_t2}[{v_j}]={v_t3} end end;"
-        f"{v_bxor}=function({v_i},{v_j})"
-        f"local {v_r},{v_p}=0,1;"
-        f"while {v_i}>0 or {v_j}>0 do {v_r}={v_r}+{v_n}[{v_i}%16][{v_j}%16]*{v_p};{v_i}=({v_i}-{v_i}%16)/16;{v_j}=({v_j}-{v_j}%16)/16;{v_p}={v_p}*16 end;"
-        f"return {v_r} end end;"
-        f"if not {v_band} then {v_band}=function({v_i},{v_j})return(({v_i}+{v_j})-{v_bxor}({v_i},{v_j}))/2 end end;"
-        f"for {v_i}=0,255 do {v_cmap}[{v_i}]={v_char}({v_i})end;"
-        f"local {v_konst}={k_table_str};"
-        f"{anti_hook_bootstrap}"
-        f"{randomized_table_decls}"
-        f"local {v_pc},{v_state},{v_insn},{v_op},{v_a},{v_b},{v_c},{v_d}=1,{rint(st_init)};"
-        f"while {v_state}~={rint(st_exit)} do "
-        f"if {v_state}=={rint(st_init)} then {v_pc}=1;{v_state}={rint(st_fetch)} "
-        f"elseif {v_state}=={rint(st_fetch)} then "
-        f"{v_insn}={v_code}[{v_pc}];"
-        f"if not {v_insn} then break else "
-        f"{v_op}={v_bxor}({v_insn}[{slot_op}],({v_insn}[{slot_guard}]+{v_reg}[{rint(reg_chain_crc)}]%256)%256);"
-        f"{v_a},{v_b},{v_c},{v_d}={v_insn}[{slot_a}],{v_insn}[{slot_b}],{v_insn}[{slot_c}],{v_insn}[{slot_d}];"
-        f"{v_state}={rint(st_dispatch)} end "
-        f"elseif {v_state}=={rint(st_dispatch)} then "
-        f"{dispatch_tree_code};"
-        f"if {v_state}=={rint(st_dispatch)} then {v_state}={v_bxor}({v_insn}[{slot_next}],{v_reg}[{rint(reg_chain_crc)}]%256) end "
-        f"elseif {v_state}=={rint(st_step)} then "
-        f"{v_pc}={v_pc}+1;{v_state}={rint(st_fetch)} "
-        f"else break end end end)(...)"
+        f"return(function({iife_params_str})"
+        f"local {v_st},{v_ctx},{v_anchor}=0x{cff_probe:X},{{}},{{}};"
+        f"while {v_st}~=0 do {cff_if_chain} end "
+        f"end)({iife_args_str})"
     )
 
     output = f"{vm_body}\n"
@@ -1368,7 +1837,10 @@ def compile_polymorphic_vm(
 
     for magic in FORBIDDEN_MAGIC_NUMS:
         if re.search(rf"(?<![0-9]){magic}(?![0-9])", output):
-            return compile_polymorphic_vm(clean_source, rel_path, bridge, file_seed=file_seed + 13)
+            return compile_polymorphic_vm(clean_source, rel_path, bridge, file_seed=file_seed + 13, target=target)
+
+    if STATIC_CONST_ARITH_RE.search(output):
+        return compile_polymorphic_vm(clean_source, rel_path, bridge, file_seed=file_seed + 17, target=target)
 
     return output
 
@@ -1382,19 +1854,19 @@ def verify_obfuscated_file(
     clean_source: str,
     obf_source: str,
     bridge: PrometheusBridge,
+    target: str = "luau",
 ) -> Dict[str, object]:
     """
-    Verifies an obfuscated v5.0 file against all architectural & security requirements:
-    1. Zero Header Comments (`-- STEPH_COMPONENT` and `--[[STEPH_PROMETHEUS_VM]]` absent, line 1 starts with code)
-    2. Zero `'VM integrity check failed'`, `'unknown VM opcode'`, or dead branches
-    3. Zero Static Constant-Foldable `(A - B)` or `(-K + K)` arithmetic expressions & Zero Magic Probe Constants
-    4. Zero Plaintext String Leaks (including `"loadstring"`, `"getinfo"`, `"short_src"`, `"linedefined"`, `"iscclosure"`, `"ishooked"`, etc.)
-    5. Live Dual-VM Execution & 24-Bit Sponge Verification in Lua 5.1:
+    Verifies an obfuscated v6.0 file against all architectural & security requirements:
+    1. Zero Header Comments (`-- STEPH_COMPONENT` and `--[[STEPH_PROMETHEUS_VM]]` absent)
+    2. Zero diagnostic error strings (`"Detected"`, `"VM integrity check failed"`, `"unknown VM opcode"`)
+    3. Zero static constant-foldable arithmetic & zero magic probe constants
+    4. Zero Lua 5.1 16x16 XOR fallback in `--target=luau` & valid Luau AST with max_scope_locals < 55
+    5. Live Dual-VM Execution & Silent Seed Poisoning in Luau-mocked `lupa` environment:
        - Clean unhooked environment executes Stage-1 + Stage-2 (`Vmify` custom bytecode VM)
-       - Malicious Lua hook on `loadstring` dumps 0 bytes (`ZERO_DUMP`) AND poisons the 24-bit sponge `acc`,
-         so the VM fails closed returning `nil`
-       - Malicious Lua hook on `table.concat` poisons the 24-bit sponge `acc` so the VM fails closed returning `nil`
-       - Valid Luau AST with max per-function local count < 60 (well below Luau's 200-local limit)
+       - `table.concat = nil` still executes cleanly (zero reliance on `table.concat`)
+       - Lua wrapper hooks on `string.char`, `bit32.bxor`, `table.concat`, and `loadstring` are
+         caught by `debug.info` (`"[C]", -1` check) and silently poison `seed` returning `nil` with zero leaks!
     """
     first_line = obf_source.splitlines()[0].strip()
     if first_line.startswith("--") or "STEPH_COMPONENT" in obf_source or "STEPH_PROMETHEUS_VM" in obf_source:
@@ -1406,7 +1878,11 @@ def verify_obfuscated_file(
     if rel_path in obf_source:
         raise AssertionError(f"[{rel_path}] Filename leaked inside obfuscated output!")
 
+    if target == "luau" and re.search(r"for\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*0\s*,\s*15\s+do", obf_source):
+        raise AssertionError(f"[{rel_path}] Lua 5.1 bitwise fallback found in --target=luau output!")
+
     forbidden_strings = (
+        "Detected",
         "VM integrity check failed",
         "unknown VM opcode",
         "loadstring",
@@ -1440,81 +1916,138 @@ def verify_obfuscated_file(
         )
 
     stmts, max_scope_locals = bridge.verify_luau_syntax(obf_source, rel_path)
-    if max_scope_locals >= 60:
+    if max_scope_locals >= 55:
         raise AssertionError(
-            f"[{rel_path}] Max function scope local count too high: {max_scope_locals} >= 60 (limit 200)"
+            f"[{rel_path}] Max function scope local count too high: {max_scope_locals} >= 55 (limit 200)"
         )
 
     test_rt = lua51.LuaRuntime()
     verify_fn = test_rt.eval(
-        """
-        function(vm_code, label)
-            table.create = table.create or function() return {} end
-            local fn, err = loadstring(vm_code, "=" .. label)
-            if not fn then
-                error("Outer VM compile error: " .. tostring(err), 0)
-            end
+        f"""
+        (function()
+            {TEST_LUAU_ENV_LUA}
+            return function(vm_code, label)
+                _install_luau_test_env()
+                local orig_char = string.char
+                local orig_bxor = bit32.bxor
+                local orig_concat = table.concat
+                local orig_loadstring = loadstring
+                local orig_pcall = pcall
 
-            -- 1. Execute in clean unhooked environment
-            local ok_clean, res_clean = pcall(fn)
-
-            -- 2. Execute with malicious 1-line Lua hook on loadstring
-            local dumped_ls = nil
-            local orig_loadstring = loadstring
-            loadstring = function(s, ...)
-                dumped_ls = s
-                return orig_loadstring(s, ...)
-            end
-            local ok_ls, res_ls = pcall(fn)
-            loadstring = orig_loadstring
-
-            -- 3. Execute with malicious Lua hook on table.concat
-            local dumped_tc = nil
-            local orig_concat = table.concat
-            table.concat = function(t, ...)
-                local r = orig_concat(t, ...)
-                if type(r) == "string" and #r > 256 then
-                    dumped_tc = r
+                local fn, err = orig_loadstring(vm_code, "=" .. label)
+                if not fn then
+                    error("Outer VM compile error: " .. tostring(err), 0)
                 end
-                return r
-            end
-            local ok_tc, res_tc = pcall(fn)
-            table.concat = orig_concat
 
-            return ok_clean, type(res_clean), tostring(res_clean),
-                   dumped_ls == nil, ok_ls and res_ls == nil,
-                   dumped_tc == nil, ok_tc and res_tc == nil
-        end
+                local game_clean = false
+                _G.game = setmetatable({{}}, {{
+                    __index = function(_, k)
+                        game_clean = true
+                        error("STAGE2_GAME_" .. tostring(k), 0)
+                    end
+                }})
+
+                -- 1. Execute in clean unhooked Luau environment
+                local ok_clean, res_clean = orig_pcall(fn)
+
+                -- 2. Execute with table.concat = nil (zero table.concat reliance)
+                local game_nil_tc = false
+                _G.game = setmetatable({{}}, {{
+                    __index = function(_, k)
+                        game_nil_tc = true
+                        error("STAGE2_GAME_" .. tostring(k), 0)
+                    end
+                }})
+                table.concat = nil
+                local ok_nil_tc, res_nil_tc = orig_pcall(fn)
+                table.concat = orig_concat
+
+                -- 3. Execute with Lua hook on string.char
+                local game_hook = false
+                _G.game = setmetatable({{}}, {{
+                    __index = function(_, k)
+                        game_hook = true
+                        error("STAGE2_GAME_" .. tostring(k), 0)
+                    end
+                }})
+                string.char = function(...) return orig_char(...) end
+                local ok_sc, res_sc = orig_pcall(fn)
+                string.char = orig_char
+
+                -- 4. Execute with Lua hook on bit32.bxor
+                bit32.bxor = function(a, b, ...) return orig_bxor(a, b, ...) end
+                local ok_bx, res_bx = orig_pcall(fn)
+                bit32.bxor = orig_bxor
+
+                -- 5. Execute with Lua hook on loadstring
+                local dumped_ls = nil
+                loadstring = function(s, ...)
+                    dumped_ls = s
+                    return orig_loadstring(s, ...)
+                end
+                local ok_ls, res_ls = orig_pcall(fn)
+                loadstring = orig_loadstring
+
+                -- 6. Execute with Lua hook on table.concat
+                local dumped_tc = nil
+                table.concat = function(t, ...)
+                    local r = orig_concat(t, ...)
+                    if type(r) == "string" and #r > 64 then
+                        dumped_tc = r
+                    end
+                    return r
+                end
+                local ok_tc, res_tc = orig_pcall(fn)
+                table.concat = orig_concat
+                _G.game = nil
+
+                return ok_clean, type(res_clean), tostring(res_clean), game_clean,
+                       ok_nil_tc, type(res_nil_tc), game_nil_tc,
+                       (not game_hook) and ok_sc and res_sc == nil,
+                       (not game_hook) and ok_bx and res_bx == nil,
+                       dumped_ls == nil and (not game_hook) and ok_ls and res_ls == nil,
+                       dumped_tc == nil and (not game_hook) and ok_tc and res_tc == nil
+            end
+        end)()
         """
     )
     (
         ok_clean,
         res_type,
         res_str,
-        ls_zero_dump,
-        ls_poisoned_nil,
-        tc_zero_dump,
-        tc_poisoned_nil,
+        game_clean,
+        ok_nil_tc,
+        res_nil_tc_type,
+        game_nil_tc,
+        sc_poisoned,
+        bx_poisoned,
+        ls_poisoned,
+        tc_poisoned,
     ) = verify_fn(obf_source, rel_path)
 
-    if not ls_zero_dump or not ls_poisoned_nil:
-        raise AssertionError(
-            f"[{rel_path}] Failed loadstring anti-hook test! zero_dump={ls_zero_dump}, poisoned_nil={ls_poisoned_nil}"
-        )
-    if not tc_zero_dump or not tc_poisoned_nil:
-        raise AssertionError(
-            f"[{rel_path}] Failed table.concat anti-hook test! zero_dump={tc_zero_dump}, poisoned_nil={tc_poisoned_nil}"
-        )
+    if not sc_poisoned:
+        raise AssertionError(f"[{rel_path}] Failed string.char anti-hook silent seed-poisoning test!")
+    if not bx_poisoned:
+        raise AssertionError(f"[{rel_path}] Failed bit32.bxor anti-hook silent seed-poisoning test!")
+    if not ls_poisoned:
+        raise AssertionError(f"[{rel_path}] Failed loadstring anti-hook silent seed-poisoning test!")
+    if not tc_poisoned:
+        raise AssertionError(f"[{rel_path}] Failed table.concat anti-hook silent seed-poisoning test!")
 
     if rel_path == "manifest.lua":
-        if not ok_clean or res_type != "table":
-            raise AssertionError(f"[manifest.lua] Expected VM to return table, got ok={ok_clean} type={res_type} ({res_str})")
+        if not ok_clean or res_type != "table" or not ok_nil_tc or res_nil_tc_type != "table":
+            raise AssertionError(
+                f"[manifest.lua] Expected VM to return table, got ok={ok_clean} type={res_type} ({res_str})"
+            )
     elif rel_path.startswith("modules/") or rel_path in ("lib/ui.lua", "lib/config.lua"):
-        if not ok_clean or res_type != "function":
-            raise AssertionError(f"[{rel_path}] Expected VM to return builder function, got ok={ok_clean} type={res_type} ({res_str})")
+        if not ok_clean or res_type != "function" or not ok_nil_tc or res_nil_tc_type != "function":
+            raise AssertionError(
+                f"[{rel_path}] Expected VM to return builder function, got ok={ok_clean} type={res_type} ({res_str})"
+            )
     else:
-        # Top-level game scripts unpack Stage-2 Vmify bytecode and enter the VM loop until hitting Roblox `game` global
-        if not ok_clean and "attempt to index" in res_str:
+        if game_clean or (not ok_clean and ("attempt to index" in res_str or "STAGE2_GAME_" in res_str)):
+            if not game_nil_tc and ok_nil_tc and res_nil_tc_type == "nil":
+                raise AssertionError(f"[{rel_path}] Failed Stage-2 execution when table.concat = nil!")
             res_type = "vm_entered(luau)"
         elif not ok_clean:
             raise AssertionError(f"[{rel_path}] Unexpected VM runtime error: {res_str}")
@@ -1531,23 +2064,44 @@ def verify_obfuscated_file(
 
 def sync_to_workspace(repo_dir: str = REPO_DIR) -> List[str]:
     synced: List[str] = []
-    for rel in get_target_files(repo_dir):
-        src = os.path.join(repo_dir, rel)
-        dst = os.path.join(WORKSPACE_DIR, rel)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy2(src, dst)
-        synced.append(rel)
+    try:
+        for rel in get_target_files(repo_dir):
+            src = os.path.join(repo_dir, rel)
+            dst = os.path.join(WORKSPACE_DIR, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+            synced.append(rel)
+    except PermissionError:
+        print(f"      [WARN] Skipped workspace sync to {WORKSPACE_DIR} (sandbox write restriction).", flush=True)
     return synced
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Steph HUB Prometheus Vmify + 24-Bit Sponge Dual-VM Obfuscator v5.0")
+    parser = argparse.ArgumentParser(
+        description="Steph HUB Prometheus Vmify Polymorphic Luau Dual-VM Obfuscator v6.0"
+    )
     parser.add_argument("--repo", default=REPO_DIR, help="Path to pet99bynhmt repository")
+    parser.add_argument(
+        "--target",
+        choices=["luau", "lua51"],
+        default="luau",
+        help="Target VM runtime dialect (default: luau, omits Lua 5.1 bitwise fallbacks)",
+    )
     parser.add_argument("--backup-only", action="store_true", help="Only back up unobfuscated source files")
     parser.add_argument("--restore", action="store_true", help="Restore unobfuscated source files into repo")
     parser.add_argument("--verify-only", action="store_true", help="Verify existing obfuscated files in repo")
     parser.add_argument("--no-workspace-sync", action="store_true", help="Skip copying obfuscated files to workspace")
     parser.add_argument("--seed", type=int, default=None, help="Optional deterministic base seed")
+    parser.add_argument(
+        "--bundle",
+        action="store_true",
+        help="Bundle all unobf/ modules via tools/bundler.py and obfuscate into a standalone single-file output",
+    )
+    parser.add_argument(
+        "--bundle-out",
+        default=None,
+        help="Output path for single-file bundled+obfuscated Luau script (implies --bundle)",
+    )
     args = parser.parse_args()
 
     t_start = time.time()
@@ -1571,28 +2125,71 @@ def main() -> int:
 
     bridge = PrometheusBridge()
 
+    if args.bundle or args.bundle_out:
+        tools_dir = os.path.join(args.repo, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        from bundler import bundle_from_dir
+
+        unobf_dir = os.path.join(args.repo, "unobf")
+        bundled_src = bundle_from_dir(unobf_dir, entry="main")
+        bundle_out_path = args.bundle_out or os.path.join(args.repo, "tools", "dist_bundled_check.lua")
+        bundle_seed = (args.seed + 99991) if args.seed is not None else None
+        print(f"[BUNDLE] Compiling unified 23-module bundle (--target={args.target}) -> {bundle_out_path}...", flush=True)
+        obf_bundle = compile_polymorphic_vm(
+            bundled_src,
+            "bundled_stephhub.lua",
+            bridge,
+            file_seed=bundle_seed,
+            target=args.target,
+        )
+        os.makedirs(os.path.dirname(os.path.abspath(bundle_out_path)), exist_ok=True)
+        with open(bundle_out_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(obf_bundle)
+        rep_b = verify_obfuscated_file("bundled_stephhub.lua", bundled_src, obf_bundle, bridge, target=args.target)
+        print(
+            f"      PASS bundled_stephhub.lua | max_loc={rep_b['max_scope_locals']:2d} (<55) | "
+            f"clean={rep_b['clean_bytes']:7d}B -> vm_v6={rep_b['obf_bytes']:7d}B | ret={rep_b['return_type']}",
+            flush=True,
+        )
+        if args.bundle and not args.bundle_out and args.verify_only:
+            return 0
+
     if not args.verify_only:
-        print("[2/4] Compiling Luau files with Dual-VM v5.0 (Stage-2 Sealed-Upvalue Ring-Buffer Vmify + Stage-1 24-Bit Sponge PCBC VM)...", flush=True)
+        print(
+            f"[2/4] Compiling Luau files with Dual-VM v6.0 (--target={args.target}: "
+            f"Unified Base85 + Xorshift32-CFB + Polymorphic IIFE CFF + Lazy Ring-Buffer Vmify)...",
+            flush=True,
+        )
         for idx, (rel, clean_src) in enumerate(clean_sources.items()):
             file_seed = (args.seed + idx * 7919) if args.seed is not None else None
-            obf_src = compile_polymorphic_vm(clean_src, rel, bridge, file_seed=file_seed)
+            obf_src = compile_polymorphic_vm(
+                clean_src,
+                rel,
+                bridge,
+                file_seed=file_seed,
+                target=args.target,
+            )
             out_path = os.path.join(args.repo, rel)
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
             with open(out_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(obf_src)
 
-    print("[3/4] Verifying all obfuscated files in Lua 5.1 + 24-Bit Sponge + Prometheus LuaU AST harness...", flush=True)
+    print(
+        f"[3/4] Verifying all obfuscated files in Luau ({args.target}) + Anti-Pre-Hook + Prometheus LuaU AST harness...",
+        flush=True,
+    )
     reports: List[Dict[str, object]] = []
     for rel, clean_src in clean_sources.items():
         obf_path = os.path.join(args.repo, rel)
         with open(obf_path, "r", encoding="utf-8") as f:
             obf_src = f.read()
-        rep = verify_obfuscated_file(rel, clean_src, obf_src, bridge)
+        rep = verify_obfuscated_file(rel, clean_src, obf_src, bridge, target=args.target)
         reports.append(rep)
         print(
-            f"      PASS {rel:24s} | max_loc={rep['max_scope_locals']:2d} (<200) | "
-            f"clean={rep['clean_bytes']:7d}B -> vm_v5={rep['obf_bytes']:7d}B | "
-            f"sponge=24BIT_SEALED | ret={rep['return_type']}",
+            f"      PASS {rel:24s} | max_loc={rep['max_scope_locals']:2d} (<55) | "
+            f"clean={rep['clean_bytes']:7d}B -> vm_v6={rep['obf_bytes']:7d}B | "
+            f"cfb=B85_XORSHIFT32 | ret={rep['return_type']}",
             flush=True,
         )
 
@@ -1600,7 +2197,7 @@ def main() -> int:
         print(f"[4/4] Syncing {len(reports)} verified obfuscated files to {WORKSPACE_DIR}...", flush=True)
         sync_to_workspace(args.repo)
 
-    print(f"[DONE] Verified {len(reports)}/{len(reports)} VM-obfuscated files in {time.time() - t_start:.2f}s.", flush=True)
+    print(f"[DONE] Verified {len(reports)}/{len(reports)} v6.0 VM-obfuscated files in {time.time() - t_start:.2f}s.", flush=True)
     return 0
 
 

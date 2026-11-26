@@ -1,49 +1,41 @@
 #!/usr/bin/env python3
 """
-Steph HUB - v5.0 Red-Team Security Verification Suite (`verify_v5_sponge.py`)
-=============================================================================
-Standalone red-team verification suite that tests all 23 obfuscated `.lua` files
-against every attack vector and architectural invariant of the v5.0 upgrade:
+Steph HUB - v6.0 Luau Red-Team Sponge, Anti-Pre-Hook & Sealed-Upvalue Suite (`verify_v5_sponge.py`)
+===================================================================================================
+Standalone red-team verification suite that tests all 23 obfuscated `.lua` files against every
+attack vector and architectural invariant of the v6.0 `--target=luau` Dual-VM architecture:
 
-1. Test 1 — Static Seed Folding & Magic Constant Audit:
+1. Test 1 — Static Seed Folding, Magic Constant, Plaintext Leak & Zero Lua 5.1 Fallback Audit:
    - Verifies no `seed_base + flag * step` 1-bit bottleneck pattern exists.
-   - Verifies none of the C-closure probe target outputs (`23575`, `3257`, `3008093`,
-     `8314969`, `5441028`) appear anywhere in the generated `.lua` source.
-   - Verifies zero plaintext probe strings (`"getinfo"`, `"iscclosure"`, `"islclosure"`,
-     `"ishooked"`, `"isfunctionhooked"`, `"loadstring"`, `"short_src"`, `"linedefined"`,
-     `"VM integrity check failed"`, `"unknown VM opcode"`) appear in the generated `.lua` source.
+   - Verifies zero magic probe target outputs (`23575`, `3257`, `3008093`, `8314969`, `5441028`).
+   - Verifies zero plaintext probe or diagnostic strings (`"Detected"`, `"getinfo"`, `"iscclosure"`,
+     `"islclosure"`, `"ishooked"`, `"isfunctionhooked"`, `"loadstring"`, `"short_src"`, `"linedefined"`,
+     `"VM integrity check failed"`, `"unknown VM opcode"`).
+   - Verifies zero Lua 5.1 16x16 XOR bitwise fallback loop in `--target=luau` output.
 
-2. Test 2 — Cross-Runtime Execution (Lua 5.1 `debug.getinfo`, Luau `debug.info`, `string.dump`-only):
-   - Executes `manifest.lua`, `ps99_engine_v3.lua`, and all 23 obfuscated files across:
-     a) Standard Lua 5.1 (`debug.getinfo` present, `debug.info = nil`) -> MUST succeed!
-     b) Simulated Luau (`debug.info` returning `"[C]", -1, 0, true` for C closures and
-        `"chunk", 10, 2, false` for the 2-param Lua canary; `debug.getinfo = nil`) -> MUST succeed!
-     c) `string.dump`-only (`debug = nil`, `string.dump` intact) -> MUST succeed!
+2. Test 2 — Luau Runtime Execution (`bit32`, `debug.info`, `coroutine.isyieldable`, `table.create`):
+   - 2a: Standard Luau environment (`debug.info` returning `"[C]", -1` for C/host primitives and Lua
+         `short_src, linedefined, numparams, is_vararg` for Lua closures) -> MUST succeed on all 23 files!
+   - 2b: Hybrid Luau + Executor environment (`debug.info` + `debug.getinfo` + `iscclosure`/`islclosure`) -> MUST succeed!
+   - 2c: Luau environment with `table.concat = nil` (proving zero reliance on `table.concat`) -> MUST succeed!
 
 3. Test 3 — Environment Stripping Attack (`debug = nil; string.dump = nil`):
-   - Strips both `debug` and `string.dump` before executing the obfuscated script.
-   - Verifies `w_probe` fails closed (`0`), corrupting the 24-bit sponge `acc` so every file
-     fails to decrypt and returns `nil` (never executing the Stage-2 payload).
+   - Strips `debug` and `string.dump` before executing the obfuscated script.
+   - Verifies integrity probe silently poisons `seed` so Stage-2 never executes and zero diagnostic errors leak.
 
-4. Test 4 — Behavioral Metamethod & C-Dumper `setmetatable` Trap:
-   - Simulates a dynamic constant dumper wrapping `setmetatable` that touches `tbl[1]`
-     whenever a table with `__index` is registered (4a), and an unlocked metatable hook
-     that allows rebinding a locked `__metatable = 211` table (4b).
-   - Verifies `behav` diverges from `3257`, corrupting the 24-bit sponge `acc` and
-     preventing decryption across all 23 files.
+4. Test 4 — Pre-Hooking & Behavioral Metamethod Traps:
+   - 4a: Lua closure wrapper hook on `string.char` -> caught via `debug.info` (`~= "[C]", -1`), silently poisons `seed`.
+   - 4b: Lua closure wrapper hook on `bit32.bxor` -> caught via `debug.info`, silently poisons `seed`.
+   - 4c: Lua closure wrapper hook on `pcall` & `loadstring` -> caught via `debug.info`, silently poisons `seed`.
 
-5. Test 5 — Pointer Aliasing Attack (`rawget = rawset`):
-   - Aliases two globals to the same C closure (`rawget = rawset`) before running.
-   - Verifies `seen[fn]` injects `dup = 911` into the sponge, corrupting `acc` and
-     preventing decryption across all 23 files.
+5. Test 5 — Pointer Aliasing Attack (`loadstring = pcall; rawget = rawset`):
+   - Aliases genuine C primitives (`debug.info` still returns `"[C]", -1` for both) before running.
+   - Verifies pointer uniqueness check (`seen[fn]`) catches duplicate closures and silently poisons `seed`.
 
-6. Test 6 — Sealed `Awxs` Upvalues & Metatable-Free Ring Buffer:
-   - Hooks `getmetatable` (called once during Stage-1's `behav` challenge at boot) so that
-     immediately after `getmetatable` runs in Stage 1, `_G.setmetatable`, `_G.rawset`,
-     `_G.ipairs`, `_G.tonumber`, `_G.select`, and `_G.unpack` are replaced with `error(...)` bombs.
-   - Verifies that Stage-1 `OP_EXEC` and Stage-2 `Awxs` (with lexical upvalues, numeric `for`,
-     and the 8-slot metatable-free ring buffer constant getter `K(idx)`) execute cleanly
-     across all 23 files without ever triggering a single late global lookup.
+6. Test 6 — Sealed Stage-2 Lexical Upvalues & Zero Late `_ENV` Primitive Lookups:
+   - Replaces `_G.setmetatable`, `_G.rawset`, `_G.ipairs`, `_G.tonumber`, `_G.select`, `_G.unpack`,
+     and `_G.table.concat` with `LATE_*` error bombs during Stage-2 execution and builder invocation.
+   - Verifies all 23 files execute Stage-2 VM + ring-buffered `K(idx)` with ZERO late global lookups.
 """
 
 from __future__ import annotations
@@ -52,17 +44,21 @@ import argparse
 import glob
 import os
 import re
+import subprocess
 import sys
 import time
 from typing import Dict, List, Tuple
 
 from lupa import lua51
 
-REPO_DIR = r"C:\Users\LaptopAT\.gemini\antigravity\scratch\pet99bynhmt"
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_DIR = os.path.dirname(THIS_DIR)
 
-# 1-bit bottleneck pattern from v4.0: `v_t1 = boot_seed_base + v_t2 * boot_trust_step;`
+from verify_v6_luau_obf import LUAU_ENV_BOOTSTRAP
+
 BOTTLENECK_1BIT_RE = re.compile(r"=[0-9]{4,}\+[a-zA-Z_][a-zA-Z0-9_]*\*[0-9]{4,};")
 STATIC_CONST_ARITH_RE = re.compile(r"\(-?\d+[\+\-%]-?\d+\)")
+LUA51_XOR_FALLBACK_RE = re.compile(r"for\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*0\s*,\s*15\s+do")
 
 FORBIDDEN_MAGIC_NUMBERS: Tuple[int, ...] = (
     23575,
@@ -73,6 +69,7 @@ FORBIDDEN_MAGIC_NUMBERS: Tuple[int, ...] = (
 )
 
 FORBIDDEN_PLAINTEXT_STRINGS: Tuple[str, ...] = (
+    "Detected!",
     "getinfo",
     "iscclosure",
     "islclosure",
@@ -107,16 +104,13 @@ def get_target_files(repo_dir: str = REPO_DIR) -> List[str]:
     return targets
 
 
-def check_clean_execution_outcome(rel_path: str, ok: bool, res_type: str, res_str: str) -> Tuple[bool, str]:
-    """
-    Validates that an untampered execution of `rel_path` succeeded through Stage-1
-    and Stage-2 Vmify decryption:
-      - `manifest.lua` -> returns decrypted manifest table (`ok=True, res_type='table'`)
-      - `modules/*.lua`, `lib/ui.lua`, `lib/config.lua` -> returns decrypted builder function (`ok=True, res_type='function'`)
-      - Top-level game scripts (`main.lua`, `Stehp-Hub.lua`, `ps99_engine_v3.lua`, `games/*.lua`) ->
-        decrypts and enters Stage-2 Vmify bytecode interpreter until hitting a Roblox global (`attempt to index` / `attempt to call`),
-        never returning `nil` (which is the fail-closed sponge poison outcome).
-    """
+def check_clean_execution_outcome(
+    rel_path: str,
+    ok: bool,
+    res_type: str,
+    res_str: str,
+    game_touched: bool,
+) -> Tuple[bool, str]:
     if rel_path == "manifest.lua":
         if ok and res_type == "table":
             return True, "table"
@@ -126,11 +120,37 @@ def check_clean_execution_outcome(rel_path: str, ok: bool, res_type: str, res_st
             return True, "function"
         return False, f"expected function, got ok={ok} type={res_type} ({res_str})"
     else:
-        if not ok and ("attempt to index" in res_str or "attempt to call" in res_str):
+        if game_touched or (not ok and ("attempt to index" in res_str or "attempt to call" in res_str or "STAGE2_GAME" in res_str)):
             return True, "vm_entered(stage2)"
         if ok and res_type != "nil":
             return True, f"ok({res_type})"
-        return False, f"expected stage2 entry, got ok={ok} type={res_type} ({res_str})"
+        return False, f"expected stage2 entry, got ok={ok} type={res_type} game_touched={game_touched} ({res_str})"
+
+
+def check_poisoned_outcome(
+    rel_path: str,
+    ok: bool,
+    res_type: str,
+    res_str: str,
+    game_touched: bool,
+) -> Tuple[bool, str]:
+    """
+    Verifies silent seed poisoning:
+      1. Stage-2 never touched `_G.game` (`game_touched == False`).
+      2. Never decrypted/returned valid `manifest` table or `modules/*` builder function.
+      3. Zero diagnostic `"Detected"` / `"hook"` / `"tamper"` error strings if an organic error occurred.
+    """
+    if game_touched:
+        return False, "Stage-2 executed and touched _G.game despite tamper!"
+    if rel_path == "manifest.lua" and ok and res_type == "table":
+        return False, "manifest.lua decrypted valid table despite tamper!"
+    if (rel_path.startswith("modules/") or rel_path in ("lib/ui.lua", "lib/config.lua")) and ok and res_type == "function":
+        return False, f"{rel_path} returned Stage-2 builder function despite tamper!"
+    if not ok:
+        low = res_str.lower()
+        if "detected" in low or "tamper" in low or "hook" in low or "integrity" in low:
+            return False, f"Non-silent diagnostic error string leaked: {res_str}"
+    return True, "poisoned_silently"
 
 
 def run_test1_static_audit(files: Dict[str, str]) -> List[str]:
@@ -143,6 +163,9 @@ def run_test1_static_audit(files: Dict[str, str]) -> List[str]:
         m_1bit = BOTTLENECK_1BIT_RE.search(src)
         if m_1bit:
             errors.append(f"[{rel}] Found 1-bit bottleneck pattern: {m_1bit.group(0)!r}")
+
+        if LUA51_XOR_FALLBACK_RE.search(src):
+            errors.append(f"[{rel}] Found Lua 5.1 16x16 XOR fallback loop in --target=luau build!")
 
         for magic in FORBIDDEN_MAGIC_NUMBERS:
             if re.search(rf"(?<![0-9]){magic}(?![0-9])", src):
@@ -162,225 +185,195 @@ def run_test1_static_audit(files: Dict[str, str]) -> List[str]:
 def build_lua_harness() -> Tuple[lua51.LuaRuntime, object]:
     rt = lua51.LuaRuntime()
     harness_fn = rt.eval(
-        r"""
-        function(vm_code, label, mode)
-            table.create = table.create or function() return {} end
+        f"""
+        (function()
+            {LUAU_ENV_BOOTSTRAP}
 
-            local orig_debug = debug
-            local orig_getinfo = debug and debug.getinfo
-            local orig_info = debug and debug.info
-            local orig_dump = string.dump
-            local orig_smt = setmetatable
-            local orig_gmt = getmetatable
-            local orig_rset = rawset
-            local orig_rget = rawget
-            local orig_ipairs = ipairs
-            local orig_tonum = tonumber
-            local orig_select = select
-            local orig_unpack = unpack
+            return function(vm_code, label, mode)
+                local host_c_set, orig_dbg = install_luau_env()
+                local orig_getinfo = orig_dbg and orig_dbg.getinfo
+                local orig_dump = string.dump
+                local orig_char = string.char
+                local orig_byte = string.byte
+                local orig_sub = string.sub
+                local orig_bxor = bit32.bxor
+                local orig_band = bit32.band
+                local orig_pcall = pcall
+                local orig_loadstring = loadstring
+                local orig_smt = setmetatable
+                local orig_gmt = getmetatable
+                local orig_rset = rawset
+                local orig_rget = rawget
+                local orig_ipairs = ipairs
+                local orig_tonum = tonumber
+                local orig_select = select
+                local orig_unpack = unpack
+                local orig_concat = table.concat
+                local sim_debug = debug
 
-            local late_bomb_triggered = nil
+                local late_bomb_triggered = nil
+                local game_touched = false
 
-            local function restore_all()
-                debug = orig_debug
-                if orig_debug then
-                    orig_debug.getinfo = orig_getinfo
-                    orig_debug.info = orig_info
+                local function restore_all()
+                    debug = sim_debug
+                    string.dump = orig_dump
+                    string.char = orig_char
+                    string.byte = orig_byte
+                    string.sub = orig_sub
+                    bit32.bxor = orig_bxor
+                    bit32.band = orig_band
+                    pcall = orig_pcall
+                    loadstring = orig_loadstring
+                    setmetatable = orig_smt
+                    getmetatable = orig_gmt
+                    rawset = orig_rset
+                    rawget = orig_rget
+                    ipairs = orig_ipairs
+                    tonumber = orig_tonum
+                    select = orig_select
+                    unpack = orig_unpack
+                    table.concat = orig_concat
+                    _G.iscclosure = nil
+                    _G.islclosure = nil
+                    _G.ishooked = nil
+                    _G.game = nil
                 end
-                string.dump = orig_dump
-                setmetatable = orig_smt
-                getmetatable = orig_gmt
-                rawset = orig_rset
-                rawget = orig_rget
-                ipairs = orig_ipairs
-                tonumber = orig_tonum
-                select = orig_select
-                unpack = orig_unpack
-            end
 
-            local fn, err = loadstring(vm_code, "=" .. label)
-            if not fn then
-                return false, "compile_error", tostring(err), false, "nil"
-            end
+                local fn, err = orig_loadstring(vm_code, "=" .. label)
+                if not fn then
+                    restore_all()
+                    return false, "compile_error", tostring(err), false, "nil", false
+                end
 
-            if mode == "lua51_getinfo" then
-                -- 2a: Standard Lua 5.1 environment (debug.getinfo present, debug.info = nil)
-                debug = { getinfo = orig_getinfo }
-                string.dump = orig_dump
-
-            elseif mode == "luau_debug_info" then
-                -- 2b: Simulated Luau environment (debug.info present, debug.getinfo = nil)
-                local sim_info
-                sim_info = function(f, what)
-                    local is_c = false
-                    if f == sim_info then
-                        is_c = true
-                    elseif type(f) == "function" and orig_getinfo then
-                        local inf = orig_getinfo(f, "S")
-                        is_c = (inf and inf.what == "C") or false
+                local function arm_late_bombs()
+                    setmetatable = function() late_bomb_triggered = "LATE_SETMETATABLE"; error("LATE_SETMETATABLE", 0) end
+                    rawset = function() late_bomb_triggered = "LATE_RAWSET"; error("LATE_RAWSET", 0) end
+                    ipairs = function() late_bomb_triggered = "LATE_IPAIRS"; error("LATE_IPAIRS", 0) end
+                    tonumber = function() late_bomb_triggered = "LATE_TONUMBER"; error("LATE_TONUMBER", 0) end
+                    select = function() late_bomb_triggered = "LATE_SELECT"; error("LATE_SELECT", 0) end
+                    unpack = function() late_bomb_triggered = "LATE_UNPACK"; error("LATE_UNPACK", 0) end
+                    if table then
+                        table.concat = function() late_bomb_triggered = "LATE_CONCAT"; error("LATE_CONCAT", 0) end
                     end
-                    local s = is_c and "[C]" or "chunk"
-                    local l = is_c and -1 or 10
-                    local a = is_c and 0 or 2
-                    local va = is_c and true or false
-                    if what == "sla" then
-                        return s, l, a, va
-                    end
-                    local out = {}
-                    for i = 1, #what do
-                        local c = string.sub(what, i, i)
-                        if c == "s" then
-                            out[#out + 1] = s
-                        elseif c == "l" then
-                            out[#out + 1] = l
-                        elseif c == "a" then
-                            out[#out + 1] = a
-                            out[#out + 1] = va
+                end
+
+                _G.game = orig_smt({{}}, {{
+                    __index = function(_, k)
+                        game_touched = true
+                        if mode == "seal_upvalues_after_boot" then
+                            arm_late_bombs()
                         end
+                        error("STAGE2_GAME_" .. tostring(k), 0)
                     end
-                    return orig_unpack(out)
-                end
-                debug = { info = sim_info, getinfo = nil }
-                string.dump = orig_dump
+                }})
 
-            elseif mode == "string_dump_only" then
-                -- 2c: string.dump-only environment (debug = nil, string.dump intact)
-                debug = nil
-                string.dump = orig_dump
+                if mode == "luau_clean" then
+                    -- 2a: Standard Luau environment
 
-            elseif mode == "strip_debug_and_dump" then
-                -- Test 3: Environment Stripping Attack (debug = nil; string.dump = nil)
-                debug = nil
-                string.dump = nil
-
-            elseif mode == "behav_dumper_touch" then
-                -- Test 4a: C-Dumper setmetatable trap touching tbl[1] when __index is registered
-                -- Even if the attacker disguises their setmetatable hook to pass debug.getinfo as a C function,
-                -- touching tbl[1] increments probe_hits and corrupts behav (3286 ~= 3257).
-                local hooked_smt
-                hooked_smt = function(t, mt)
-                    local res = orig_smt(t, mt)
-                    if type(mt) == "table" and mt.__index then
-                        local _ = t[1]
+                elseif mode == "luau_executor_hybrid" then
+                    -- 2b: Luau + Executor environment (debug.info + debug.getinfo + iscclosure/islclosure/ishooked)
+                    local fn_isc = function(f)
+                        if host_c_set[f] then return true end
+                        local inf = orig_getinfo and orig_getinfo(f, "S")
+                        return (inf and inf.what == "C") or false
                     end
-                    return res
-                end
-                setmetatable = hooked_smt
-                debug = {
-                    getinfo = function(f, what)
-                        if f == hooked_smt then
-                            return orig_getinfo(orig_smt, what)
-                        end
+                    local fn_isl = function(f)
+                        return type(f) == "function" and not fn_isc(f)
+                    end
+                    local fn_ish = function(_) return false end
+                    local fn_geti = function(f, what)
+                        if host_c_set[f] then return orig_getinfo(orig_pcall, what) end
                         return orig_getinfo(f, what)
                     end
-                }
+                    host_c_set[fn_isc] = true
+                    host_c_set[fn_isl] = true
+                    host_c_set[fn_ish] = true
+                    host_c_set[fn_geti] = true
+                    _G.iscclosure = fn_isc
+                    _G.islclosure = fn_isl
+                    _G.ishooked = fn_ish
+                    debug = {{ info = sim_debug.info, getinfo = fn_geti, traceback = sim_debug.traceback }}
 
-            elseif mode == "behav_rebind_unlocked" then
-                -- Test 4b: Metamethod tampering where locked __metatable = 211 is allowed to rebind
-                local hooked_smt
-                hooked_smt = function(t, mt)
-                    if orig_gmt(t) == 211 then
-                        return t
-                    end
-                    return orig_smt(t, mt)
+                elseif mode == "luau_nil_concat" then
+                    -- 2c: table.concat completely absent
+                    table.concat = nil
+
+                elseif mode == "strip_debug_and_dump" then
+                    -- Test 3: Strip debug and string.dump completely
+                    debug = nil
+                    string.dump = nil
+
+                elseif mode == "hook_string_char" then
+                    -- Test 4a: Lua wrapper hook on string.char
+                    string.char = function(...) return orig_char(...) end
+
+                elseif mode == "hook_bit32_bxor" then
+                    -- Test 4b: Lua wrapper hook on bit32.bxor
+                    bit32.bxor = function(a, b, ...) return orig_bxor(a, b, ...) end
+
+                elseif mode == "hook_pcall_and_loadstring" then
+                    -- Test 4c: Lua wrapper hook on pcall & loadstring
+                    pcall = function(f, ...) return orig_pcall(f, ...) end
+                    loadstring = function(s, ...) return orig_loadstring(s, ...) end
+
+                elseif mode == "alias_c_primitives" then
+                    -- Test 5: Pointer aliasing attack on genuine C primitives
+                    -- Both remain genuine [C], -1 closures; only pointer uniqueness catches aliasing!
+                    rawget = orig_rset
+                    loadstring = orig_pcall
+                    string.sub = orig_byte
+
+                elseif mode == "seal_upvalues_after_boot" then
+                    -- Test 6: Poison _G globals right when Stage-2 starts / before invoking Stage-2 builders
                 end
-                setmetatable = hooked_smt
-                debug = {
-                    getinfo = function(f, what)
-                        if f == hooked_smt then
-                            return orig_getinfo(orig_smt, what)
-                        end
-                        return orig_getinfo(f, what)
-                    end
-                }
 
-            elseif mode == "alias_rawget_rawset" then
-                -- Test 5: Pointer Aliasing Attack (rawget = rawset)
-                -- rawset is a genuine C closure, so all C-closure checks pass; only seen[fn] (dup = 911) catches it!
-                rawget = orig_rset
+                local ok, res = orig_pcall(fn)
+                local rtype = type(res)
+                local rstr = tostring(res)
 
-            elseif mode == "seal_upvalues_after_boot" then
-                -- Test 6: Hook getmetatable (called once during Stage-1 behav challenge at boot)
-                -- Right after getmetatable is called in Stage 1, poison _G.setmetatable, _G.rawset,
-                -- _G.ipairs, _G.tonumber, _G.select, and _G.unpack with error bombs!
-                local hooked_gmt
-                hooked_gmt = function(t)
-                    local res = orig_gmt(t)
-                    setmetatable = function()
-                        late_bomb_triggered = "LATE_SETMETATABLE"
-                        error("LATE_SETMETATABLE", 0)
-                    end
-                    rawset = function()
-                        late_bomb_triggered = "LATE_RAWSET"
-                        error("LATE_RAWSET", 0)
-                    end
-                    ipairs = function()
-                        late_bomb_triggered = "LATE_IPAIRS"
-                        error("LATE_IPAIRS", 0)
-                    end
-                    tonumber = function()
-                        late_bomb_triggered = "LATE_TONUMBER"
-                        error("LATE_TONUMBER", 0)
-                    end
-                    select = function()
-                        late_bomb_triggered = "LATE_SELECT"
-                        error("LATE_SELECT", 0)
-                    end
-                    unpack = function()
-                        late_bomb_triggered = "LATE_UNPACK"
-                        error("LATE_UNPACK", 0)
-                    end
-                    return res
+                if mode == "seal_upvalues_after_boot" and ok and rtype == "function" then
+                    local dummy
+                    dummy = orig_smt({{}}, {{
+                        __index = function() return function() return dummy end end,
+                        __call = function() return dummy end,
+                    }})
+                    arm_late_bombs()
+                    orig_pcall(res, dummy, dummy)
                 end
-                getmetatable = hooked_gmt
-                debug = {
-                    getinfo = function(f, what)
-                        if f == hooked_gmt then
-                            return orig_getinfo(orig_gmt, what)
-                        end
-                        return orig_getinfo(f, what)
-                    end
-                }
-            end
 
-            local ok, res = pcall(fn)
-            local rtype = type(res)
-            local rstr = tostring(res)
-            if mode == "seal_upvalues_after_boot" and ok and rtype == "function" then
-                -- Also invoke the returned Stage-2 builder closure under the poisoned _G
-                -- to exercise inner closure ARGS loops and ring-buffered K(idx) lookups!
-                pcall(res, {})
-            end
-            if ok and rtype == "table" and label == "manifest.lua" then
-                -- Verify manifest table actually decrypted string keys properly (on res or res[1])
-                local str_keys = 0
-                for k, v in pairs(res) do
-                    if type(k) == "string" and #k >= 2 then
-                        str_keys = str_keys + 1
-                    elseif type(v) == "table" then
-                        for k2, _ in pairs(v) do
-                            if type(k2) == "string" and #k2 >= 2 then
-                                str_keys = str_keys + 1
+                if ok and rtype == "table" and label == "manifest.lua" then
+                    local str_keys = 0
+                    for k, v in pairs(res) do
+                        if type(k) == "string" and #k >= 2 then
+                            str_keys = str_keys + 1
+                        elseif type(v) == "table" then
+                            for k2, _ in pairs(v) do
+                                if type(k2) == "string" and #k2 >= 2 then
+                                    str_keys = str_keys + 1
+                                end
                             end
                         end
                     end
+                    if str_keys == 0 then
+                        ok = false
+                        rtype = "corrupt_table"
+                        rstr = "manifest_table_has_zero_string_keys"
+                    end
                 end
-                if str_keys == 0 then
-                    ok = false
-                    rstr = "manifest_table_has_zero_string_keys"
-                end
+
+                restore_all()
+                return ok, rtype, rstr, late_bomb_triggered ~= nil, tostring(late_bomb_triggered), game_touched
             end
-            restore_all()
-            return ok, rtype, rstr, late_bomb_triggered ~= nil, tostring(late_bomb_triggered)
-        end
+        end)()
         """
     )
     return rt, harness_fn
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Steph HUB v5.0 Red-Team Sponge & Sealed-Upvalue Verification Suite")
+    parser = argparse.ArgumentParser(description="Steph HUB v6.0 Luau Red-Team Sponge & Anti-Pre-Hook Suite")
     parser.add_argument("--repo", default=REPO_DIR, help="Path to pet99bynhmt repository")
+    parser.add_argument("--skip-v6", action="store_true", help="Skip chaining verify_v6_luau_obf.py")
     args = parser.parse_args()
 
     t0 = time.time()
@@ -394,16 +387,14 @@ def main() -> int:
         with open(p, "r", encoding="utf-8") as f:
             files[rel] = f.read()
 
-    print(f"================================================================================", flush=True)
-    print(f" Steph HUB v5.0 Red-Team Verification Suite — Auditing {len(files)} obfuscated files", flush=True)
-    print(f"================================================================================", flush=True)
+    print("================================================================================", flush=True)
+    print(f" Steph HUB v6.0 Luau Red-Team Verification Suite — Auditing {len(files)} obfuscated files", flush=True)
+    print("================================================================================", flush=True)
 
     all_passed = True
 
-    # -------------------------------------------------------------------------
-    # TEST 1: Static Seed Folding & Magic Constant Audit
-    # -------------------------------------------------------------------------
-    print("\n[Test 1/6] Static Seed Folding & Magic Constant Audit...", flush=True)
+    # TEST 1
+    print("\n[Test 1/6] Static Seed Folding, Magic Constant, Plaintext & Zero-Fallback Audit...", flush=True)
     t1_errors = run_test1_static_audit(files)
     if t1_errors:
         all_passed = False
@@ -412,26 +403,24 @@ def main() -> int:
     else:
         print(
             f"  PASS: {len(files)}/{len(files)} files contain 0 1-bit bottleneck patterns, "
-            f"0 magic probe constants {FORBIDDEN_MAGIC_NUMBERS}, and 0 plaintext probe strings.",
+            f"0 Lua 5.1 XOR fallback loops, 0 magic constants, and 0 plaintext probe/diagnostic strings.",
             flush=True,
         )
 
     _, harness_fn = build_lua_harness()
 
-    # -------------------------------------------------------------------------
-    # TEST 2: Cross-Runtime Execution (Lua 5.1 getinfo, Luau debug.info, string.dump-only)
-    # -------------------------------------------------------------------------
-    print("\n[Test 2/6] Cross-Runtime Execution (Lua 5.1 debug.getinfo, Luau debug.info, string.dump-only)...", flush=True)
+    # TEST 2
+    print("\n[Test 2/6] Luau Runtime Execution (Clean Luau, Executor Hybrid, table.concat=nil)...", flush=True)
     t2_errors: List[str] = []
     for mode, mode_label in (
-        ("lua51_getinfo", "2a: Lua 5.1 debug.getinfo (debug.info=nil)"),
-        ("luau_debug_info", "2b: Simulated Luau debug.info (debug.getinfo=nil)"),
-        ("string_dump_only", "2c: string.dump-only (debug=nil)"),
+        ("luau_clean", "2a: Native Luau (bit32 + debug.info + isyieldable + table.create)"),
+        ("luau_executor_hybrid", "2b: Hybrid Luau + Executor (debug.info + iscclosure/islclosure/ishooked)"),
+        ("luau_nil_concat", "2c: Luau with table.concat = nil (zero table.concat dependency)"),
     ):
         mode_ok = 0
         for rel, src in files.items():
-            ok, rtype, rstr, _, _ = harness_fn(src, rel, mode)
-            passed, detail = check_clean_execution_outcome(rel, ok, rtype, rstr)
+            ok, rtype, rstr, _, _, gtouch = harness_fn(src, rel, mode)
+            passed, detail = check_clean_execution_outcome(rel, ok, rtype, rstr, bool(gtouch))
             if not passed:
                 t2_errors.append(f"[{mode_label}] [{rel}] {detail}")
             else:
@@ -443,41 +432,40 @@ def main() -> int:
         for err in t2_errors:
             print(f"  FAIL: {err}", flush=True)
 
-    # -------------------------------------------------------------------------
-    # TEST 3: Environment Stripping Attack (debug = nil; string.dump = nil)
-    # -------------------------------------------------------------------------
+    # TEST 3
     print("\n[Test 3/6] Environment Stripping Attack (debug = nil; string.dump = nil)...", flush=True)
     t3_errors: List[str] = []
     t3_ok = 0
     for rel, src in files.items():
-        ok, rtype, rstr, _, _ = harness_fn(src, rel, "strip_debug_and_dump")
-        if ok and rtype == "nil":
+        ok, rtype, rstr, _, _, gtouch = harness_fn(src, rel, "strip_debug_and_dump")
+        passed, detail = check_poisoned_outcome(rel, ok, rtype, rstr, bool(gtouch))
+        if passed:
             t3_ok += 1
         else:
-            t3_errors.append(f"[{rel}] Expected fail-closed (ok=True, type='nil'), got ok={ok} type={rtype} ({rstr})")
+            t3_errors.append(f"[{rel}] {detail}")
     if t3_errors:
         all_passed = False
         for err in t3_errors:
             print(f"  FAIL: {err}", flush=True)
     else:
-        print(f"  PASS: {t3_ok}/{len(files)} files failed closed (w_probe=0 -> poisoned sponge -> returned nil).", flush=True)
+        print(f"  PASS: {t3_ok}/{len(files)} files silently poisoned seed and blocked Stage-2 on stripped debug.", flush=True)
 
-    # -------------------------------------------------------------------------
-    # TEST 4: Behavioral Metamethod & C-Dumper setmetatable Trap
-    # -------------------------------------------------------------------------
-    print("\n[Test 4/6] Behavioral Metamethod & C-Dumper setmetatable Trap...", flush=True)
+    # TEST 4
+    print("\n[Test 4/6] Pre-Hooking Attacks (string.char, bit32.bxor, pcall & loadstring Lua Wrappers)...", flush=True)
     t4_errors: List[str] = []
     for mode, mode_label in (
-        ("behav_dumper_touch", "4a: C-Dumper setmetatable hook touching tbl[1] on __index"),
-        ("behav_rebind_unlocked", "4b: Metamethod tamper allowing rebind of locked __metatable=211"),
+        ("hook_string_char", "4a: Lua wrapper hook on string.char"),
+        ("hook_bit32_bxor", "4b: Lua wrapper hook on bit32.bxor"),
+        ("hook_pcall_and_loadstring", "4c: Lua wrapper hook on pcall & loadstring"),
     ):
         m_ok = 0
         for rel, src in files.items():
-            ok, rtype, rstr, _, _ = harness_fn(src, rel, mode)
-            if ok and rtype == "nil":
+            ok, rtype, rstr, _, _, gtouch = harness_fn(src, rel, mode)
+            passed, detail = check_poisoned_outcome(rel, ok, rtype, rstr, bool(gtouch))
+            if passed:
                 m_ok += 1
             else:
-                t4_errors.append(f"[{mode_label}] [{rel}] Expected fail-closed nil, got ok={ok} type={rtype} ({rstr})")
+                t4_errors.append(f"[{mode_label}] [{rel}] {detail}")
         print(f"  {'PASS' if m_ok == len(files) else 'FAIL'}: {mode_label} -> {m_ok}/{len(files)} files poisoned & blocked", flush=True)
 
     if t4_errors:
@@ -485,33 +473,30 @@ def main() -> int:
         for err in t4_errors:
             print(f"  FAIL: {err}", flush=True)
 
-    # -------------------------------------------------------------------------
-    # TEST 5: Pointer Aliasing Attack (rawget = rawset)
-    # -------------------------------------------------------------------------
-    print("\n[Test 5/6] Pointer Aliasing Attack (rawget = rawset)...", flush=True)
+    # TEST 5
+    print("\n[Test 5/6] Pointer Aliasing Attack on Genuine C Closures...", flush=True)
     t5_errors: List[str] = []
     t5_ok = 0
     for rel, src in files.items():
-        ok, rtype, rstr, _, _ = harness_fn(src, rel, "alias_rawget_rawset")
-        if ok and rtype == "nil":
+        ok, rtype, rstr, _, _, gtouch = harness_fn(src, rel, "alias_c_primitives")
+        passed, detail = check_poisoned_outcome(rel, ok, rtype, rstr, bool(gtouch))
+        if passed:
             t5_ok += 1
         else:
-            t5_errors.append(f"[{rel}] Expected fail-closed nil on rawget=rawset, got ok={ok} type={rtype} ({rstr})")
+            t5_errors.append(f"[{rel}] {detail}")
     if t5_errors:
         all_passed = False
         for err in t5_errors:
             print(f"  FAIL: {err}", flush=True)
     else:
-        print(f"  PASS: {t5_ok}/{len(files)} files detected duplicate C-closure pointer (dup=911) and returned nil.", flush=True)
+        print(f"  PASS: {t5_ok}/{len(files)} files caught C-closure pointer aliasing and silently poisoned seed.", flush=True)
 
-    # -------------------------------------------------------------------------
-    # TEST 6: Sealed Awxs Upvalues & Metatable-Free Ring Buffer
-    # -------------------------------------------------------------------------
-    print("\n[Test 6/6] Sealed Awxs Upvalues & Metatable-Free Ring Buffer (Poisoning _G right after Stage-1 getmetatable)...", flush=True)
+    # TEST 6
+    print("\n[Test 6/6] Sealed Stage-2 Lexical Upvalues & Zero Late Global Lookups...", flush=True)
     t6_errors: List[str] = []
     t6_ok = 0
     for rel, src in files.items():
-        ok, rtype, rstr, bomb_hit, bomb_name = harness_fn(src, rel, "seal_upvalues_after_boot")
+        ok, rtype, rstr, bomb_hit, bomb_name, gtouch = harness_fn(src, rel, "seal_upvalues_after_boot")
         if bomb_hit or any(
             tag in rstr
             for tag in (
@@ -521,13 +506,14 @@ def main() -> int:
                 "LATE_TONUMBER",
                 "LATE_SELECT",
                 "LATE_UNPACK",
+                "LATE_CONCAT",
             )
         ):
             t6_errors.append(f"[{rel}] Triggered poisoned late global lookup: {bomb_name} ({rstr})")
             continue
-        passed, detail = check_clean_execution_outcome(rel, ok, rtype, rstr)
+        passed, detail = check_clean_execution_outcome(rel, ok, rtype, rstr, bool(gtouch))
         if not passed:
-            t6_errors.append(f"[{rel}] Failed execution under poisoned post-boot _G: {detail}")
+            t6_errors.append(f"[{rel}] Failed execution under poisoned Stage-2 _G: {detail}")
         else:
             t6_ok += 1
 
@@ -537,21 +523,31 @@ def main() -> int:
             print(f"  FAIL: {err}", flush=True)
     else:
         print(
-            f"  PASS: {t6_ok}/{len(files)} files executed Stage-1 OP_EXEC + Stage-2 Awxs + 8-slot ring buffer "
-            f"with ZERO late _ENV calls to setmetatable, rawset, ipairs, tonumber, select, or unpack!",
+            f"  PASS: {t6_ok}/{len(files)} files executed Stage-2 VM + ring-buffered K(idx) "
+            f"with ZERO late _ENV calls to setmetatable, rawset, ipairs, tonumber, select, unpack, or table.concat!",
             flush=True,
         )
 
     elapsed = time.time() - t0
-    print(f"\n================================================================================", flush=True)
+    print("\n================================================================================", flush=True)
     if all_passed:
-        print(f" [ALL 6 RED-TEAM TESTS PASSED] {len(files)}/{len(files)} v5.0 files verified in {elapsed:.2f}s", flush=True)
-        print(f"================================================================================", flush=True)
-        return 0
+        print(f" [ALL 6 RED-TEAM TESTS PASSED] {len(files)}/{len(files)} v6.0 Luau files verified in {elapsed:.2f}s", flush=True)
+        print("================================================================================", flush=True)
     else:
         print(f" [RED-TEAM VERIFICATION FAILED] See errors above ({elapsed:.2f}s)", flush=True)
-        print(f"================================================================================", flush=True)
+        print("================================================================================", flush=True)
         return 1
+
+    # Chain `verify_v6_luau_obf.py` automatically unless already invoked by outer runner
+    v6_script = os.path.join(THIS_DIR, "verify_v6_luau_obf.py")
+    if not args.skip_v6 and not os.environ.get("STEPH_SKIP_CHAINED_V6") and os.path.isfile(v6_script):
+        env = os.environ.copy()
+        env["STEPH_SKIP_CHAINED_V6"] = "1"
+        rc = subprocess.call([sys.executable, "-u", v6_script, "--repo", args.repo], env=env)
+        if rc != 0:
+            return rc
+
+    return 0
 
 
 if __name__ == "__main__":
