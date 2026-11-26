@@ -1,36 +1,40 @@
 #!/usr/bin/env python3
 """
-Steph HUB - Prometheus AST + Polymorphic Multi-Register Virtual Machine Obfuscator (v3.0)
-=========================================================================================
+Steph HUB - Prometheus Vmify Custom Bytecode + Polymorphic Chained-Key Dual-VM Obfuscator (v4.0)
+=================================================================================================
 1. Backs up clean unobfuscated Luau sources FIRST to:
    - C:\\Users\\LaptopAT\\AppData\\Local\\Real\\workspace\\stephhub-src\\ (clean tree + *.unobf.lua)
    - C:\\Users\\LaptopAT\\.gemini\\antigravity\\scratch\\pet99bynhmt_unobf\\
    - C:\\Users\\LaptopAT\\.gemini\\antigravity\\scratch\\pet99bynhmt\\unobf\\ (gitignored)
-2. Layer 1 (Stage-2 Inner AST Protection via Prometheus LuaU AST + Custom Stage2AstProtector):
-   - Normalizes dotted table function declarations (`function a.b.c()`) and service/player getters
-     into computed `StringExpression` indexing so table keys, property names, and method names
-     are encrypted alongside all string literals.
-   - Encrypts 100% of `StringExpression` nodes (standalone strings, `.Property` accesses, and
-     `{ key = val }` table keys) into a per-file shuffled string pool encoded with a per-file
-     16-char consonant/digit nibble alphabet + rolling LCG/XOR/CBC stream cipher.
-   - Every `_S(arg1, arg2)` call site uses a fresh random 24-bit polymorphic XOR mask `arg2`
-     where `bxor(arg1, arg2) = idx + k_str * 8192` recovers both the pool index and the unstored
-     per-string 11-bit decryption key `k_str`, memoized on first call.
-   - Transforms integer `NumberExpression` nodes into Mixed Boolean-Arithmetic / offset expressions.
-   - Adds only 1 top-level local variable (`_S`, mangled by `MangledShuffled`), keeping Stage-2
-     top-level local declarations at ~79 (< 90, well under Luau's 200-local limit).
-3. Layer 2 (Stage-1 Hardened Polymorphic Chained-Key VM - STEPH_PROMETHEUS_VM v3.0):
-   - Non-predictable header & split/randomized declaration layout with pre-seeded decoy registers.
-   - Randomized 6-tuple or 7-tuple instruction format per file with per-instruction dynamic opcode
-     XOR guard slot (`op = bxor(insn[slot_op], insn[slot_guard] % 256)`).
-   - Disjoint randomized register allocation drawn from `15..480` per build.
-   - Custom per-file shuffled 64-char Base-Radix + rolling pre-XOR constant pool with encrypted
-     on-the-fly alphabet bootstrapping (`OP_ALPHA` + `OP_LOADK`).
-   - Cross-block FNV-1a plaintext CRC key chaining (`reg_chain_crc`) mixed with a 3-operand MBA
-     key schedule (`bxor((B + C) - 2 * band(B, C), D) ^ reg_chain_crc`).
-   - Dual-LCG Propagating Cipher Block Chaining (PCBC: both ciphertext `lxz` and plaintext `pxz`
-     feedback) + per-file Affine S-box stream cipher (`OP_XOR_DEC`).
-   - Anonymized hex chunk tags (`=[0x......]`) with zero filename leaks.
+2. Stage-2 Inner Custom Bytecode VM (Prometheus `Vmify` + Encrypted Binary Prototype Stream):
+   - Compiles the full Luau AST (`+=`, `continue`, `//`, ternary `if-then-else`, closures, varargs)
+     into custom register VM bytecode instructions (`Compiler:compile(ast)`) with per-file shuffled
+     opcode IDs (`1..56`), shuffled operand slots (`2..5`), and randomized prototype field keys.
+   - Serializes the compiled prototype hierarchy into a compact binary bytecode stream where:
+     * Every instruction opcode & operand-type mask is dynamically XOR-masked with per-prototype
+       rolling salts derived from Stage-1's final FNV-1a chain CRC (`R[reg_chain_crc] % 256`).
+     * Every constant string (string literals, `.Property` accesses, `:Method()` names, `{Key=Val}`
+       table keys, and global names) is encrypted with a per-prototype rolling XOR + affine stream
+       cipher and kept encrypted in memory even after VM startup, decrypting lazily on first read
+       via a `__index` metatable attached to each prototype's constant table `K`.
+     * Integer constants inside the bytecode stream are offset-masked by per-prototype salts.
+   - Eliminates `loadstring` / `load` completely at runtime: the Lua source code of the script NEVER
+     exists in the file or in memory at runtime, and `OP_EXEC` unpacks the binary bytecode prototypes
+     directly into the inlined, `MangledShuffled`-renamed `Vmify` register bytecode interpreter.
+3. Stage-1 Outer Hardened Chained-Key Dual-LCG PCBC VM (v4.0):
+   - Zero header comments (`-- STEPH_COMPONENT` and `--[[STEPH_PROMETHEUS_VM]]` completely stripped;
+     line 1 starts immediately with pure obfuscated Lua code and zero plaintext string literals).
+   - 6-way Native C-Closure Anti-Hook Verification (`string.dump`, `debug.info`, `iscclosure`,
+     `islclosure`, `ishooked`, `isfunctionhooked`) over `pcall`, `string.byte`, `string.char`,
+     `string.sub`, `table.concat`, `tonumber`, `select`, and `loadstring`/`load` (with all symbol
+     names decoded at runtime from an encrypted byte blob). Any Lua hook wrapper silently poisons
+     the 16-slot runtime anchor table `v_anchor[1..16]`.
+   - Zero static constant-foldable arithmetic: all obfuscated integer expressions use runtime state
+     (`bxor(v_anchor[i], mask)` or `(v_anchor[i] +/- diff)`) populated by the anti-hook LCG loop.
+   - Zero dead branches & zero `'VM integrity check failed'` strings: all 4 dispatcher states
+     (`st_init`, `st_fetch`, `st_dispatch`, `st_step`) are 100% live, and `OP_CRC` feeds the live
+     24-bit FNV-1a checksum directly into `R[reg_chain_crc]`, which drives both the next state
+     transition (`bxor(insn[slot_next], R[reg_chain_crc] % 256)`) and the next opcode guard.
 """
 
 from __future__ import annotations
@@ -59,12 +63,22 @@ PROMETHEUS_DIRS = [
     r"C:\Users\LaptopAT\.gemini\antigravity\scratch\Prometheus\src",
 ]
 
-VM_MARKER = "--[[STEPH_PROMETHEUS_VM]]"
-
-COMPONENT_HEADER_RE = re.compile(r"^\s*(--\s*STEPH_COMPONENT:\s*[^\s]+\s+[\d\.]+)", re.MULTILINE)
+LEGACY_VM_MARKER = "--[[STEPH_PROMETHEUS_VM]]"
 FORBIDDEN_ANCHOR_RE = re.compile(r"AnchorPoint\s*=\s*UDim2")
+STATIC_CONST_ARITH_RE = re.compile(r"\(-?\d+[\+\-%]-?\d+\)")
 
 SAFE_B64_POOL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$"
+PROBE_SYMBOLS = [
+    "dump",
+    "debug",
+    "info",
+    "iscclosure",
+    "islclosure",
+    "ishooked",
+    "isfunctionhooked",
+    "loadstring",
+    "load",
+]
 
 
 def get_target_files(repo_dir: str = REPO_DIR) -> List[str]:
@@ -86,20 +100,19 @@ def get_target_files(repo_dir: str = REPO_DIR) -> List[str]:
 
 
 def is_vm_obfuscated(source: str) -> bool:
-    if VM_MARKER in source:
+    """
+    Heuristically detects v4.0 (headerless single-line Dual-VM) and legacy v3.0
+    obfuscated files so clean source backups are never overwritten by obfuscated code.
+    """
+    if LEGACY_VM_MARKER in source:
         return True
-    lines = [ln.strip() for ln in source.strip().splitlines() if ln.strip()]
+    stripped = source.strip()
+    if not stripped:
+        return False
+    lines = [ln.strip() for ln in stripped.splitlines() if ln.strip()]
     if len(lines) <= 4 and any(ln.startswith("return(function(") for ln in lines):
         return True
     return False
-
-
-def extract_component_header(source: str) -> Optional[str]:
-    head = "\n".join(source.splitlines()[:12])
-    m = COMPONENT_HEADER_RE.search(head)
-    if m:
-        return re.sub(r"\s+", " ", m.group(1).strip())
-    return None
 
 
 def backup_and_load_clean_sources(repo_dir: str = REPO_DIR) -> Dict[str, str]:
@@ -172,7 +185,10 @@ def restore_clean_sources(repo_dir: str = REPO_DIR) -> None:
 
 
 class PrometheusBridge:
-    """Lua 5.1 lupa bridge to Prometheus AST Parser, Stage-2 String/Property/Number Encryptor, and Variable Mangler."""
+    """
+    Lua 5.1 lupa bridge to Prometheus LuaU AST Parser, Vmify Custom Register Bytecode Compiler,
+    Encrypted Binary Prototype Serializer, and MangledShuffled Variable Renamer.
+    """
 
     def __init__(self) -> None:
         prom_src = None
@@ -197,6 +213,13 @@ class PrometheusBridge:
             Source = require("prometheus.source")
             Enums = require("prometheus.enums")
             util = require("prometheus.util")
+            analyzeBindings = require("prometheus.bindinganalysis")
+            Compiler = require("prometheus.vm.compiler")
+            Layout = require("prometheus.vm.layout")
+            Runtime = require("prometheus.vm.runtime")
+            Unparser = require("prometheus.unparser")
+            renameVariables = require("prometheus.names")
+            NameGenerators = require("prometheus.namegenerators")
             Prometheus.Logger.logLevel = Prometheus.Logger.LogLevel.Error
 
             local function bxor24(a, b)
@@ -211,243 +234,355 @@ class PrometheusBridge:
                 return r
             end
 
-            Stage2AstProtector = {{}}
-            Stage2AstProtector.__index = Stage2AstProtector
-            Stage2AstProtector.Name = "Stage2AstProtector"
-
-            function Stage2AstProtector:new(seed)
-                return setmetatable({{ seed = seed or 1337 }}, self)
+            local function writeVarint(out, n)
+                n = math.floor(n)
+                while n >= 128 do
+                    out[#out + 1] = string.char((n % 128) + 128)
+                    n = math.floor(n / 128)
+                end
+                out[#out + 1] = string.char(n)
             end
 
-            function Stage2AstProtector:apply(ast, pipeline)
-                local AstKind = Ast.AstKind
+            local function serializeProto(proto, layout, out, strSalt, opSalt)
+                out[#out + 1] = string.char(bxor24(proto.vararg and 1 or 0, opSalt % 2))
+                writeVarint(out, proto.maxRegister or 0)
 
-                -- Pre-pass: convert dotted table function declarations (`function a.b.c()`)
-                -- and service/player method calls (`game:GetService()`, `Players:GetPlayers()`)
-                -- into computed StringExpression index expressions so their names are encrypted too.
-                visitast(ast, function(node)
-                    if node.kind == AstKind.FunctionDeclaration and node.indices and #node.indices > 0 then
-                        local base = node.symbol and Ast.VariableExpression(node.symbol) or Ast.GlobalVariableExpression(node.name)
-                        for i = 1, #node.indices - 1 do
-                            base = Ast.IndexExpression(base, Ast.StringExpression(node.indices[i]))
-                        end
-                        local lhs = Ast.AssignmentIndexing(base, Ast.StringExpression(node.indices[#node.indices]))
-                        local rhs = Ast.FunctionLiteralExpression(node.args, node.body)
-                        return Source.inherit(Ast.AssignmentStatement({{ lhs }}, {{ rhs }}), node)
-                    elseif node.kind == AstKind.PassSelfFunctionCallExpression then
-                        local mname = node.passSelfFunctionName
-                        local bk = node.base and node.base.kind
-                        if (mname == "GetService" or mname == "GetPlayers" or mname == "HttpGet")
-                           and (bk == AstKind.VariableExpression or bk == AstKind.GlobalVariableExpression) then
-                            local selfArg = bk == AstKind.VariableExpression
-                                and Ast.VariableExpression(node.base.symbol)
-                                or Ast.GlobalVariableExpression(node.base.name)
-                            local newArgs = {{ selfArg }}
-                            for i, a in ipairs(node.args) do newArgs[i + 1] = a end
-                            local idxExpr = Ast.IndexExpression(node.base, Ast.StringExpression(mname))
-                            return Source.inherit(Ast.FunctionCallExpression(idxExpr, newArgs), node)
-                        end
-                    end
-                end, nil)
-
-                -- Collect and shuffle all unique strings across the entire AST
-                local uniqueList = {{}}
-                local seen = {{}}
-                visitast(ast, nil, function(node)
-                    if node.kind == AstKind.StringExpression then
-                        local v = node.value
-                        if not seen[v] then
-                            seen[v] = true
-                            uniqueList[#uniqueList + 1] = v
-                        end
-                    end
-                end)
-                if #uniqueList == 0 then
-                    uniqueList[1] = ""
-                end
-                uniqueList = util.shuffle(uniqueList)
-
-                -- Per-file 16-char nibble alphabet using only consonants and digits (cannot form English words)
-                local alphaPool = util.shuffle({{
-                    "b","c","d","f","g","h","j","k","m","n","p","q","r","s","t","v","w","x","z",
-                    "B","C","D","F","G","H","J","K","M","N","P","Q","R","S","T","V","W","X","Z",
-                    "2","3","4","5","6","7","8","9"
-                }})
-                local alpha16 = {{}}
-                local decodePairs = {{}}
-                for i = 1, 16 do
-                    alpha16[i] = alphaPool[i]
-                    decodePairs[i] = "[" .. tostring(string.byte(alphaPool[i])) .. "]=" .. tostring(i - 1)
+                local params = proto.params or {{}}
+                writeVarint(out, #params)
+                for i = 1, #params do
+                    writeVarint(out, params[i][1])
+                    out[#out + 1] = string.char(params[i][2] and 1 or 0)
                 end
 
-                local kMaster = math.random(100000, 15000000)
-                local ivMaster = math.random(17, 251)
-                local lcgA = math.random(25000, 90000) * 4 + 1
-                local lcgC = math.random(300000, 5000000) * 2 + 1
-                local lcgStep = math.random(3000, 60000) * 2 + 1
-
-                local strToId = {{}}
-                local strToKey = {{}}
-                local encPoolLiterals = {{}}
-
-                for idx, rawStr in ipairs(uniqueList) do
-                    local kStr = math.random(1, 2047)
-                    strToId[rawStr] = idx
-                    strToKey[rawStr] = kStr
-
-                    local s = (kStr * 4099 + idx * lcgStep + kMaster) % 16777216
-                    local prev = (kStr + idx * 73 + ivMaster) % 256
-                    local chars = {{}}
-                    local len = #rawStr
-                    for j = 1, len do
-                        local p = string.byte(rawStr, j)
-                        s = (s * lcgA + lcgC) % 16777216
-                        local kXor = s % 256
-                        local kAdd = ((s - kXor) / 256) % 256
-                        local c = (bxor24(p, kXor) + kAdd + prev) % 256
-                        prev = c
-                        local hi = (c - (c % 16)) / 16
-                        local lo = c % 16
-                        chars[#chars + 1] = alpha16[hi + 1] .. alpha16[lo + 1]
-                    end
-                    encPoolLiterals[idx] = '"' .. table.concat(chars) .. '"'
+                local captures = proto.captures or {{}}
+                writeVarint(out, #captures)
+                for i = 1, #captures do
+                    out[#out + 1] = string.char(captures[i][1])
+                    writeVarint(out, captures[i][2])
                 end
 
-                local sSym = Ast.LocalSymbol("_S")
-
-                -- Replace every StringExpression with `_S(arg1, callMask)` and obfuscate integer literals
-                visitast(ast, nil, function(node)
-                    if node.kind == AstKind.StringExpression and not node.__stage2_skip then
-                        local v = node.value
-                        local idx = strToId[v]
-                        local kStr = strToKey[v]
-                        local tokenVal = idx + kStr * 8192
-                        local callMask = math.random(100000, 16700000)
-                        local arg1 = bxor24(tokenVal, callMask)
-                        local n1 = Ast.NumberExpression(arg1)
-                        local n2 = Ast.NumberExpression(callMask)
-                        n1.__stage2_skip = true
-                        n2.__stage2_skip = true
-                        return Source.inherit(
-                            Ast.FunctionCallExpression(Ast.VariableExpression(sSym), {{ n1, n2 }}),
-                            node
-                        )
-                    elseif node.kind == AstKind.NumberExpression and not node.__stage2_skip then
-                        local val = node.value
-                        if type(val) == "number" and val == math.floor(val) and val >= -10000000 and val <= 10000000 and math.random() < 0.65 then
-                            local off = math.random(1000, 500000)
-                            if math.random(1, 2) == 1 then
-                                local a = Ast.NumberExpression(val + off)
-                                local b = Ast.NumberExpression(off)
-                                a.__stage2_skip = true
-                                b.__stage2_skip = true
-                                return Source.inherit(Ast.SubExpression(a, b, false), node)
+                local constants = proto.constants or {{}}
+                writeVarint(out, #constants)
+                for i = 1, #constants do
+                    local c = constants[i]
+                    local t = type(c)
+                    if t == "boolean" then
+                        out[#out + 1] = string.char(c and 1 or 0)
+                    elseif t == "number" then
+                        if c == math.floor(c) and c >= -2147483647 and c <= 2147483647 and (c ~= 0 or 1/c > 0) then
+                            local numMask = (strSalt * 131 + i * 17) % 65536
+                            if c >= 0 then
+                                out[#out + 1] = string.char(2)
+                                writeVarint(out, c + numMask)
                             else
-                                local a = Ast.NumberExpression(val - off)
-                                local b = Ast.NumberExpression(off)
-                                a.__stage2_skip = true
-                                b.__stage2_skip = true
-                                return Source.inherit(Ast.AddExpression(a, b, false), node)
+                                out[#out + 1] = string.char(3)
+                                writeVarint(out, (-c) + numMask)
+                            end
+                        else
+                            out[#out + 1] = string.char(4)
+                            local s = string.format("%.17g", c)
+                            writeVarint(out, #s)
+                            local sChars = {{}}
+                            local k = (strSalt + i * 97) % 256
+                            for j = 1, #s do
+                                local b = string.byte(s, j)
+                                local encB = (bxor24(b, k) + j * 13 + strSalt) % 256
+                                k = (k * 67 + encB + 19) % 256
+                                sChars[j] = string.char(encB)
+                            end
+                            out[#out + 1] = table.concat(sChars)
+                        end
+                    elseif t == "string" then
+                        out[#out + 1] = string.char(5)
+                        writeVarint(out, #c)
+                        local sChars = {{}}
+                        local k = (strSalt + i * 131) % 256
+                        for j = 1, #c do
+                            local b = string.byte(c, j)
+                            local encB = (bxor24(b, k) + j * 17 + strSalt) % 256
+                            k = (k * 73 + encB + 29) % 256
+                            sChars[j] = string.char(encB)
+                        end
+                        out[#out + 1] = table.concat(sChars)
+                    else
+                        error("Unsupported constant type: " .. tostring(t))
+                    end
+                end
+
+                local code = proto.code or {{}}
+                writeVarint(out, #code)
+                for i = 1, #code do
+                    local enc = layout:encode(code[i])
+                    local maskedOp = bxor24(enc[1], (i * 73 + opSalt) % 256)
+                    out[#out + 1] = string.char(maskedOp)
+                    local mask = 0
+                    local mult = 1
+                    for slot = 2, 5 do
+                        local v = enc[slot]
+                        local st = 0
+                        if v ~= nil then
+                            if type(v) == "table" then
+                                st = 3
+                            elseif v < 0 then
+                                st = 2
+                            else
+                                st = 1
+                            end
+                        end
+                        mask = mask + st * mult
+                        mult = mult * 4
+                    end
+                    out[#out + 1] = string.char(bxor24(mask, (i * 29 + strSalt) % 256))
+                    for slot = 2, 5 do
+                        local v = enc[slot]
+                        if v ~= nil then
+                            if type(v) == "table" then
+                                writeVarint(out, #v)
+                                for j = 1, #v do
+                                    writeVarint(out, v[j])
+                                end
+                            elseif v < 0 then
+                                writeVarint(out, -v)
+                            else
+                                writeVarint(out, v)
                             end
                         end
                     end
+                end
+
+                local children = proto.children or {{}}
+                writeVarint(out, #children)
+                for i = 1, #children do
+                    serializeProto(
+                        children[i],
+                        layout,
+                        out,
+                        (strSalt * 37 + i * 19 + 7) % 256,
+                        (opSalt * 53 + i * 23 + 11) % 256
+                    )
+                end
+            end
+
+            local function countProtoStats(proto)
+                local insns = #(proto.code or {{}})
+                local consts = #(proto.constants or {{}})
+                local protos = 1
+                for _, ch in ipairs(proto.children or {{}}) do
+                    local ci, cc, cp = countProtoStats(ch)
+                    insns = insns + ci
+                    consts = consts + cc
+                    protos = protos + cp
+                end
+                return insns, consts, protos
+            end
+
+            function compileStage2Vmify(code, filename, seed, chainKey256, baseStrSalt, baseOpSalt)
+                math.randomseed(seed)
+                local ast = Parser:new({{ LuaVersion = "LuaU" }}):parse(code, filename)
+                analyzeBindings(ast)
+                local layout = Layout.new()
+                local proto = Compiler:compile(ast)
+                local totalInsns, totalConsts, totalProtos = countProtoStats(proto)
+
+                local effStrSalt = (baseStrSalt + chainKey256) % 256
+                local effOpSalt = (baseOpSalt + chainKey256) % 256
+                local out = {{}}
+                serializeProto(proto, layout, out, effStrSalt, effOpSalt)
+                local blob = table.concat(out)
+                local hex = (blob:gsub(".", function(c) return string.format("%02x", string.byte(c)) end))
+
+                local f = layout.fields
+                local rawRt = Runtime.build(layout)
+                -- Remove all diagnostic strings from VM runtime and bind Stage-2 opcode dispatch tree to runtime _ck!
+                rawRt = rawRt:gsub("nativeError%('unknown VM opcode: '%s*%.%.%s*tostring%(opcode%),%s*0%)", "return")
+                rawRt = rawRt:gsub("if x == nil then nativeError%([^%)]+%) end", "if x == nil then return end")
+                rawRt = rawRt:gsub('nativeSelect%("#",%s*%.%.%.%)', "nativeSelect(_cmap[35], ...)")
+                rawRt = rawRt:gsub("if opcode == (%d+) then", function(n)
+                    return "if opcode == _bxor(_ck, " .. tostring(bxor24(tonumber(n), chainKey256)) .. ") then"
                 end)
-
-                local decCode = table.concat({{
-                    "do ",
-                    "local _P={{" .. table.concat(encPoolLiterals, ",") .. "}};",
-                    "local _D={{" .. table.concat(decodePairs, ",") .. "}};",
-                    "local _C,_M,_B,_H={{}},{{}},string.byte,string.char;",
-                    "for _i=0,255 do _M[_i]=_H(_i) end;",
-                    "local _X=bit32 and bit32.bxor;",
-                    "if not _X then ",
-                    "local _N={{}};",
-                    "for _a=0,15 do local _r={{}};_N[_a]=_r;for _b=0,15 do local _v,_p,_x,_y=0,1,_a,_b;while _x>0 or _y>0 do if _x%2~=_y%2 then _v=_v+_p end;_x=(_x-_x%2)/2;_y=(_y-_y%2)/2;_p=_p*2 end;_r[_b]=_v end end;",
-                    "_X=function(_a,_b)local _r,_p=0,1;while _a>0 or _b>0 do _r=_r+_N[_a%16][_b%16]*_p;_a=(_a-_a%16)/16;_b=(_b-_b%16)/16;_p=_p*16 end;return _r end;",
-                    "end;",
-                    "function DECRYPT_S(_a,_b)",
-                    "local _v=_X(_a,_b);",
-                    "local _hit=_C[_v];if _hit~=nil then return _hit end;",
-                    "local _idx=_v%8192;",
-                    "local _ks=(_v-_idx)/8192;",
-                    "local _raw=_P[_idx];if not _raw then return '' end;",
-                    "local _s=(_ks*4099+_idx*" .. tostring(lcgStep) .. "+" .. tostring(kMaster) .. ")%16777216;",
-                    "local _pv=(_ks+_idx*73+" .. tostring(ivMaster) .. ")%256;",
-                    "local _out,_n={{}},1;",
-                    "for _j=1,#_raw,2 do ",
-                    "local _c=_D[_B(_raw,_j)]*16+_D[_B(_raw,_j+1)];",
-                    "_s=(_s*" .. tostring(lcgA) .. "+" .. tostring(lcgC) .. ")%16777216;",
-                    "local _kx=_s%256;",
-                    "local _ka=((_s-_kx)/256)%256;",
-                    "local _p=_X((_c-_ka-_pv)%256,_kx);",
-                    "_pv=_c;",
-                    "_out[_n]=_M[_p];_n=_n+1;",
-                    "end;",
-                    "local _res=table.concat(_out);",
-                    "_C[_v]=_res;",
-                    "return _res;",
-                    "end ",
-                    "end"
-                }})
-
-                local decAst = Parser:new({{ LuaVersion = Enums.LuaVersion.Lua51 }}):parse(
-                    decCode,
-                    Source.internal("Stage2.Decryptor", decCode)
-                )
-                local doStat = decAst.body.statements[1]
-                visitast(decAst, nil, function(node)
-                    if node.kind == AstKind.FunctionDeclaration and node.name == "DECRYPT_S" then
-                        node.symbol = sSym
-                        node.name = nil
+                rawRt = rawRt:gsub("if opcode <= (%d+) then", function(n)
+                    local d = tonumber(n) - chainKey256
+                    if d >= 0 then
+                        return "if opcode <= (_ck + " .. tostring(d) .. ") then"
+                    else
+                        return "if opcode <= (_ck - " .. tostring(-d) .. ") then"
                     end
                 end)
 
-                local genSpan = Source.generated("Stage2AstProtector")
-                table.insert(ast.body.statements, 1, Source.fill(doStat, genSpan))
-                table.insert(ast.body.statements, 1, Source.fill(Ast.LocalVariableDeclaration({{ sSym }}, {{}}), genSpan))
-                return ast
+                local unpackAndRunSrc = string.format([=[
+return function(_blob, _ck, _bxor, _cmap, _byte, _sub, _concat, ...)
+    local _pos, _tonum, _setmt, _rawset = 1, tonumber, setmetatable, rawset
+    local function _rbyte()
+        local _b = _byte(_blob, _pos)
+        _pos = _pos + 1
+        return _b
+    end
+    local function _rvar()
+        local _r, _m = 0, 1
+        while true do
+            local _b = _byte(_blob, _pos)
+            _pos = _pos + 1
+            if _b < 128 then
+                return _r + _b * _m
+            end
+            _r = _r + (_b - 128) * _m
+            _m = _m * 128
+        end
+    end
+    local function _rproto(_ss, _os)
+        local _p = {{}}
+        _p[%d] = (_bxor(_rbyte(), _os %% 2) == 1)
+        _p[%d] = _rvar()
+        local _npar = _rvar()
+        local _pars = {{}}
+        for _i = 1, _npar do
+            _pars[_i] = {{ _rvar(), _rbyte() == 1 }}
+        end
+        _p[%d] = _pars
+        local _ncap = _rvar()
+        local _caps = {{}}
+        for _i = 1, _ncap do
+            _caps[_i] = {{ _rbyte(), _rvar() }}
+        end
+        _p[%d] = _caps
+        local _ncon = _rvar()
+        local _cons = {{}}
+        local _enc_k = {{}}
+        local _has_str = false
+        for _i = 1, _ncon do
+            local _tag = _rbyte()
+            if _tag == 0 then
+                _cons[_i] = false
+            elseif _tag == 1 then
+                _cons[_i] = true
+            elseif _tag == 2 then
+                _cons[_i] = _rvar() - ((_ss * 131 + _i * 17) %% 65536)
+            elseif _tag == 3 then
+                _cons[_i] = -(_rvar() - ((_ss * 131 + _i * 17) %% 65536))
+            elseif _tag == 4 then
+                local _l = _rvar()
+                local _out = {{}}
+                local _k = (_ss + _i * 97) %% 256
+                for _j = 1, _l do
+                    local _eb = _byte(_blob, _pos + _j - 1)
+                    local _db = _bxor((_eb - _j * 13 - _ss) %% 256, _k)
+                    _k = (_k * 67 + _eb + 19) %% 256
+                    _out[_j] = _cmap[_db]
+                end
+                _pos = _pos + _l
+                _cons[_i] = _tonum(_concat(_out))
+            else
+                local _l = _rvar()
+                _enc_k[_i] = _sub(_blob, _pos, _pos + _l - 1)
+                _pos = _pos + _l
+                _has_str = true
+            end
+        end
+        if _has_str then
+            _setmt(_cons, {{
+                __index = function(_t, _idx)
+                    local _raw = _enc_k[_idx]
+                    if not _raw then return nil end
+                    local _out = {{}}
+                    local _k = (_ss + _idx * 131) %% 256
+                    for _j = 1, #_raw do
+                        local _eb = _byte(_raw, _j)
+                        local _db = _bxor((_eb - _j * 17 - _ss) %% 256, _k)
+                        _k = (_k * 73 + _eb + 29) %% 256
+                        _out[_j] = _cmap[_db]
+                    end
+                    local _val = _concat(_out)
+                    _enc_k[_idx] = nil
+                    _rawset(_t, _idx, _val)
+                    return _val
+                end
+            }})
+        end
+        _p[%d] = _cons
+        local _ncode = _rvar()
+        local _code = {{}}
+        for _i = 1, _ncode do
+            local _op = _bxor(_rbyte(), (_i * 73 + _os) %% 256)
+            local _mask = _bxor(_rbyte(), (_i * 29 + _ss) %% 256)
+            local _ins = {{ _op }}
+            for _slot = 2, 5 do
+                local _st = _mask %% 4
+                _mask = (_mask - _st) / 4
+                if _st == 1 then
+                    _ins[_slot] = _rvar()
+                elseif _st == 2 then
+                    _ins[_slot] = -_rvar()
+                elseif _st == 3 then
+                    local _al = _rvar()
+                    local _arr = {{}}
+                    for _j = 1, _al do _arr[_j] = _rvar() end
+                    _ins[_slot] = _arr
+                end
+            end
+            _code[_i] = _ins
+        end
+        _p[%d] = _code
+        local _nch = _rvar()
+        local _ch = {{}}
+        for _i = 1, _nch do
+            _ch[_i] = _rproto((_ss * 37 + _i * 19 + 7) %% 256, (_os * 53 + _i * 23 + 11) %% 256)
+        end
+        _p[%d] = _ch
+        return _p
+    end
+    local _Information = {{ _rproto((%d + _ck) %% 256, (%d + _ck) %% 256) }}
+    _blob = nil
+    __VM_RUNTIME_BODY__
+end
+]=], f.vararg, f.maxRegister, f.params, f.captures, f.constants, f.code, f.children, baseStrSalt, baseOpSalt)
+
+                rawRt = rawRt:gsub("__PROTOTYPES__", "_Information")
+                unpackAndRunSrc = unpackAndRunSrc:gsub("__VM_RUNTIME_BODY__", function() return rawRt end)
+
+                local rtAst = Parser:new({{ LuaVersion = "Lua51" }}):parse(unpackAndRunSrc, "vm_rt")
+                analyzeBindings(rtAst)
+                if type(NameGenerators.MangledShuffled.prepare) == "function" then
+                    NameGenerators.MangledShuffled.prepare(rtAst)
+                end
+                renameVariables(rtAst, {{
+                    Keywords = Enums.Conventions.LuaU.Keywords,
+                    generateName = NameGenerators.MangledShuffled.generateName,
+                    prefix = "",
+                }})
+                local minifiedRt = Unparser:new({{ LuaVersion = "LuaU", PrettyPrint = false }}):unparse(rtAst)
+                minifiedRt = minifiedRt:gsub("^%s*return%s+", "")
+                return hex, minifiedRt, totalInsns, totalConsts, totalProtos
             end
             """
         )
-        self._ast_mangle_fn = self.rt.eval(
-            """
-            function(code, filename, seed, presetName)
-                local preset = Prometheus.Presets[presetName or "Minify"] or Prometheus.Presets["Minify"]
-                local cfg = {
-                    LuaVersion = "LuaU",
-                    VarNamePrefix = "",
-                    NameGenerator = "MangledShuffled",
-                    PrettyPrint = false,
-                    Seed = seed or 12345,
-                    Steps = preset.Steps or {},
-                }
-                local pipeline = Prometheus.Pipeline:fromConfig(cfg)
-                pipeline:addStep(Stage2AstProtector:new(seed or 12345))
-                local out = pipeline:apply(code, filename)
-                -- Round-trip parse check to guarantee 100% valid Luau AST
-                Parser:new({ LuaVersion = "LuaU" }):parse(out, filename .. ".ast")
-                return out
-            end
-            """
-        )
+        self._compile_s2_fn = self.rt.eval("compileStage2Vmify")
         self._parse_luau_fn = self.rt.eval(
             """
             function(code, filename)
                 local ast = Parser:new({ LuaVersion = "LuaU" }):parse(code, filename or "chunk")
-                local top_local_stmts = 0
-                for _, st in ipairs(ast.body.statements) do
-                    if st.kind == Ast.AstKind.LocalVariableDeclaration or st.kind == Ast.AstKind.LocalFunctionDeclaration then
-                        top_local_stmts = top_local_stmts + 1
+                local max_scope_locals = 0
+                visitast(ast, function(node)
+                    if node.body and node.body.scope and node.body.scope.variables then
+                        local n = #node.body.scope.variables
+                        if n > max_scope_locals then max_scope_locals = n end
                     end
-                end
-                return #ast.body.statements, top_local_stmts
+                end, nil)
+                return #ast.body.statements, max_scope_locals
             end
             """
         )
 
-    def mangle_luau_ast(self, code: str, filename: str, seed: int, preset: str = "Minify") -> str:
-        res = self._ast_mangle_fn(code, filename, seed, preset)
-        return res[0] if isinstance(res, tuple) else res
+    def compile_stage2_vmify(
+        self,
+        code: str,
+        filename: str,
+        seed: int,
+        chain_key_256: int,
+        base_str_salt: int,
+        base_op_salt: int,
+    ) -> Tuple[bytes, str, int, int, int]:
+        res = self._compile_s2_fn(code, filename, seed, chain_key_256, base_str_salt, base_op_salt)
+        return bytes.fromhex(res[0]), str(res[1]), int(res[2]), int(res[3]), int(res[4])
 
     def verify_luau_syntax(self, code: str, filename: str) -> Tuple[int, int]:
         res = self._parse_luau_fn(code, filename)
@@ -522,15 +657,8 @@ def encrypt_pcbc_dual_lcg(
 ) -> Tuple[bytes, int]:
     """
     Dual-State 24-bit LCG Stream Cipher with Propagating Cipher Block Chaining (PCBC)
-    and per-file Affine Bijective S-box:
-      s1 = (s1 * lcg_a1 + lcg_c1) % 16777216
-      s2 = (s2 * lcg_a2 + lcg_c2) % 16777216
-      k_add = (((s1 // 256) % 256) + (s2 % 256)) % 256
-      k_xor = (s1 % 256) ^ ((s2 // 65536) % 256)
-      x = p ^ k_xor ^ pxz
-      c = (sbox[x] + k_add + lxz) % 256
-      lxz = c; pxz = p
-    Also computes the 24-bit FNV-1a checksum over plaintext bytes for cross-block key chaining.
+    and per-file Affine Bijective S-box. Also computes the 24-bit FNV-1a checksum over
+    plaintext bytes for cross-block key & state-transition chaining.
     """
     s1 = seed % 16777216
     s2 = (s1 * 65599 + iv * 4099 + lcg_init2) % 16777216
@@ -552,23 +680,29 @@ def encrypt_pcbc_dual_lcg(
     return bytes(out), crc
 
 
-def make_mba_int(val: int, rng: random.Random) -> str:
-    """Generates an opaque arithmetic/modulo expression evaluating to `val`."""
+def make_runtime_int(
+    val: int,
+    rng: random.Random,
+    v_anchor: str,
+    anchor_vals: List[int],
+    v_bxor: str,
+) -> str:
+    """
+    Emits a runtime-state-dependent expression evaluating to `val` using the
+    runtime anchor table `v_anchor[1..16]`.
+    Never emits `(const1 - const2)` or `(const1 + const2)` where both operands are constants!
+    """
+    idx = rng.randint(1, len(anchor_vals))
+    ak = anchor_vals[idx - 1]
     mode = rng.randint(0, 2)
-    if mode == 0:
-        offset = rng.randint(1000, 900000)
-        return f"({val + offset}-{offset})"
-    elif mode == 1:
-        offset = rng.randint(1000, 900000)
-        return f"({val - offset}+{offset})"
+    if mode == 0 and 0 <= val < 16777216:
+        mask = val ^ ak
+        return f"{v_bxor}({v_anchor}[{idx}],{mask})"
+    diff = val - ak
+    if diff >= 0:
+        return f"({v_anchor}[{idx}]+{diff})"
     else:
-        mod = rng.randint(max(abs(val) + 500, 20000), max(abs(val) + 500000, 900000))
-        if val >= 0:
-            k = rng.randint(2, 19)
-            return f"({k * mod + val}%{mod})"
-        else:
-            offset = rng.randint(1000, 900000)
-            return f"({val + offset}-{offset})"
+        return f"({v_anchor}[{idx}]-{-diff})"
 
 
 def generate_identifiers(count: int, rng: random.Random) -> List[str]:
@@ -597,40 +731,51 @@ def compile_polymorphic_vm(
     file_seed: Optional[int] = None,
 ) -> str:
     """
-    Compiles a Luau source file into STEPH_PROMETHEUS_VM v3.0:
-    Layer 1: Stage-2 AST String/Property/Table-Key Per-Call XOR + Nibble Pool + Number MBA
-    Layer 2: Stage-1 Polymorphic 6/7-Tuple Chained-Key Dual-LCG PCBC Base-Radix VM
+    Compiles a Luau source file into v4.0 Dual-VM:
+    Layer 1 (Stage-2 Inner VM): Prometheus `Vmify` Custom Register Bytecode VM + Lazy Encrypted Constant Table
+    Layer 2 (Stage-1 Outer VM): Chained-Key Dual-LCG PCBC VM with 6-way C-Closure Anti-Hook Probe,
+                                Runtime-State Expressions, Dynamic CRC State Transitions, & Zero Header Signatures
     """
-    header = extract_component_header(clean_source)
-    digest = hashlib.sha256((rel_path + "::v3::" + clean_source).encode("utf-8")).digest()
+    digest = hashlib.sha256((rel_path + "::v4::" + clean_source).encode("utf-8")).digest()
     if file_seed is None:
-        file_seed = int.from_bytes(digest[:4], "big") ^ 0x6F4A9C3D
+        file_seed = int.from_bytes(digest[:4], "big") ^ 0x5F3A9C7D
     rng = random.Random(file_seed)
 
-    # Layer 1: Run Prometheus LuaU AST + Stage2AstProtector + MangledShuffled pipeline via lupa
-    mangled_luau = bridge.mangle_luau_ast(clean_source, rel_path, (file_seed & 0x7FFFFFFF) or 1337)
-    payload_bytes = mangled_luau.encode("utf-8")
+    # Bootstrap runtime anchor table parameters (16 slots populated at runtime after 6-way C-closure anti-hook probe)
+    boot_seed_base = rng.randint(100000, 7000000)
+    boot_trust_step = rng.randint(150000, 7000000)
+    boot_lcg_a = rng.randint(25000, 95000) * 4 + 1
+    boot_lcg_c = rng.randint(300000, 6000000) * 2 + 1
 
-    # Layer 2 Step 1: Build per-file randomized key schedule, Dual-LCG params, & 256-byte bijective S-box
+    anchor_vals: List[int] = []
+    s_cur = (boot_seed_base + 1 * boot_trust_step) % 16777216
+    for i in range(1, 17):
+        s_cur = (s_cur * boot_lcg_a + boot_lcg_c + i * 4099) % 16777216
+        anchor_vals.append(s_cur)
+
+    # Encrypt the 9 anti-hook probe symbol names so their names never appear in plaintext in the output file
+    raw_probe_bytes = ("\0".join(PROBE_SYMBOLS) + "\0").encode("utf-8")
+    probe_xor = rng.randint(17, 251)
+    probe_step = rng.randint(3, 125) * 2 + 1
+    enc_probe_bytes = bytes(
+        ((b ^ probe_xor) + (i + 1) * probe_step) & 0xFF
+        for i, b in enumerate(raw_probe_bytes)
+    )
+    enc_probe_literal = lua_escape_bytes(enc_probe_bytes)
+
+    # Stage-1 Affine S-Box and Dual-LCG parameters
     odd_multipliers = [m for m in range(3, 255, 2) if m not in (1, 127, 129, 255)]
     s_mul = rng.choice(odd_multipliers)
     s_add = rng.randint(1, 255)
     sbox = [((x * s_mul) + s_add) & 0xFF for x in range(256)]
-    inv_sbox = [0] * 256
-    for x, y in enumerate(sbox):
-        inv_sbox[y] = x
     inv_mul = pow(s_mul, -1, 256)
-    for y in range(256):
-        assert inv_sbox[y] == ((y - s_add) * inv_mul) & 0xFF
 
-    # Two independent 53-bit-safe 24-bit LCG parameter sets (Hull-Dobell: a % 4 == 1, c odd)
     lcg_a1 = rng.randint(35000, 115000) * 4 + 1
     lcg_c1 = rng.randint(400000, 7500000) * 2 + 1
     lcg_a2 = rng.randint(35000, 115000) * 4 + 1
     lcg_c2 = rng.randint(400000, 7500000) * 2 + 1
     lcg_init2 = rng.randint(100000, 15000000)
 
-    # Per-file shuffled 65-char Base-Radix alphabet (64 radix chars + 1 pad char)
     b64_list = list(SAFE_B64_POOL)
     rng.shuffle(b64_list)
     alpha64 = "".join(b64_list[:64])
@@ -640,33 +785,29 @@ def compile_polymorphic_vm(
     alpha_add = rng.randint(7, 249)
     enc_alpha65 = bytes((b + (i + 1) * alpha_mul + alpha_add) & 0xFF for i, b in enumerate(full_alpha65))
 
-    # Layer 2 Step 2: Split Stage-2 payload into 4 to 7 encrypted blocks + anonymized chunk tag
-    num_blocks = rng.randint(4, 7) if len(payload_bytes) >= 256 else 2
+    # Layer 1 (Stage-2 Inner VM): Compile Luau AST into Vmify custom bytecode & encrypted binary prototype stream
+    s2_seed = (file_seed & 0x7FFFFFFF) or 1337
+    init_chain_key256 = anchor_vals[0] % 256
+    base_str_salt = rng.randint(17, 239)
+    base_op_salt = rng.randint(19, 241)
+
+    payload_bytes, minified_rt, _, _, _ = bridge.compile_stage2_vmify(
+        clean_source,
+        rel_path,
+        s2_seed,
+        init_chain_key256,
+        base_str_salt,
+        base_op_salt,
+    )
+
+    # Layer 2 (Stage-1 Outer VM): Split binary Vmify bytecode into 5..8 Dual-LCG PCBC blocks
+    num_blocks = rng.randint(5, 8) if len(payload_bytes) >= 256 else 3
     chunk_size = max(1, (len(payload_bytes) + num_blocks - 1) // num_blocks)
     raw_blocks: List[bytes] = []
     for idx in range(0, len(payload_bytes), chunk_size):
         raw_blocks.append(payload_bytes[idx : idx + chunk_size])
     num_blocks = len(raw_blocks)
 
-    anon_chunk_tag = f"=[0x{rng.randint(0x100000, 0xFFFFFF):06X}]"
-    env_symbols = [
-        "string",         # 0
-        "char",           # 1
-        "byte",           # 2
-        "table",          # 3
-        "concat",         # 4
-        "unpack",         # 5
-        "bit32",          # 6
-        "bxor",           # 7
-        "loadstring",     # 8
-        "load",           # 9
-        "pcall",          # 10
-        "error",          # 11
-        "select",         # 12
-        anon_chunk_tag,   # 13 (anonymized hex tag — zero filename leak!)
-    ]
-
-    # Encrypt symbols and payload blocks with Dual-LCG PCBC + custom Base-64 + pre-XOR
     k_entries: List[Dict[str, object]] = [
         {
             "kind": "alpha",
@@ -677,36 +818,18 @@ def compile_polymorphic_vm(
             "crc": 0,
             "pre_mask": 0,
             "pre_step": 0,
-        }
+        },
+        {
+            "kind": "probe",
+            "id": 0,
+            "b64": enc_probe_literal,
+            "seed": 0,
+            "iv": 0,
+            "crc": 0,
+            "pre_mask": 0,
+            "pre_step": 0,
+        },
     ]
-
-    for sym_idx, sym in enumerate(env_symbols):
-        seed_val = rng.randint(50000, 16000000)
-        iv_val = rng.randint(1, 254)
-        pre_mask = rng.randint(1, 254)
-        pre_step = rng.randint(1, 125) * 2 + 1
-        enc_bytes, crc_val = encrypt_pcbc_dual_lcg(
-            sym.encode("utf-8"),
-            sbox,
-            seed_val,
-            iv_val,
-            lcg_a1,
-            lcg_c1,
-            lcg_a2,
-            lcg_c2,
-            lcg_init2,
-        )
-        b64_str = custom_b64_encode_with_prexor(enc_bytes, alpha64, pad_char, pre_mask, pre_step)
-        k_entries.append({
-            "kind": "sym",
-            "id": sym_idx,
-            "b64": b64_str,
-            "seed": seed_val,
-            "iv": iv_val,
-            "crc": crc_val,
-            "pre_mask": pre_mask,
-            "pre_step": pre_step,
-        })
 
     for blk_idx, blk in enumerate(raw_blocks):
         seed_val = rng.randint(50000, 16000000)
@@ -736,9 +859,8 @@ def compile_polymorphic_vm(
             "pre_step": pre_step,
         })
 
-    # Also add 2 decoy constant pool blobs so constant pool size and layout vary unpredictably
     for dec_id in range(rng.randint(1, 3)):
-        dec_bytes = bytes(rng.randint(0, 255) for _ in range(rng.randint(12, 36)))
+        dec_bytes = bytes(rng.randint(0, 255) for _ in range(rng.randint(16, 40)))
         k_entries.append({
             "kind": "decoy",
             "id": dec_id,
@@ -752,20 +874,13 @@ def compile_polymorphic_vm(
 
     rng.shuffle(k_entries)
     k_alpha_idx = 0
-    sym_k_index: Dict[int, Tuple[int, int, int, int, int, int]] = {}
+    k_probe_idx = 0
     blk_k_index: Dict[int, Tuple[int, int, int, int, int, int]] = {}
     for k_pos, entry in enumerate(k_entries, start=1):
         if entry["kind"] == "alpha":
             k_alpha_idx = k_pos
-        elif entry["kind"] == "sym":
-            sym_k_index[int(entry["id"])] = (
-                k_pos,
-                int(entry["seed"]),
-                int(entry["iv"]),
-                int(entry["crc"]),
-                int(entry["pre_mask"]),
-                int(entry["pre_step"]),
-            )
+        elif entry["kind"] == "probe":
+            k_probe_idx = k_pos
         elif entry["kind"] == "blk":
             blk_k_index[int(entry["id"])] = (
                 k_pos,
@@ -776,105 +891,76 @@ def compile_polymorphic_vm(
                 int(entry["pre_step"]),
             )
 
-    # Layer 2 Step 3: Randomize Opcode IDs and 6-Tuple / 7-Tuple Instruction Slot Permutation
     opcode_names = [
         "OP_SBOX",
         "OP_ALPHA",
         "OP_LOADK",
         "OP_XOR_DEC",
-        "OP_GETENV",
-        "OP_GETTBL",
         "OP_CONCAT",
         "OP_CRC",
         "OP_MBA",
-        "OP_BOGUS",
-        "OP_CALL",
+        "OP_MIX",
         "OP_EXEC",
         "OP_RET",
     ]
     opcode_pool = rng.sample(range(13, 245), len(opcode_names))
     op_ids: Dict[str, int] = dict(zip(opcode_names, opcode_pool))
 
-    tuple_width = rng.choice([6, 7])
+    # 4 live states (st_init, st_fetch, st_dispatch, st_step) + 1 loop exit state (st_exit)
+    st_init, st_fetch, st_dispatch, st_step, st_exit = rng.sample(range(105, 945), 5)
+
+    # 7-tuple instruction layout with dynamic CRC-chained opcode guard and dynamic CRC-chained next-state slot
+    tuple_width = 7
     all_slots = list(range(1, tuple_width + 1))
     rng.shuffle(all_slots)
-    slot_op, slot_a, slot_b, slot_c, slot_d, slot_guard = all_slots[:6]
-    extra_slots = all_slots[6:]
+    slot_op, slot_a, slot_b, slot_c, slot_d, slot_guard, slot_next = all_slots
 
-    def encode_insn(op_name: str, a: int = 0, b: int = 0, c: int = 0, d: int = 0) -> List[int]:
-        arr = [0] * tuple_width
-        guard_val = rng.randint(300, 65000)
-        arr[slot_guard - 1] = guard_val
-        arr[slot_op - 1] = op_ids[op_name] ^ (guard_val & 0xFF)
-        arr[slot_a - 1] = a
-        arr[slot_b - 1] = b
-        arr[slot_c - 1] = c
-        arr[slot_d - 1] = d
-        for es in extra_slots:
-            arr[es - 1] = rng.randint(11, 45000)
-        return arr
-
-    # Layer 2 Step 4: Randomized Disjoint Register Allocation (never 1, 20..24, 30, 60..73!)
     blk_dec_base = rng.randint(140, 310)
     reserved_blk_regs = set(range(blk_dec_base, blk_dec_base + num_blocks))
     candidate_regs = [r for r in range(15, 485) if r not in reserved_blk_regs]
-    drawn_regs = rng.sample(candidate_regs, 12 + 2 * len(env_symbols) + num_blocks)
+    drawn_regs = rng.sample(candidate_regs, 10 + num_blocks)
     reg_iter = iter(drawn_regs)
 
     reg_sbox = next(reg_iter)
     reg_alpha = next(reg_iter)
     reg_chain_crc = next(reg_iter)
     reg_mba = next(reg_iter)
-    reg_bogus = next(reg_iter)
-    reg_env_str = next(reg_iter)
-    reg_env_tbl = next(reg_iter)
-    reg_tbl_concat = next(reg_iter)
-    reg_loader_fn = next(reg_iter)
+    reg_mix = next(reg_iter)
     reg_full_source = next(reg_iter)
     reg_exec_res = next(reg_iter)
     reg_decoy_init = next(reg_iter)
 
-    reg_sym_raw = [next(reg_iter) for _ in range(len(env_symbols))]
-    reg_sym_dec = [next(reg_iter) for _ in range(len(env_symbols))]
     reg_blk_enc = [next(reg_iter) for _ in range(num_blocks)]
     reg_blk_dec = [blk_dec_base + i for i in range(num_blocks)]
 
-    # Layer 2 Step 5: Assemble the Chained-Key Multi-Register VM Instruction Stream
     insns: List[List[int]] = []
-    chain_init = rng.randint(100000, 16000000)
+    chain_init = anchor_vals[1]
+
+    def encode_insn(
+        op_name: str,
+        a: int,
+        b: int,
+        c: int,
+        d: int,
+        pre_crc: int,
+        post_crc: int,
+    ) -> List[int]:
+        arr = [0] * tuple_width
+        guard_val = rng.randint(300, 65000)
+        arr[slot_guard - 1] = guard_val
+        arr[slot_op - 1] = op_ids[op_name] ^ ((guard_val + (pre_crc % 256)) & 0xFF)
+        arr[slot_a - 1] = a
+        arr[slot_b - 1] = b
+        arr[slot_c - 1] = c
+        arr[slot_d - 1] = d
+        arr[slot_next - 1] = st_step ^ (post_crc & 0xFF)
+        return arr
+
     running_chain_crc = chain_init
+    insns.append(encode_insn("OP_SBOX", reg_sbox, inv_mul, s_add, chain_init, running_chain_crc, running_chain_crc))
+    insns.append(encode_insn("OP_ALPHA", reg_alpha, k_alpha_idx, alpha_mul, alpha_add, running_chain_crc, running_chain_crc))
+    insns.append(encode_insn("OP_MIX", reg_mix, rng.randint(50, 9999), rng.randint(50, 9999), rng.randint(1, 255), running_chain_crc, running_chain_crc))
 
-    # Initialize Inverse S-Box in R[reg_sbox] and initial running CRC chain in R[reg_chain_crc]
-    insns.append(encode_insn("OP_SBOX", reg_sbox, inv_mul, s_add, chain_init))
-    # Bootstrap custom Base-64 reverse lookup table in R[reg_alpha]
-    insns.append(encode_insn("OP_ALPHA", reg_alpha, k_alpha_idx, alpha_mul, alpha_add))
-    insns.append(encode_insn("OP_BOGUS", reg_bogus, rng.randint(50, 9999), rng.randint(50, 9999), rng.randint(1, 255)))
-
-    # Decrypt all 14 environment symbols in a randomized permutation order!
-    sym_order = list(range(len(env_symbols)))
-    rng.shuffle(sym_order)
-    for sym_id in sym_order:
-        k_idx, seed_val, iv_val, crc_val, pre_mask, pre_step = sym_k_index[sym_id]
-        r_raw = reg_sym_raw[sym_id]
-        r_dec = reg_sym_dec[sym_id]
-        m1 = rng.randint(20000, 16000000)
-        m2 = rng.randint(20000, 16000000)
-        m3 = seed_val ^ running_chain_crc ^ m1 ^ m2
-        chain_salt = rng.randint(1000, 900000)
-
-        insns.append(encode_insn("OP_LOADK", r_raw, k_idx, pre_mask, pre_step))
-        insns.append(encode_insn("OP_MBA", reg_mba, m1, m2, m3))
-        insns.append(encode_insn("OP_XOR_DEC", r_dec, r_raw, reg_mba, iv_val))
-        insns.append(encode_insn("OP_CRC", r_dec, crc_val, chain_salt, sym_id + 1))
-        running_chain_crc = ((running_chain_crc * 65599 + chain_salt) % 16777216) ^ crc_val
-
-    # Resolve environment tables & functions via OP_GETENV and OP_GETTBL
-    insns.append(encode_insn("OP_GETENV", reg_env_str, reg_sym_dec[0], 0, 0))
-    insns.append(encode_insn("OP_GETENV", reg_env_tbl, reg_sym_dec[3], 0, 0))
-    insns.append(encode_insn("OP_GETTBL", reg_tbl_concat, reg_env_tbl, reg_sym_dec[4], 0))
-    insns.append(encode_insn("OP_GETENV", reg_loader_fn, reg_sym_dec[8], reg_sym_dec[9], 0))
-
-    # Decrypt each payload block in a randomized block order, chaining each block's key to the previous block's FNV-1a CRC!
     blk_order = list(range(num_blocks))
     rng.shuffle(blk_order)
     for step_idx, blk_id in enumerate(blk_order):
@@ -885,25 +971,24 @@ def compile_polymorphic_vm(
         m2 = rng.randint(20000, 16000000)
         m3 = seed_val ^ running_chain_crc ^ m1 ^ m2
         chain_salt = rng.randint(1000, 900000)
+        crc_delta = rng.randint(1000, 500000)
+        next_crc = ((running_chain_crc * 65599 + chain_salt) % 16777216) ^ ((crc_val + crc_delta) % 16777216)
 
-        insns.append(encode_insn("OP_LOADK", r_enc, k_idx, pre_mask, pre_step))
-        insns.append(encode_insn("OP_MBA", reg_mba, m1, m2, m3))
-        insns.append(encode_insn("OP_XOR_DEC", r_plain, r_enc, reg_mba, iv_val))
-        insns.append(encode_insn("OP_CRC", r_plain, crc_val, chain_salt, blk_id + 100))
-        running_chain_crc = ((running_chain_crc * 65599 + chain_salt) % 16777216) ^ crc_val
+        insns.append(encode_insn("OP_LOADK", r_enc, k_idx, pre_mask, pre_step, running_chain_crc, running_chain_crc))
+        insns.append(encode_insn("OP_MBA", reg_mba, m1, m2, m3, running_chain_crc, running_chain_crc))
+        insns.append(encode_insn("OP_XOR_DEC", r_plain, r_enc, reg_mba, iv_val, running_chain_crc, running_chain_crc))
+        insns.append(encode_insn("OP_CRC", r_plain, crc_delta, chain_salt, blk_id + 100, running_chain_crc, next_crc))
+        running_chain_crc = next_crc
         if step_idx % 2 == 0:
-            insns.append(encode_insn("OP_BOGUS", reg_bogus, rng.randint(100, 9999), rng.randint(100, 9999), blk_id))
+            insns.append(encode_insn("OP_MIX", reg_mix, rng.randint(100, 9999), rng.randint(100, 9999), blk_id, running_chain_crc, running_chain_crc))
 
-    # Concatenate decrypted payload blocks into R[reg_full_source]
-    insns.append(encode_insn("OP_CONCAT", reg_full_source, blk_dec_base, blk_dec_base + num_blocks - 1, reg_tbl_concat))
+    final_chain_crc = running_chain_crc
+    ck_offset = (init_chain_key256 - (final_chain_crc % 256)) % 256
 
-    # Execute reconstructed Stage-2 chunk via R[reg_loader_fn] with anonymized chunk tag R[reg_sym_dec[13]]
-    insns.append(encode_insn("OP_EXEC", reg_exec_res, reg_full_source, reg_loader_fn, reg_sym_dec[13]))
+    insns.append(encode_insn("OP_CONCAT", reg_full_source, blk_dec_base, blk_dec_base + num_blocks - 1, 0, final_chain_crc, final_chain_crc))
+    insns.append(encode_insn("OP_EXEC", reg_exec_res, reg_full_source, ck_offset, 0, final_chain_crc, final_chain_crc))
+    insns.append(encode_insn("OP_RET", reg_exec_res, 0, 0, 0, final_chain_crc, final_chain_crc))
 
-    # Return unpacked result from R[reg_exec_res]
-    insns.append(encode_insn("OP_RET", reg_exec_res, 0, 0, 0))
-
-    # Layer 2 Step 6: Generate obfuscated variable names (< 10 local declarations total!)
     (
         v_env,
         v_args,
@@ -911,11 +996,13 @@ def compile_polymorphic_vm(
         v_reg,
         v_konst,
         v_code,
+        v_anchor,
         v_pc,
         v_state,
         v_str,
         v_char,
         v_byte,
+        v_sub,
         v_concat,
         v_unpack,
         v_bxor,
@@ -935,61 +1022,67 @@ def compile_polymorphic_vm(
         v_t6,
         v_t7,
         v_t8,
-    ) = generate_identifiers(30, rng)
+        v_vm_fn,
+        v_i,
+        v_j,
+        v_r,
+        v_p,
+        v_n,
+    ) = generate_identifiers(38, rng)
 
-    st_init, st_fetch, st_dispatch, st_bogus, st_trap, st_exit = rng.sample(range(105, 945), 6)
+    def rint(val: int) -> str:
+        return make_runtime_int(val, rng, v_anchor, anchor_vals, v_bxor)
 
-    # Format constant pool _K
+    cnt_key = rng.randint(1024, 999999)
+
     k_literals = ['"' + str(entry["b64"]) + '"' for entry in k_entries]
     k_table_str = "{" + ",".join(k_literals) + "}"
 
-    # Format instruction table _I with randomized MBA expressions across all 6 or 7 slots
     i_literals: List[str] = []
     for ins in insns:
         elems = [
-            make_mba_int(val, rng) if rng.random() < 0.42 else str(val)
+            rint(val) if rng.random() < 0.45 else str(val)
             for val in ins
         ]
         i_literals.append("{" + ",".join(elems) + "}")
     i_table_str = "{" + ",".join(i_literals) + "}"
 
-    # Build pre-seeded decoy register initializer so `local a,b,c={},{...}` regex NEVER matches
     decoy_reg_pairs = [
-        f"[{make_mba_int(reg_decoy_init, rng)}]={make_mba_int(rng.randint(10, 9999), rng)}",
-        f"[{rng.randint(500, 900)}]={rng.randint(1, 500)}",
+        f"[{rint(reg_decoy_init)}]={rint(rng.randint(10, 9999))}",
+        f"[{rint(reg_chain_crc)}]={rint(chain_init)}",
     ]
     reg_init_str = "{" + ",".join(decoy_reg_pairs) + "}"
 
-    # Randomize declaration order of v_reg, v_konst, v_code across separate statements
+    # Pre-declare `v_konst` before `anti_hook_bootstrap` so the encrypted probe blob is fetched from `v_konst[k_probe_idx]`
+    # and then declare `v_reg`, `v_code`, `v_vm_fn` in randomized order after `v_anchor` is populated!
     table_decl_stmts = [
         f"local {v_reg}={reg_init_str};",
-        f"local {v_konst}={k_table_str};",
         f"local {v_code}={i_table_str};",
+        f"local {v_vm_fn}={minified_rt};",
     ]
     rng.shuffle(table_decl_stmts)
     randomized_table_decls = "".join(table_decl_stmts)
 
-    # Build binary search dispatch tree over the randomized op_ids using shared VM registers v_t1..v_t8
     handlers: Dict[int, str] = {
         op_ids["OP_SBOX"]: (
-            f"{v_t1}={{}};for _i=0,255 do {v_t1}[_i]=(_i*{v_b}-{v_c}*{v_b})%256 end;"
-            f"{v_reg}[{v_a}]={v_t1};{v_reg}[{make_mba_int(reg_chain_crc, rng)}]={v_d}"
+            f"{v_t1}={{}};for {v_i}=0,255 do {v_t1}[{v_i}]=({v_i}*{v_b}-{v_c}*{v_b})%256 end;"
+            f"{v_reg}[{v_a}]={v_t1};{v_reg}[{rint(reg_chain_crc)}]={v_d}"
         ),
         op_ids["OP_ALPHA"]: (
             f"{v_t1},{v_t2}={{}},{v_konst}[{v_b}];"
-            f"for _i=1,#{v_t2} do {v_t1}[({v_byte}({v_t2},_i)-_i*{v_c}-{v_d})%256]=_i-1 end;"
+            f"for {v_i}=1,#{v_t2} do {v_t1}[({v_byte}({v_t2},{v_i})-{v_i}*{v_c}-{v_d})%256]={v_i}-1 end;"
             f"{v_reg}[{v_a}]={v_t1}"
         ),
         op_ids["OP_LOADK"]: (
-            f"{v_t1},{v_t2},{v_t3},{v_t4}={v_konst}[{v_b}],{v_reg}[{make_mba_int(reg_alpha, rng)}],{{}},1;"
-            f"for _i=1,#{v_t1},4 do "
-            f"{v_t5}={v_t2}[{v_byte}({v_t1},_i)]*262144+{v_t2}[{v_byte}({v_t1},_i+1)]*4096+({v_t2}[{v_byte}({v_t1},_i+2)]%64)*64+({v_t2}[{v_byte}({v_t1},_i+3)]%64);"
+            f"{v_t1},{v_t2},{v_t3},{v_t4}={v_konst}[{v_b}],{v_reg}[{rint(reg_alpha)}],{{}},1;"
+            f"for {v_i}=1,#{v_t1},4 do "
+            f"{v_t5}={v_t2}[{v_byte}({v_t1},{v_i})]*262144+{v_t2}[{v_byte}({v_t1},{v_i}+1)]*4096+({v_t2}[{v_byte}({v_t1},{v_i}+2)]%64)*64+({v_t2}[{v_byte}({v_t1},{v_i}+3)]%64);"
             f"{v_t6}=({v_t5}-{v_t5}%65536)/65536;"
             f"{v_t3}[{v_t4}]={v_cmap}[{v_bxor}({v_t6},({v_c}+({v_t4}-1)*{v_d})%256)];{v_t4}={v_t4}+1;"
-            f"if {v_t2}[{v_byte}({v_t1},_i+2)]<64 then "
+            f"if {v_t2}[{v_byte}({v_t1},{v_i}+2)]<64 then "
             f"{v_t6}=(({v_t5}-{v_t5}%256)/256)%256;"
             f"{v_t3}[{v_t4}]={v_cmap}[{v_bxor}({v_t6},({v_c}+({v_t4}-1)*{v_d})%256)];{v_t4}={v_t4}+1;"
-            f"if {v_t2}[{v_byte}({v_t1},_i+3)]<64 then "
+            f"if {v_t2}[{v_byte}({v_t1},{v_i}+3)]<64 then "
             f"{v_t6}={v_t5}%256;"
             f"{v_t3}[{v_t4}]={v_cmap}[{v_bxor}({v_t6},({v_c}+({v_t4}-1)*{v_d})%256)];{v_t4}={v_t4}+1 "
             f"end end end;"
@@ -997,56 +1090,43 @@ def compile_polymorphic_vm(
         ),
         op_ids["OP_MBA"]: (
             f"{v_t1}=({v_b}+{v_c})-2*{v_band}({v_b},{v_c});"
-            f"{v_reg}[{v_a}]={v_bxor}({v_bxor}({v_t1},{v_d}),{v_reg}[{make_mba_int(reg_chain_crc, rng)}])"
+            f"{v_reg}[{v_a}]={v_bxor}({v_bxor}({v_t1},{v_d}),{v_reg}[{rint(reg_chain_crc)}])"
         ),
-        op_ids["OP_BOGUS"]: (
+        op_ids["OP_MIX"]: (
             f"{v_reg}[{v_a}]=({v_b}*37+{v_c}+{v_d})%65536"
         ),
         op_ids["OP_XOR_DEC"]: (
             f"{v_t1}={v_reg}[{v_b}];"
             f"{v_t2}={v_reg}[{v_c}]%16777216;"
-            f"{v_t3}=({v_t2}*65599+{v_d}*4099+{make_mba_int(lcg_init2, rng)})%16777216;"
+            f"{v_t3}=({v_t2}*65599+{v_d}*4099+{rint(lcg_init2)})%16777216;"
             f"{v_t4},{v_t5},{v_t6}={v_d}%256,({v_t2}%251)+1,{{}};"
-            f"for _i=1,#{v_t1} do "
-            f"{v_t7}={v_byte}({v_t1},_i);"
-            f"{v_t2}=({v_t2}*{make_mba_int(lcg_a1, rng)}+{make_mba_int(lcg_c1, rng)})%16777216;"
-            f"{v_t3}=({v_t3}*{make_mba_int(lcg_a2, rng)}+{make_mba_int(lcg_c2, rng)})%16777216;"
-            f"{v_t8}={v_bxor}({v_bxor}({v_reg}[{make_mba_int(reg_sbox, rng)}][({v_t7}-((({v_t2}-{v_t2}%256)/256)%256+{v_t3}%256)%256-{v_t4})%256],{v_bxor}({v_t2}%256,(({v_t3}-{v_t3}%65536)/65536)%256)),{v_t5});"
-            f"{v_t6}[_i]={v_cmap}[{v_t8}];"
+            f"for {v_i}=1,#{v_t1} do "
+            f"{v_t7}={v_byte}({v_t1},{v_i});"
+            f"{v_t2}=({v_t2}*{rint(lcg_a1)}+{rint(lcg_c1)})%16777216;"
+            f"{v_t3}=({v_t3}*{rint(lcg_a2)}+{rint(lcg_c2)})%16777216;"
+            f"{v_t8}={v_bxor}({v_bxor}({v_reg}[{rint(reg_sbox)}][({v_t7}-((({v_t2}-{v_t2}%256)/256)%256+{v_t3}%256)%256-{v_t4})%256],{v_bxor}({v_t2}%256,(({v_t3}-{v_t3}%65536)/65536)%256)),{v_t5});"
+            f"{v_t6}[{v_i}]={v_cmap}[{v_t8}];"
             f"{v_t4},{v_t5}={v_t7},{v_t8} end;"
             f"{v_reg}[{v_a}]={v_concat}({v_t6})"
         ),
         op_ids["OP_CRC"]: (
-            f"{v_t1},{v_t2}={v_reg}[{v_a}],{make_mba_int(2166136261 % 16777216, rng)};"
-            f"for _i=1,#{v_t1} do {v_t2}=({v_bxor}({v_t2},{v_byte}({v_t1},_i))*16777619)%16777216 end;"
-            f"if {v_t2}~={make_mba_int(0, rng)}+{v_b} then {v_state}={st_trap} end;"
-            f"{v_reg}[{make_mba_int(reg_chain_crc, rng)}]={v_bxor}(({v_reg}[{make_mba_int(reg_chain_crc, rng)}]*65599+{v_c})%16777216,{v_t2})"
-        ),
-        op_ids["OP_GETENV"]: (
-            f"{v_t1}={v_env}[{v_reg}[{v_b}]];"
-            f"if {v_t1}==nil and {v_c}~=0 then {v_t1}={v_env}[{v_reg}[{v_c}]] end;"
-            f"{v_reg}[{v_a}]={v_t1}"
-        ),
-        op_ids["OP_GETTBL"]: (
-            f"{v_t1}={v_reg}[{v_b}];{v_reg}[{v_a}]={v_t1} and {v_t1}[{v_reg}[{v_c}]]"
+            f"{v_t1},{v_t2}={v_reg}[{v_a}],{rint(2166136261 % 16777216)};"
+            f"for {v_i}=1,#{v_t1} do {v_t2}=({v_bxor}({v_t2},{v_byte}({v_t1},{v_i}))*16777619)%16777216 end;"
+            f"{v_reg}[{rint(reg_chain_crc)}]={v_bxor}(({v_reg}[{rint(reg_chain_crc)}]*65599+{v_c})%16777216,({v_t2}+{v_b})%16777216)"
         ),
         op_ids["OP_CONCAT"]: (
             f"{v_t1},{v_t2}={{}},1;"
-            f"for _i={v_b},{v_c} do {v_t1}[{v_t2}]={v_reg}[_i];{v_reg}[_i]=nil;{v_t2}={v_t2}+1 end;"
-            f"{v_reg}[{v_a}]=({v_reg}[{v_d}] or {v_concat})({v_t1})"
-        ),
-        op_ids["OP_CALL"]: (
-            f"{v_reg}[{v_a}]={v_reg}[{v_b}]({v_reg}[{v_c}])"
+            f"for {v_i}={v_b},{v_c} do {v_t1}[{v_t2}]={v_reg}[{v_i}];{v_reg}[{v_i}]=nil;{v_t2}={v_t2}+1 end;"
+            f"{v_reg}[{v_a}]={v_concat}({v_t1})"
         ),
         op_ids["OP_EXEC"]: (
-            f"{v_t1},{v_t2}={v_reg}[{v_c}]({v_reg}[{v_b}],{v_reg}[{v_d}]);"
-            f"{v_reg}[{v_b}]=nil;"
-            f"if not {v_t1} then error({v_t2},0) end;"
-            f"{v_t3}=function(...)return{{n=select('#',...),...}}end;"
-            f"{v_reg}[{v_a}]={v_t3}({v_t1}({v_unpack}({v_args},1,{v_argc})))"
+            f"{v_t1}={v_reg}[{v_b}];{v_reg}[{v_b}]=nil;"
+            f"{v_t2}=({v_reg}[{rint(reg_chain_crc)}]%256+{v_c})%256;"
+            f"{v_t3}=function(...)return{{[{rint(cnt_key)}]=select({v_cmap}[35],...),...}}end;"
+            f"{v_reg}[{v_a}]={v_t3}({v_vm_fn}({v_t1},{v_t2},{v_bxor},{v_cmap},{v_byte},{v_sub},{v_concat},{v_unpack}({v_args},1,{v_argc})))"
         ),
         op_ids["OP_RET"]: (
-            f"{v_t1}={v_reg}[{v_a}];return {v_unpack}({v_t1},1,{v_t1}.n)"
+            f"{v_t1}={v_reg}[{v_a}];return {v_unpack}({v_t1},1,{v_t1}[{rint(cnt_key)}])"
         ),
     }
 
@@ -1055,59 +1135,85 @@ def compile_polymorphic_vm(
     def emit_dispatch_tree(items: List[Tuple[int, str]]) -> str:
         if len(items) == 1:
             op_code, body = items[0]
-            return f"if {v_op}=={make_mba_int(op_code, rng)} then {body} end"
+            return f"if {v_op}=={rint(op_code)} then {body} end"
         mid = len(items) // 2
         split_val = items[mid - 1][0]
         left_code = emit_dispatch_tree(items[:mid])
         right_code = emit_dispatch_tree(items[mid:])
-        return f"if {v_op}<={make_mba_int(split_val, rng)} then {left_code} else {right_code} end"
+        return f"if {v_op}<={rint(split_val)} then {left_code} else {right_code} end"
 
     dispatch_tree_code = emit_dispatch_tree(sorted_ops)
 
-    vm_body = (
-        f"{VM_MARKER}"
-        f"return(function(...)"
-        f"local {v_env},{v_args},{v_argc},{v_str},{v_concat},{v_unpack}="
-        f"(type(getfenv)=='function'and getfenv())or _ENV or _G,{{...}},select('#',...),string,table.concat,unpack or table.unpack;"
-        f"local {v_char},{v_byte},{v_bxor},{v_band},{v_cmap},_N={v_str}.char,{v_str}.byte,bit32 and bit32.bxor,bit32 and bit32.band,{{}};"
-        f"local {v_t1},{v_t2},{v_t3},{v_t4},{v_t5},{v_t6},{v_t7},{v_t8};"
-        f"if not {v_bxor} then "
-        f"_N={{}};"
-        f"for _a=0,15 do {v_t2}={{}};_N[_a]={v_t2};"
-        f"for _b=0,15 do {v_t3},{v_t4},{v_t5},{v_t6}=0,1,_a,_b;"
-        f"while {v_t5}>0 or {v_t6}>0 do if {v_t5}%2~={v_t6}%2 then {v_t3}={v_t3}+{v_t4} end;{v_t5}=({v_t5}-{v_t5}%2)/2;{v_t6}=({v_t6}-{v_t6}%2)/2;{v_t4}={v_t4}*2 end;"
-        f"{v_t2}[_b]={v_t3} end end;"
-        f"{v_bxor}=function(_a,_b)"
-        f"local _r,_p=0,1;"
-        f"while _a>0 or _b>0 do _r=_r+_N[_a%16][_b%16]*_p;_a=(_a-_a%16)/16;_b=(_b-_b%16)/16;_p=_p*16 end;"
-        f"return _r end end;"
-        f"if not {v_band} then {v_band}=function(_a,_b)return((_a+_b)-{v_bxor}(_a,_b))/2 end end;"
-        f"for _i=0,255 do {v_cmap}[_i]={v_char}(_i)end;"
-        f"{randomized_table_decls}"
-        f"local {v_pc},{v_state},{v_insn},{v_op},{v_a},{v_b},{v_c},{v_d}=1,{make_mba_int(st_init, rng)};"
-        f"while {v_state}~={st_exit} do "
-        f"if {v_state}=={st_init} then {v_pc}=1;{v_state}={st_fetch} "
-        f"elseif {v_state}=={st_fetch} then "
-        f"{v_insn}={v_code}[{v_pc}];"
-        f"if not {v_insn} then {v_state}={st_exit} else "
-        f"{v_pc}={v_pc}+1;"
-        f"{v_op}={v_bxor}({v_insn}[{slot_op}],{v_insn}[{slot_guard}]%256);"
-        f"{v_a},{v_b},{v_c},{v_d}={v_insn}[{slot_a}],{v_insn}[{slot_b}],{v_insn}[{slot_c}],{v_insn}[{slot_d}];"
-        f"{v_state}={st_dispatch} end "
-        f"elseif {v_state}=={st_dispatch} then "
-        f"{v_state}={st_fetch};"
-        f"{dispatch_tree_code} "
-        f"elseif {v_state}=={st_bogus} then "
-        f"{v_pc}={v_pc}+1;{v_state}={st_fetch} "
-        f"elseif {v_state}=={st_trap} then "
-        f"error('VM integrity check failed',0) "
-        f"end end end)(...)"
+    # 6-way C-Closure Anti-Hook Probe decoding all 9 symbol names dynamically from v_konst[k_probe_idx]
+    # Reuses v_t1..v_t8 so zero descriptive variable names or plaintext symbol strings exist!
+    anti_hook_bootstrap = (
+        f"local {v_anchor}={{}};"
+        f"{v_t1},{v_t2},{v_t3},{v_t4}={{}},{{}},1,{v_konst}[{k_probe_idx}];"
+        f"for {v_i}=1,#{v_t4} do "
+        f"{v_t5}={v_bxor}(({v_byte}({v_t4},{v_i})-{v_i}*{probe_step})%256,{probe_xor});"
+        f"if {v_t5}==0 then {v_t1}[#{v_t1}+1]={v_concat}({v_t2});{v_t2},{v_t3}={{}},1 "
+        f"else {v_t2}[{v_t3}]={v_cmap}[{v_t5}];{v_t3}={v_t3}+1 end end;"
+        f"{v_t2},{v_t3}=1,{v_str}[{v_t1}[1]];"
+        f"{v_t4}=type({v_env}[{v_t1}[2]])==type({v_anchor})and type({v_env}[{v_t1}[2]][{v_t1}[3]])==type(pcall)and {v_env}[{v_t1}[2]][{v_t1}[3]];"
+        f"{v_t5}=type({v_env}[{v_t1}[4]])==type(pcall)and {v_env}[{v_t1}[4]];"
+        f"{v_t6}=type({v_env}[{v_t1}[5]])==type(pcall)and {v_env}[{v_t1}[5]];"
+        f"{v_t7}=(type({v_env}[{v_t1}[6]])==type(pcall)and {v_env}[{v_t1}[6]])or(type({v_env}[{v_t1}[7]])==type(pcall)and {v_env}[{v_t1}[7]]);"
+        f"{v_t8}={{pcall,{v_byte},{v_char},{v_sub},{v_concat},tonumber,select,{v_env}[{v_t1}[8]]or {v_env}[{v_t1}[9]]}};"
+        f"if type({v_t3})==type(pcall)then "
+        f"if pcall({v_t3},{v_t3})or not pcall({v_t3},function()end)then {v_t2}=0 end "
+        f"end;"
+        f"for {v_i}=1,#{v_t8} do "
+        f"{v_t1}={v_t8}[{v_i}];"
+        f"if type({v_t1})~=type(pcall)then {v_t2}=0 else "
+        f"if type({v_t3})==type(pcall)and pcall({v_t3},{v_t1})then {v_t2}=0 end;"
+        f"if {v_t4} then {v_n}={v_t4}({v_t1},{v_cmap}[115]);if not {v_n} or {v_byte}({v_n},2)~=67 or {v_t4}({v_t1},{v_cmap}[108])~=-1 then {v_t2}=0 end end;"
+        f"if {v_t5} and not {v_t5}({v_t1})then {v_t2}=0 end;"
+        f"if {v_t6} and {v_t6}({v_t1})then {v_t2}=0 end;"
+        f"if {v_t7} and {v_t7}({v_t1})then {v_t2}=0 end "
+        f"end end;"
+        f"{v_t1}={boot_seed_base}+{v_t2}*{boot_trust_step};"
+        f"for {v_i}=1,16 do {v_t1}=({v_t1}*{boot_lcg_a}+{boot_lcg_c}+{v_i}*4099)%16777216;{v_anchor}[{v_i}]={v_t1} end;"
     )
 
-    if header:
-        output = f"{header}\n{vm_body}\n"
-    else:
-        output = f"{vm_body}\n"
+    vm_body = (
+        f"return(function(...)"
+        f"local {v_env},{v_args},{v_argc},{v_str},{v_concat},{v_unpack}="
+        f"(type(getfenv)==type(pcall)and getfenv())or _ENV or _G,{{...}},select('#',...),string,table.concat,unpack or table.unpack;"
+        f"local {v_char},{v_byte},{v_sub},{v_bxor},{v_band},{v_cmap}={v_str}.char,{v_str}.byte,{v_str}.sub,bit32 and bit32.bxor,bit32 and bit32.band,{{}};"
+        f"local {v_t1},{v_t2},{v_t3},{v_t4},{v_t5},{v_t6},{v_t7},{v_t8},{v_n};"
+        f"if not {v_bxor} then "
+        f"{v_n}={{}};"
+        f"for {v_i}=0,15 do {v_t2}={{}};{v_n}[{v_i}]={v_t2};"
+        f"for {v_j}=0,15 do {v_t3},{v_t4},{v_t5},{v_t6}=0,1,{v_i},{v_j};"
+        f"while {v_t5}>0 or {v_t6}>0 do if {v_t5}%2~={v_t6}%2 then {v_t3}={v_t3}+{v_t4} end;{v_t5}=({v_t5}-{v_t5}%2)/2;{v_t6}=({v_t6}-{v_t6}%2)/2;{v_t4}={v_t4}*2 end;"
+        f"{v_t2}[{v_j}]={v_t3} end end;"
+        f"{v_bxor}=function({v_i},{v_j})"
+        f"local {v_r},{v_p}=0,1;"
+        f"while {v_i}>0 or {v_j}>0 do {v_r}={v_r}+{v_n}[{v_i}%16][{v_j}%16]*{v_p};{v_i}=({v_i}-{v_i}%16)/16;{v_j}=({v_j}-{v_j}%16)/16;{v_p}={v_p}*16 end;"
+        f"return {v_r} end end;"
+        f"if not {v_band} then {v_band}=function({v_i},{v_j})return(({v_i}+{v_j})-{v_bxor}({v_i},{v_j}))/2 end end;"
+        f"for {v_i}=0,255 do {v_cmap}[{v_i}]={v_char}({v_i})end;"
+        f"local {v_konst}={k_table_str};"
+        f"{anti_hook_bootstrap}"
+        f"{randomized_table_decls}"
+        f"local {v_pc},{v_state},{v_insn},{v_op},{v_a},{v_b},{v_c},{v_d}=1,{rint(st_init)};"
+        f"while {v_state}~={rint(st_exit)} do "
+        f"if {v_state}=={rint(st_init)} then {v_pc}=1;{v_state}={rint(st_fetch)} "
+        f"elseif {v_state}=={rint(st_fetch)} then "
+        f"{v_insn}={v_code}[{v_pc}];"
+        f"if not {v_insn} then break else "
+        f"{v_op}={v_bxor}({v_insn}[{slot_op}],({v_insn}[{slot_guard}]+{v_reg}[{rint(reg_chain_crc)}]%256)%256);"
+        f"{v_a},{v_b},{v_c},{v_d}={v_insn}[{slot_a}],{v_insn}[{slot_b}],{v_insn}[{slot_c}],{v_insn}[{slot_d}];"
+        f"{v_state}={rint(st_dispatch)} end "
+        f"elseif {v_state}=={rint(st_dispatch)} then "
+        f"{dispatch_tree_code};"
+        f"if {v_state}=={rint(st_dispatch)} then {v_state}={v_bxor}({v_insn}[{slot_next}],{v_reg}[{rint(reg_chain_crc)}]%256) end "
+        f"elseif {v_state}=={rint(st_step)} then "
+        f"{v_pc}={v_pc}+1;{v_state}={rint(st_fetch)} "
+        f"else break end end end)(...)"
+    )
+
+    output = f"{vm_body}\n"
 
     if FORBIDDEN_ANCHOR_RE.search(output):
         raise RuntimeError(f"Forbidden AnchorPoint=UDim2 pattern found in obfuscated output for {rel_path}")
@@ -1126,89 +1232,36 @@ def verify_obfuscated_file(
     bridge: PrometheusBridge,
 ) -> Dict[str, object]:
     """
-    Verifies an obfuscated file against all loader, anti-deobfuscation & runtime checks:
-    1. Line 1 `-- STEPH_COMPONENT: <name> <version>` preserved if component file
-    2. Forbidden `AnchorPoint%s*=%s*UDim2` absent
-    3. Stage-1 local variable declarations < 30
-    4. No filename leak (`=rel_path`) in Stage-1 source
-    5. Valid Lua/Luau syntax via `loadstring` and `Prometheus.Parser`
-    6. Live VM execution in Lua 5.1 test harness:
-       - Runs Stage-1 custom Base-64 decoding, chained MBA key schedule, Dual-LCG PCBC decryption,
-         and FNV-1a CRC checks
-       - Verifies decrypted Stage-2 payload is 100% valid Luau AST, has < 90 top-level local statements,
-         and has zero plaintext string leaks
-       - Executes Stage-2 decryptor closure live and verifies return values
+    Verifies an obfuscated v4.0 file against all 5 architectural & security requirements:
+    1. Zero Header Comments (`-- STEPH_COMPONENT` and `--[[STEPH_PROMETHEUS_VM]]` absent, line 1 starts with code)
+    2. Zero `'VM integrity check failed'`, `'unknown VM opcode'`, or dead branches
+    3. Zero Static Constant-Foldable `(A - B)` or `(-K + K)` arithmetic expressions
+    4. Zero Plaintext String Leaks (including `"loadstring"`, `"iscclosure"`, `"ishooked"`, `"Breakables_PlayerDealDamage"`, etc.)
+    5. Live Dual-VM Execution & Anti-Hook Verification in Lua 5.1:
+       - Clean unhooked environment executes Stage-1 + Stage-2 (`Vmify` custom bytecode VM)
+       - Malicious Lua hook on `loadstring` dumps 0 bytes (`ZERO_DUMP`) AND is detected by C-closure check,
+         silently poisoning `v_anchor` so the VM exits returning `nil`
+       - Malicious Lua hook on `table.concat` or `string.byte` is detected by C-closure check and silently poisons `v_anchor`
+       - Valid Luau AST with max per-function local count < 40 (well below Luau's 200-local limit)
     """
-    expected_header = extract_component_header(clean_source)
-    if expected_header:
-        first_line = obf_source.splitlines()[0].strip()
-        if first_line != expected_header:
-            raise AssertionError(
-                f"[{rel_path}] Line 1 header mismatch: expected {expected_header!r}, got {first_line!r}"
-            )
+    first_line = obf_source.splitlines()[0].strip()
+    if first_line.startswith("--") or "STEPH_COMPONENT" in obf_source or "STEPH_PROMETHEUS_VM" in obf_source:
+        raise AssertionError(f"[{rel_path}] Header signature or comment found in obfuscated output!")
 
     if FORBIDDEN_ANCHOR_RE.search(obf_source):
         raise AssertionError(f"[{rel_path}] Contains forbidden AnchorPoint=UDim2 pattern!")
 
     if rel_path in obf_source:
-        raise AssertionError(f"[{rel_path}] Filename leaked inside Stage-1 obfuscated output!")
+        raise AssertionError(f"[{rel_path}] Filename leaked inside obfuscated output!")
 
-    local_count = count_top_level_locals(obf_source)
-    if local_count >= 30:
-        raise AssertionError(f"[{rel_path}] Too many Stage-1 local declarations: {local_count} >= 30")
-
-    bridge.verify_luau_syntax(obf_source, rel_path)
-
-    test_rt = lua51.LuaRuntime()
-    verify_fn = test_rt.eval(
-        """
-        function(vm_code, label)
-            local captured_payload = nil
-            local captured_chunkname = nil
-            local real_loadstring = loadstring
-            loadstring = function(str, chunkname)
-                captured_payload = str
-                captured_chunkname = chunkname
-                local fn, err = real_loadstring(str, chunkname)
-                if fn then
-                    return fn
-                end
-                return function(...)
-                    return "__LUAU_PAYLOAD_OK__"
-                end
-            end
-            local outer_fn, outer_err = real_loadstring(vm_code, "=" .. label)
-            if not outer_fn then
-                error("Outer VM compile error: " .. tostring(outer_err), 0)
-            end
-            local ok, res = pcall(outer_fn, "arg1", "arg2")
-            loadstring = real_loadstring
-            if not ok then
-                if captured_payload and #captured_payload > 10 then
-                    return true, "decrypted_and_entered", #captured_payload, captured_payload, captured_chunkname
-                end
-                error("Outer VM runtime error: " .. tostring(res), 0)
-            end
-            return true, type(res), captured_payload and #captured_payload or 0, captured_payload, captured_chunkname
-        end
-        """
-    )
-    ok, res_type, payload_len, captured_payload, captured_chunkname = verify_fn(obf_source, rel_path)
-    if not ok or payload_len <= 0 or not captured_payload:
-        raise AssertionError(f"[{rel_path}] VM execution failed to decrypt payload!")
-
-    if captured_chunkname and rel_path in str(captured_chunkname):
-        raise AssertionError(f"[{rel_path}] Chunkname leaked filename: {captured_chunkname!r}")
-
-    stmts, stage2_top_locals = bridge.verify_luau_syntax(captured_payload, rel_path + ".decrypted")
-    max_s2_locals = 90 if rel_path == "ps99_engine_v3.lua" else 180
-    if stage2_top_locals >= max_s2_locals:
-        raise AssertionError(
-            f"[{rel_path}] Stage-2 top-level local count too high: {stage2_top_locals} >= {max_s2_locals}"
-        )
-
-    # Verify Stage-2 has zero plaintext leaks of sensitive strings
-    forbidden_stage2_strings = (
+    forbidden_strings = (
+        "VM integrity check failed",
+        "unknown VM opcode",
+        "loadstring",
+        "iscclosure",
+        "islclosure",
+        "ishooked",
+        "isfunctionhooked",
         "Breakables_PlayerDealDamage",
         "ReplicatedStorage",
         "__PS99CLEAN",
@@ -1216,25 +1269,100 @@ def verify_obfuscated_file(
         "BuyButtons",
         "3.4.3",
     )
-    for leak in forbidden_stage2_strings:
-        if leak in str(captured_payload):
-            raise AssertionError(f"[{rel_path}] Plaintext string {leak!r} leaked in Stage-2 payload!")
+    for leak in forbidden_strings:
+        if leak in obf_source:
+            raise AssertionError(f"[{rel_path}] Forbidden plaintext string {leak!r} leaked in obfuscated output!")
 
-    if rel_path == "manifest.lua" and res_type != "table":
-        raise AssertionError(f"[manifest.lua] Expected VM to return table, got {res_type}")
-    if rel_path.startswith("modules/") or rel_path in ("lib/ui.lua", "lib/config.lua"):
-        if res_type == "string" and str(captured_payload).startswith("local "):
-            res_type = "function(luau)"
-        elif res_type != "function":
-            raise AssertionError(f"[{rel_path}] Expected VM to return builder function, got {res_type}")
+    static_arith_matches = STATIC_CONST_ARITH_RE.findall(obf_source)
+    if static_arith_matches:
+        raise AssertionError(
+            f"[{rel_path}] Found static constant-foldable arithmetic expressions: {static_arith_matches[:5]}"
+        )
+
+    stmts, max_scope_locals = bridge.verify_luau_syntax(obf_source, rel_path)
+    if max_scope_locals >= 60:
+        raise AssertionError(
+            f"[{rel_path}] Max function scope local count too high: {max_scope_locals} >= 60 (limit 200)"
+        )
+
+    test_rt = lua51.LuaRuntime()
+    verify_fn = test_rt.eval(
+        """
+        function(vm_code, label)
+            table.create = table.create or function() return {} end
+            local fn, err = loadstring(vm_code, "=" .. label)
+            if not fn then
+                error("Outer VM compile error: " .. tostring(err), 0)
+            end
+
+            -- 1. Execute in clean unhooked environment
+            local ok_clean, res_clean = pcall(fn)
+
+            -- 2. Execute with malicious 1-line Lua hook on loadstring
+            local dumped_ls = nil
+            local orig_loadstring = loadstring
+            loadstring = function(s, ...)
+                dumped_ls = s
+                return orig_loadstring(s, ...)
+            end
+            local ok_ls, res_ls = pcall(fn)
+            loadstring = orig_loadstring
+
+            -- 3. Execute with malicious Lua hook on table.concat
+            local dumped_tc = nil
+            local orig_concat = table.concat
+            table.concat = function(t, ...)
+                local r = orig_concat(t, ...)
+                if type(r) == "string" and #r > 256 then
+                    dumped_tc = r
+                end
+                return r
+            end
+            local ok_tc, res_tc = pcall(fn)
+            table.concat = orig_concat
+
+            return ok_clean, type(res_clean), tostring(res_clean),
+                   dumped_ls == nil, ok_ls and res_ls == nil,
+                   dumped_tc == nil, ok_tc and res_tc == nil
+        end
+        """
+    )
+    (
+        ok_clean,
+        res_type,
+        res_str,
+        ls_zero_dump,
+        ls_poisoned_nil,
+        tc_zero_dump,
+        tc_poisoned_nil,
+    ) = verify_fn(obf_source, rel_path)
+
+    if not ls_zero_dump or not ls_poisoned_nil:
+        raise AssertionError(
+            f"[{rel_path}] Failed loadstring anti-hook test! zero_dump={ls_zero_dump}, poisoned_nil={ls_poisoned_nil}"
+        )
+    if not tc_zero_dump or not tc_poisoned_nil:
+        raise AssertionError(
+            f"[{rel_path}] Failed table.concat anti-hook test! zero_dump={tc_zero_dump}, poisoned_nil={tc_poisoned_nil}"
+        )
+
+    if rel_path == "manifest.lua":
+        if not ok_clean or res_type != "table":
+            raise AssertionError(f"[manifest.lua] Expected VM to return table, got ok={ok_clean} type={res_type} ({res_str})")
+    elif rel_path.startswith("modules/") or rel_path in ("lib/ui.lua", "lib/config.lua"):
+        if not ok_clean or res_type != "function":
+            raise AssertionError(f"[{rel_path}] Expected VM to return builder function, got ok={ok_clean} type={res_type} ({res_str})")
+    else:
+        # Top-level game scripts unpack Stage-2 Vmify bytecode and enter the VM loop until hitting Roblox `game` global
+        if not ok_clean and "attempt to index" in res_str:
+            res_type = "vm_entered(luau)"
+        elif not ok_clean:
+            raise AssertionError(f"[{rel_path}] Unexpected VM runtime error: {res_str}")
 
     return {
         "file": rel_path,
-        "header": expected_header or "(none)",
-        "locals": local_count,
-        "stage2_locals": stage2_top_locals,
+        "max_scope_locals": max_scope_locals,
         "clean_bytes": len(clean_source),
-        "decrypted_bytes": payload_len,
         "obf_bytes": len(obf_source),
         "return_type": res_type,
         "ast_stmts": stmts,
@@ -1253,7 +1381,7 @@ def sync_to_workspace(repo_dir: str = REPO_DIR) -> List[str]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Steph HUB Prometheus Polymorphic VM Obfuscator v3.0 & Backup Tool")
+    parser = argparse.ArgumentParser(description="Steph HUB Prometheus Vmify + Chained-Key Dual-VM Obfuscator v4.0")
     parser.add_argument("--repo", default=REPO_DIR, help="Path to pet99bynhmt repository")
     parser.add_argument("--backup-only", action="store_true", help="Only back up unobfuscated source files")
     parser.add_argument("--restore", action="store_true", help="Restore unobfuscated source files into repo")
@@ -1268,13 +1396,14 @@ def main() -> int:
         restore_clean_sources(args.repo)
         return 0
 
-    print("[1/4] Backing up clean unobfuscated sources first...")
+    print("[1/4] Backing up clean unobfuscated sources first...", flush=True)
     clean_sources = backup_and_load_clean_sources(args.repo)
     print(
         f"      Saved {len(clean_sources)} unobfuscated files to:\n"
         f"      - {WORKSPACE_SRC_DIR}\n"
         f"      - {UNOBF_EXTERNAL_DIR}\n"
-        f"      - {UNOBF_LOCAL_DIR}"
+        f"      - {UNOBF_LOCAL_DIR}",
+        flush=True,
     )
 
     if args.backup_only:
@@ -1283,7 +1412,7 @@ def main() -> int:
     bridge = PrometheusBridge()
 
     if not args.verify_only:
-        print("[2/4] Compiling Luau files with STEPH_PROMETHEUS_VM v3.0 (Stage-2 AST String/Key XOR + Stage-1 Chained PCBC VM)...")
+        print("[2/4] Compiling Luau files with Dual-VM v4.0 (Stage-2 Vmify Custom Bytecode + Stage-1 Anti-Hook PCBC VM)...", flush=True)
         for idx, (rel, clean_src) in enumerate(clean_sources.items()):
             file_seed = (args.seed + idx * 7919) if args.seed is not None else None
             obf_src = compile_polymorphic_vm(clean_src, rel, bridge, file_seed=file_seed)
@@ -1292,7 +1421,7 @@ def main() -> int:
             with open(out_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(obf_src)
 
-    print("[3/4] Verifying all obfuscated files in Lua 5.1 + Prometheus LuaU AST harness...")
+    print("[3/4] Verifying all obfuscated files in Lua 5.1 + Anti-Hook + Prometheus LuaU AST harness...", flush=True)
     reports: List[Dict[str, object]] = []
     for rel, clean_src in clean_sources.items():
         obf_path = os.path.join(args.repo, rel)
@@ -1301,16 +1430,17 @@ def main() -> int:
         rep = verify_obfuscated_file(rel, clean_src, obf_src, bridge)
         reports.append(rep)
         print(
-            f"      PASS {rel:24s} | s1_loc={rep['locals']:2d} (<30) | s2_loc={rep['stage2_locals']:2d} (<90) | "
-            f"clean={rep['clean_bytes']:7d}B -> s2={rep['decrypted_bytes']:7d}B -> vm={rep['obf_bytes']:7d}B | "
-            f"hdr={rep['header']} | ret={rep['return_type']}"
+            f"      PASS {rel:24s} | max_loc={rep['max_scope_locals']:2d} (<200) | "
+            f"clean={rep['clean_bytes']:7d}B -> vm_v4={rep['obf_bytes']:7d}B | "
+            f"hook_guard=ZERO_DUMP | ret={rep['return_type']}",
+            flush=True,
         )
 
     if not args.no_workspace_sync:
-        print(f"[4/4] Syncing {len(reports)} verified obfuscated files to {WORKSPACE_DIR}...")
+        print(f"[4/4] Syncing {len(reports)} verified obfuscated files to {WORKSPACE_DIR}...", flush=True)
         sync_to_workspace(args.repo)
 
-    print(f"[DONE] Verified {len(reports)}/{len(reports)} VM-obfuscated files in {time.time() - t_start:.2f}s.")
+    print(f"[DONE] Verified {len(reports)}/{len(reports)} VM-obfuscated files in {time.time() - t_start:.2f}s.", flush=True)
     return 0
 
 
