@@ -1,0 +1,9 @@
+# Local unobfuscated source backups (never push clean source to public repo)
+unobf/
+*.unobf.lua
+
+# Local Prometheus clone & Python caches
+tools/Prometheus/
+__pycache__/
+*.pyc
+*.pyo
