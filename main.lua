@@ -1,5 +1,5 @@
 --[[
-    Steph HUB v10.9 - Dual-Game Loader (Pet Sim 99 + Steal an Egg)
+    Steph HUB v11.0 - Dual-Game Loader (Pet Sim 99 + Steal an Egg)
     Smooth boot: keeps the menu hidden until every component and config is ready.
     Protected source: no repository links are displayed in the UI or logs.
 ]]
@@ -23,10 +23,10 @@ if not player then
 end
 assert(player, "[Steph HUB] run this on the client")
 
-local VERSION = "10.9"
+local VERSION = "11.0"
 local COMPONENT_VERSIONS = {
     ["games/steal_an_egg.lua"] = "1.8.1",
-    ["ps99_engine_v3.lua"] = "3.4.1",
+    ["ps99_engine_v3.lua"] = "3.4.2",
     ["lib/menu.lua"] = "2.0.1",
     ["lib/ui.lua"] = "1.1.0",
     ["lib/config.lua"] = "1.1.0",

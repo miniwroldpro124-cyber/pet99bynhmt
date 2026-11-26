@@ -1,5 +1,5 @@
--- STEPH_COMPONENT: ps99_engine 3.4.1
-local VERSION = "3.4.1"
+-- STEPH_COMPONENT: ps99_engine 3.4.2
+local VERSION = "3.4.2"
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local UIS = game:GetService("UserInputService")
@@ -171,7 +171,7 @@ local enabled = {
     petBulkJoin = false, petTeleAfterAttack = false, drinkHighestTier = false,
     serverHop = false, autoBuyPetSlots = false, autoBuyEggSlots = false,
     autoForeverPack = false, autoBuyUpgrades = false, autoEquipEnchant = false,
-    autoTNT = false, autoTNTCrate = false, whiteScreen = false, reduceCpuRam = false,
+    autoTNT = false, autoTNTCrate = false, whiteScreen = false, reduceCpuRam = false, superFps = false,
     jitter = false,
     autoKeys = false, autoGiftBags = false, autoFruits = false, autoPotions = false,
     autoFreeGifts = false, autoUltimate = false, autoSprinkler = false, autoDaycare = false, autoFlags = false,
@@ -256,7 +256,7 @@ local notes = {
     quest = "off", doQuest = "off", rank = "off", rebirth = "off", antiAfk = "off", egg = "off",
     world = "off", advance = "off", optimize = "off", hop = "off", petSlot = "off", eggSlot = "off",
     foreverPack = "off", upgrade = "off", enchant = "off", tnt = "off", tntCrate = "off",
-    whiteScreen = "off", reduceCpu = "off", event = "off", timeTrial = "off",
+    whiteScreen = "off", reduceCpu = "off", superFps = "off", event = "off", timeTrial = "off",
     keys = "off", bags = "off", fruits = "off", potions = "off", freeGift = "off", ultimate = "off",
     sprinkler = "off", daycare = "off", flags = "off", secret = "off", relics = "off", treehouse = "off",
     fuse = "off", cards = "off", dice = "off", mailClaim = "off", cheat = "ready",
@@ -5693,6 +5693,732 @@ function CFG.SyncReduceCpuRam()
     end
 end
 
+-- Super FPS Improve: Deletes all unnecessary map decorations, props, debris,
+-- textures/decals, and visual effects while strictly protecting all gameplay,
+-- floor, teleport, instance, and farming objects.
+CFG.SuperFps = {
+    debrisConn = nil,
+    debrisFolder = nil,
+    busy = false,
+    totalRemoved = 0,
+    totalStripped = 0,
+    processed = setmetatable({}, {__mode = "k"}),
+    STRIP_CLASSES = {
+        ParticleEmitter = true, Trail = true, Beam = true, Smoke = true,
+        Fire = true, Sparkles = true, PointLight = true, SpotLight = true,
+        SurfaceLight = true, Highlight = true, Texture = true, Decal = true,
+        SurfaceAppearance = true, Sound = true,
+    },
+    ORB_STRIP_CLASSES = {
+        ParticleEmitter = true, Trail = true, Beam = true, Smoke = true,
+        Fire = true, Sparkles = true, PointLight = true, SpotLight = true,
+        SurfaceLight = true, Highlight = true, Texture = true, Decal = true,
+        SurfaceAppearance = true, Sound = true, SpecialMesh = true,
+    },
+    CHAR_STRIP_CLASSES = {
+        Accessory = true, Shirt = true, Pants = true, ShirtGraphic = true,
+        CharacterMesh = true, ParticleEmitter = true, Trail = true, Beam = true,
+        Smoke = true, Fire = true, Sparkles = true, PointLight = true,
+        SpotLight = true, SurfaceLight = true, Highlight = true, Decal = true,
+        Texture = true, SurfaceAppearance = true, Sound = true,
+    },
+    POST_FX_CLASSES = {
+        BloomEffect = true, BlurEffect = true, ColorCorrectionEffect = true,
+        DepthOfFieldEffect = true, SunRaysEffect = true, Atmosphere = true,
+        Clouds = true, Sky = true,
+    },
+    DECOR_NAMES = {
+        decoration = true, decorations = true, props = true, prop = true,
+        trees = true, tree = true, foliage = true, bush = true, bushes = true,
+        flower = true, flowers = true, grass = true, rock = true, rocks = true,
+        cliffs = true, buildings = true, building = true, house = true, houses = true,
+        background = true, clouds = true, cloud = true, water = true, waterfall = true,
+        fountain = true, statues = true, statue = true, banners = true, banner = true,
+        lamps = true, lanterns = true, lights = true, lighting = true, vfx = true,
+        fx = true, effects = true, particles = true, scenery = true, details = true,
+        fence = true, fences = true, walls = true,
+    },
+    INSTANCE_DECOR_NAMES = {
+        decorations = true, decoration = true, trees = true, tree = true,
+        props = true, prop = true, foliage = true, clouds = true, cloud = true,
+        flowers = true, flower = true, bushes = true, bush = true, grass = true,
+        rocks = true, rock = true, cliffs = true, statues = true, statue = true,
+        banners = true, banner = true, lamps = true, lanterns = true,
+        vfx = true, fx = true, effects = true, particles = true, scenery = true,
+    },
+    FLOOR_NAMES = {
+        ground = true, floor = true, floors = true, base = true, road = true,
+        roads = true, path = true, paths = true, bridge = true, bridges = true,
+        platform = true, platforms = true, spawnlocation = true, spawn = true,
+        walkway = true, sidewalk = true, stairs = true, steps = true, ramp = true,
+        slab = true,
+    },
+    PROTECTED_INSTANCE_NAMES = {
+        plots = true, plot = true, breakables = true, eggs = true, customeggs = true,
+        zoneeggs = true, pads = true, pad = true, checkpoints = true, checkpoint = true,
+        portals = true, portal = true, turkeyarena = true, ground = true, floor = true,
+        floors = true, base = true, road = true, path = true, bridge = true,
+        platform = true, spawnlocation = true, spawn = true, spawnposition = true,
+        interact = true, persistent = true, break_zones = true, breakable_spawns = true,
+        machines = true, vendingmachines = true, upgrades = true, chests = true,
+        relics = true, secret = true, buttons = true, sections = true,
+        pumpkintycoon = true, pumpkintycoonshared = true, timetrial = true, active = true,
+    },
+    PROTECTED_GUIS = {
+        StephHUB_UI = true, STEPHHUB_LOADING = true, StephHUB_AutoRankHUD = true,
+        StephHUB_WhiteScreen = true, StephHUB_Router = true,
+        Main = true, Inventory = true, GoalsSide = true, Rank = true,
+        Teleport = true, TimeTrialSummary = true, Message = true,
+        MainLeft = true, MainRight = true, Top = true, Bottom = true,
+        Chat = true, BubbleChat = true, FreeGifts = true, Mastery = true,
+        Upgrades = true, Rebirth = true, Machines = true, Trading = true,
+        Plaza = true, Shop = true, ExclusiveShop = true, Settings = true,
+        Hoverboard = true, Ultimates = true, Daycare = true, Mailbox = true,
+        Clan = true, Index = true, Achievements = true, Quests = true,
+        SpinnyWheel = true, PumpkinTycoon = true, TouchGui = true,
+    },
+    LAGGY_GUI_NAMES = {
+        eggopenanimation = true, confetti = true, fireworks = true,
+        screenfx = true, screeneffects = true, camerafx = true,
+        particles = true, vfx = true,
+    },
+}
+
+function CFG.SuperFps.hasGameplayTag(inst)
+    local okA, attrs = pcall(inst.GetAttributes, inst)
+    if okA and type(attrs) == "table" and next(attrs) ~= nil then
+        return true
+    end
+    local okC, children = pcall(inst.GetChildren, inst)
+    if okC and type(children) == "table" then
+        for _, child in ipairs(children) do
+            if child:IsA("ProximityPrompt") or child:IsA("ClickDetector") or child:IsA("TouchTransmitter") then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function CFG.SuperFps.isDecorName(lname, bname)
+    local st = CFG.SuperFps
+    if lname == "persistent" or lname == "interact" or lname == "section" then
+        return false
+    end
+    if st.FLOOR_NAMES[lname] or st.FLOOR_NAMES[bname] or st.PROTECTED_INSTANCE_NAMES[lname] or st.PROTECTED_INSTANCE_NAMES[bname] then
+        return false
+    end
+    return st.DECOR_NAMES[lname] == true or st.DECOR_NAMES[bname] == true
+end
+
+function CFG.SuperFps.isFloorPart(part, lname, bname)
+    local st = CFG.SuperFps
+    if part.CanCollide == true or part:IsA("SpawnLocation") then
+        return true
+    end
+    if st.FLOOR_NAMES[lname] or st.FLOOR_NAMES[bname] then
+        return true
+    end
+    if lname:find("floor", 1, true) or lname:find("ground", 1, true)
+        or lname:find("road", 1, true) or lname:find("bridge", 1, true)
+        or lname:find("path", 1, true) or lname:find("platform", 1, true)
+        or lname:find("walkway", 1, true) or lname:find("spawn", 1, true) then
+        return true
+    end
+    return false
+end
+
+function CFG.SuperFps.BindDebris()
+    local st = CFG.SuperFps
+    local debris = workspace:FindFirstChild("__DEBRIS")
+    if not debris then return 0 end
+    local removed = 0
+    local okC, children = pcall(debris.GetChildren, debris)
+    if okC and type(children) == "table" then
+        for _, child in ipairs(children) do
+            if pcall(child.Destroy, child) then
+                removed += 1
+            end
+        end
+    end
+    if alive and enabled.superFps and (not st.debrisConn or st.debrisFolder ~= debris) then
+        if st.debrisConn then pcall(function() st.debrisConn:Disconnect() end) end
+        st.debrisFolder = debris
+        st.debrisConn = debris.ChildAdded:Connect(function(child)
+            if not alive or not enabled.superFps then return end
+            task.defer(function()
+                if child and child.Parent then
+                    if pcall(child.Destroy, child) then
+                        st.totalRemoved = (st.totalRemoved or 0) + 1
+                    end
+                end
+            end)
+        end)
+    end
+    return removed
+end
+
+function CFG.SuperFps.CleanLightingAndRendering()
+    local st = CFG.SuperFps
+    local removed, stripped = 0, 0
+    local Lighting = game:GetService("Lighting")
+    pcall(function()
+        Lighting.GlobalShadows = false
+        Lighting.FogEnd = 9e9
+    end)
+    pcall(function() Lighting.Technology = Enum.Technology.Compatibility end)
+    pcall(function()
+        local shp = sethiddenproperty or env.sethiddenproperty
+        if type(shp) == "function" then
+            shp(Lighting, "Technology", Enum.Technology.Compatibility)
+        end
+    end)
+    local okL, lChildren = pcall(Lighting.GetChildren, Lighting)
+    if okL and type(lChildren) == "table" then
+        for _, child in ipairs(lChildren) do
+            if child:IsA("PostEffect") or child:IsA("Atmosphere") or child:IsA("Clouds") or child:IsA("Sky")
+                or st.POST_FX_CLASSES[child.ClassName] or st.STRIP_CLASSES[child.ClassName] then
+                pcall(function()
+                    if child:IsA("PostEffect") then child.Enabled = false end
+                    child:Destroy()
+                end)
+                removed += 1
+            end
+        end
+    end
+    local terrain = workspace:FindFirstChildOfClass("Terrain") or workspace.Terrain
+    if terrain then
+        pcall(function()
+            terrain.WaterWaveSize = 0
+            terrain.WaterWaveSpeed = 0
+            terrain.WaterReflectance = 0
+            terrain.WaterTransparency = 0
+            terrain.CastShadow = false
+        end)
+        pcall(function()
+            local shp = sethiddenproperty or env.sethiddenproperty
+            if type(shp) == "function" then
+                shp(terrain, "Decoration", false)
+            end
+        end)
+        local okT, tChildren = pcall(terrain.GetChildren, terrain)
+        if okT and type(tChildren) == "table" then
+            for _, child in ipairs(tChildren) do
+                if child:IsA("Clouds") or child:IsA("Atmosphere") or child:IsA("PostEffect")
+                    or st.STRIP_CLASSES[child.ClassName] then
+                    if pcall(child.Destroy, child) then removed += 1 end
+                end
+            end
+        end
+        if not st.processed[terrain] then
+            st.processed[terrain] = true
+            stripped += 1
+        end
+    end
+    pcall(function()
+        local rend = settings().Rendering
+        rend.QualityLevel = Enum.QualityLevel.Level01
+        rend.MeshPartDetailLevel = Enum.MeshPartDetailLevel.Level01
+    end)
+    return removed, stripped
+end
+
+function CFG.SuperFps.RunPass(isManual)
+    local st = CFG.SuperFps
+    if st.busy then
+        return 0, 0, "Super FPS pass already running"
+    end
+    st.busy = true
+    local removed, stripped, visited = 0, 0, 0
+    local function stepYield()
+        visited += 1
+        if visited % 400 == 0 then
+            task.wait()
+        end
+    end
+    local function simplifyPart(part)
+        if not st.processed[part] or isManual then
+            st.processed[part] = true
+            pcall(function()
+                part.CastShadow = false
+                part.Material = Enum.Material.SmoothPlastic
+                part.Reflectance = 0
+            end)
+            stripped += 1
+        end
+    end
+    local function stripSubtreeVisuals(rootInst, classMap, skipRootPart)
+        if not rootInst then return end
+        local queue, cursor = {rootInst}, 1
+        while cursor <= #queue do
+            local curr = queue[cursor]
+            cursor += 1
+            stepYield()
+            if curr and curr.Parent then
+                if curr ~= rootInst and classMap[curr.ClassName] then
+                    if pcall(curr.Destroy, curr) then removed += 1 end
+                else
+                    if curr:IsA("BasePart") and (curr ~= rootInst or not skipRootPart) then
+                        simplifyPart(curr)
+                    end
+                    if curr:IsA("Folder") or curr:IsA("Model") or curr:IsA("BasePart") or curr:IsA("Attachment") then
+                        local okC, children = pcall(curr.GetChildren, curr)
+                        if okC and type(children) == "table" then
+                            for i = 1, #children do
+                                queue[#queue + 1] = children[i]
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 1. Lighting, Sky, Terrain, PostEffects & Rendering Quality
+    local lRem, lStrip = st.CleanLightingAndRendering()
+    removed += lRem
+    stripped += lStrip
+
+    -- 2. __DEBRIS immediate wipe + ChildAdded binding
+    removed += st.BindDebris()
+
+    -- 3. Map, Map2, Map3, Map4 zones (keep zone folders, PERSISTENT, INTERACT, and walkable floors)
+    for w = 1, CFG.WorldCount do
+        local map = workspace:FindFirstChild(w == 1 and "Map" or ("Map" .. w))
+        if map then
+            local okZ, zoneList = pcall(map.GetChildren, map)
+            if okZ and type(zoneList) == "table" then
+                for _, zoneFolder in ipairs(zoneList) do
+                    stepYield()
+                    local zName = zoneFolder.Name
+                    local zLower = zName:lower()
+                    local zBase = zLower:gsub("[%s_%-%d]+$", "")
+                    local isActualZone = zName:find("|", 1, true) ~= nil or zoneNumbers[zName] ~= nil
+                    if not isActualZone and st.isDecorName(zLower, zBase) then
+                        if pcall(zoneFolder.Destroy, zoneFolder) then removed += 1 end
+                    else
+                        local okC, zChildren = pcall(zoneFolder.GetChildren, zoneFolder)
+                        if okC and type(zChildren) == "table" then
+                            for _, zChild in ipairs(zChildren) do
+                                stepYield()
+                                local cLower = zChild.Name:lower()
+                                if cLower == "persistent" or cLower == "interact" then
+                                    -- Protected gameplay containers: never delete parts/models/prompts; only strip visual FX & decals
+                                    stripSubtreeVisuals(zChild, st.STRIP_CLASSES, false)
+                                else
+                                    local queue, cursor = {zChild}, 1
+                                    while cursor <= #queue do
+                                        local curr = queue[cursor]
+                                        cursor += 1
+                                        stepYield()
+                                        if curr and curr.Parent then
+                                            local cls = curr.ClassName
+                                            if st.STRIP_CLASSES[cls] then
+                                                if pcall(curr.Destroy, curr) then removed += 1 end
+                                            elseif curr:IsA("Folder") or curr:IsA("Model") then
+                                                local lname = curr.Name:lower()
+                                                local bname = lname:gsub("[%s_%-%d]+$", "")
+                                                if st.isDecorName(lname, bname) then
+                                                    if pcall(curr.Destroy, curr) then removed += 1 end
+                                                else
+                                                    local okSub, subChildren = pcall(curr.GetChildren, curr)
+                                                    if okSub and type(subChildren) == "table" then
+                                                        for i = 1, #subChildren do
+                                                            queue[#queue + 1] = subChildren[i]
+                                                        end
+                                                    end
+                                                end
+                                            elseif curr:IsA("BasePart") then
+                                                local lname = curr.Name:lower()
+                                                local bname = lname:gsub("[%s_%-%d]+$", "")
+                                                local isFloor = st.isFloorPart(curr, lname, bname)
+                                                if not isFloor and curr.CanCollide == false and not st.hasGameplayTag(curr) then
+                                                    if pcall(curr.Destroy, curr) then removed += 1 end
+                                                else
+                                                    simplifyPart(curr)
+                                                    local okSub, subChildren = pcall(curr.GetChildren, curr)
+                                                    if okSub and type(subChildren) == "table" then
+                                                        for i = 1, #subChildren do
+                                                            queue[#queue + 1] = subChildren[i]
+                                                        end
+                                                    end
+                                                end
+                                            elseif curr:IsA("Attachment") then
+                                                local okSub, subChildren = pcall(curr.GetChildren, curr)
+                                                if okSub and type(subChildren) == "table" then
+                                                    for i = 1, #subChildren do
+                                                        queue[#queue + 1] = subChildren[i]
+                                                    end
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 4. workspace.__THINGS (and _THINGS / THINGS)
+    for _, rootName in ipairs({"__THINGS", "_THINGS", "THINGS"}) do
+        local things = workspace:FindFirstChild(rootName)
+        if things then
+            local okT, tChildren = pcall(things.GetChildren, things)
+            if okT and type(tChildren) == "table" then
+                for _, folder in ipairs(tChildren) do
+                    stepYield()
+                    local fname = folder.Name
+                    local flocal = fname:lower()
+                    if fname == "__FAKE_GROUND" or fname == "Breakables"
+                        or fname == "Eggs" or fname == "ZoneEggs" or fname == "CustomEggs"
+                        or flocal:find("egg", 1, true)
+                        or fname == "Flags" or fname == "Sprinklers" or fname == "ShinyRelics"
+                        or fname == "HiddenPresents" or fname == "BalloonGifts" then
+                        -- Protected root models/parts: never delete models or hitboxes; only strip visual children & smooth parts
+                        stripSubtreeVisuals(folder, st.STRIP_CLASSES, false)
+                    elseif fname == "Orbs" or fname == "Lootbags" then
+                        -- Protected root orb/lootbag instances: strip child particles/beams/trails/lights/meshes/sounds
+                        local okO, items = pcall(folder.GetChildren, folder)
+                        if okO and type(items) == "table" then
+                            for _, item in ipairs(items) do
+                                stripSubtreeVisuals(item, st.ORB_STRIP_CLASSES, false)
+                            end
+                        end
+                    elseif fname == "Pets" then
+                        -- Never delete pet root parts/models; strip FX on LocalPlayer's pets, hide other players' pets
+                        local myPets, foreignPets = {}, {}
+                        local mod = modules.pet
+                        if mod and type(mod.GetByPlayer) == "function" then
+                            local okM, myGrp = pcall(mod.GetByPlayer, LocalPlayer)
+                            if okM and type(myGrp) == "table" then
+                                for _, rec in pairs(myGrp) do
+                                    if type(rec) == "table" then
+                                        if rec.euid then myPets[tostring(rec.euid)] = true end
+                                        local cpet = rawget(rec, "cpet")
+                                        if type(cpet) == "table" and typeof(cpet.physical) == "Instance" then
+                                            myPets[cpet.physical] = true
+                                        end
+                                        if typeof(rec.model) == "Instance" then myPets[rec.model] = true end
+                                    end
+                                end
+                            end
+                            for _, plr in ipairs(Players:GetPlayers()) do
+                                if plr ~= LocalPlayer then
+                                    local okO, oGrp = pcall(mod.GetByPlayer, plr)
+                                    if okO and type(oGrp) == "table" then
+                                        for _, rec in pairs(oGrp) do
+                                            if type(rec) == "table" then
+                                                if rec.euid then foreignPets[tostring(rec.euid)] = true end
+                                                local cpet = rawget(rec, "cpet")
+                                                if type(cpet) == "table" and typeof(cpet.physical) == "Instance" then
+                                                    foreignPets[cpet.physical] = true
+                                                end
+                                                if typeof(rec.model) == "Instance" then foreignPets[rec.model] = true end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                        for rec in pairs(petState.records) do
+                            local owner = rawget(rec, "owner")
+                            local bucket = (owner == LocalPlayer and myPets) or (owner ~= nil and foreignPets) or nil
+                            if bucket then
+                                if rec.euid then bucket[tostring(rec.euid)] = true end
+                                local cpet = rawget(rec, "cpet")
+                                if type(cpet) == "table" and typeof(cpet.physical) == "Instance" then
+                                    bucket[cpet.physical] = true
+                                end
+                            end
+                        end
+                        local hasMyList = next(myPets) ~= nil
+                        local multiPlayer = #Players:GetPlayers() > 1
+                        local okP, petList = pcall(folder.GetChildren, folder)
+                        if okP and type(petList) == "table" then
+                            for _, petInst in ipairs(petList) do
+                                stepYield()
+                                local ownerAttr = petInst:GetAttribute("Owner") or petInst:GetAttribute("OwnerUsername")
+                                    or petInst:GetAttribute("OwnerId") or petInst:GetAttribute("UserId")
+                                local isForeign = false
+                                if foreignPets[petInst] or foreignPets[petInst.Name] then
+                                    isForeign = true
+                                elseif myPets[petInst] or myPets[petInst.Name] then
+                                    isForeign = false
+                                elseif ownerAttr ~= nil then
+                                    isForeign = (ownerAttr ~= LocalPlayer.Name and ownerAttr ~= LocalPlayer.UserId
+                                        and tostring(ownerAttr) ~= tostring(LocalPlayer.UserId))
+                                elseif hasMyList and multiPlayer then
+                                    isForeign = true
+                                end
+                                local queue, cursor = {petInst}, 1
+                                while cursor <= #queue do
+                                    local curr = queue[cursor]
+                                    cursor += 1
+                                    stepYield()
+                                    if curr and curr.Parent then
+                                        if curr ~= petInst and st.STRIP_CLASSES[curr.ClassName] then
+                                            if pcall(curr.Destroy, curr) then removed += 1 end
+                                        else
+                                            if curr:IsA("BasePart") then
+                                                if isForeign then
+                                                    pcall(function()
+                                                        curr.Transparency = 1
+                                                        curr.CanCollide = false
+                                                        curr.CastShadow = false
+                                                    end)
+                                                    if not st.processed[curr] or isManual then
+                                                        st.processed[curr] = true
+                                                        stripped += 1
+                                                    end
+                                                else
+                                                    simplifyPart(curr)
+                                                end
+                                            elseif isForeign and (curr:IsA("BillboardGui") or curr:IsA("SurfaceGui")) then
+                                                pcall(function() curr.Enabled = false end)
+                                            end
+                                            if curr:IsA("Folder") or curr:IsA("Model") or curr:IsA("BasePart") or curr:IsA("Attachment") then
+                                                local okSub, sub = pcall(curr.GetChildren, curr)
+                                                if okSub and type(sub) == "table" then
+                                                    for i = 1, #sub do queue[#queue + 1] = sub[i] end
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    elseif fname == "Instances" or fname == "__INSTANCE_CONTAINER" then
+                        -- Never delete active gameplay instances, plots, breakables, eggs, pads, checkpoints, portals, TurkeyArena, or floors
+                        local queue, cursor = {folder}, 1
+                        while cursor <= #queue do
+                            local curr = queue[cursor]
+                            cursor += 1
+                            stepYield()
+                            if curr and curr.Parent then
+                                if curr ~= folder and st.STRIP_CLASSES[curr.ClassName] then
+                                    if pcall(curr.Destroy, curr) then removed += 1 end
+                                elseif curr:IsA("Folder") or curr:IsA("Model") then
+                                    local lname = curr.Name:lower()
+                                    local bname = lname:gsub("[%s_%-%d]+$", "")
+                                    if curr ~= folder
+                                        and (st.INSTANCE_DECOR_NAMES[lname] or st.INSTANCE_DECOR_NAMES[bname])
+                                        and not st.PROTECTED_INSTANCE_NAMES[lname]
+                                        and not st.PROTECTED_INSTANCE_NAMES[bname] then
+                                        if pcall(curr.Destroy, curr) then removed += 1 end
+                                    else
+                                        local okSub, sub = pcall(curr.GetChildren, curr)
+                                        if okSub and type(sub) == "table" then
+                                            for i = 1, #sub do queue[#queue + 1] = sub[i] end
+                                        end
+                                    end
+                                elseif curr:IsA("BasePart") then
+                                    simplifyPart(curr)
+                                    local okSub, sub = pcall(curr.GetChildren, curr)
+                                    if okSub and type(sub) == "table" then
+                                        for i = 1, #sub do queue[#queue + 1] = sub[i] end
+                                    end
+                                elseif curr:IsA("Attachment") then
+                                    local okSub, sub = pcall(curr.GetChildren, curr)
+                                    if okSub and type(sub) == "table" then
+                                        for i = 1, #sub do queue[#queue + 1] = sub[i] end
+                                    end
+                                end
+                            end
+                        end
+                    else
+                        stripSubtreeVisuals(folder, st.STRIP_CLASSES, false)
+                    end
+                end
+            end
+        end
+    end
+
+    -- 5. Workspace decorative folders outside __THINGS and Map* (Border, Border2..4, Camera rigs, PumpkinTycoonIslands)
+    for _, borderName in ipairs({"Border", "Border2", "Border3", "Border4", "FlyBorder"}) do
+        local border = workspace:FindFirstChild(borderName)
+        if border then
+            local queue, cursor = {border}, 1
+            while cursor <= #queue do
+                local curr = queue[cursor]
+                cursor += 1
+                stepYield()
+                if curr and curr.Parent then
+                    if curr ~= border and st.STRIP_CLASSES[curr.ClassName] then
+                        if pcall(curr.Destroy, curr) then removed += 1 end
+                    elseif curr ~= border and (curr:IsA("Folder") or curr:IsA("Model")) then
+                        local lname = curr.Name:lower()
+                        local bname = lname:gsub("[%s_%-%d]+$", "")
+                        if st.isDecorName(lname, bname) then
+                            if pcall(curr.Destroy, curr) then removed += 1 end
+                        else
+                            local okSub, sub = pcall(curr.GetChildren, curr)
+                            if okSub and type(sub) == "table" then
+                                for i = 1, #sub do queue[#queue + 1] = sub[i] end
+                            end
+                        end
+                    elseif curr:IsA("BasePart") then
+                        if curr.CanCollide == false then
+                            if pcall(curr.Destroy, curr) then removed += 1 end
+                        else
+                            pcall(function()
+                                curr.Transparency = 1
+                                curr.CastShadow = false
+                                curr.Material = Enum.Material.SmoothPlastic
+                            end)
+                            if not st.processed[curr] or isManual then
+                                st.processed[curr] = true
+                                stripped += 1
+                            end
+                            local okSub, sub = pcall(curr.GetChildren, curr)
+                            if okSub and type(sub) == "table" then
+                                for i = 1, #sub do queue[#queue + 1] = sub[i] end
+                            end
+                        end
+                    else
+                        local okSub, sub = pcall(curr.GetChildren, curr)
+                        if okSub and type(sub) == "table" then
+                            for i = 1, #sub do queue[#queue + 1] = sub[i] end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    local ptIslands = workspace:FindFirstChild("PumpkinTycoonIslands")
+    if ptIslands then
+        stripSubtreeVisuals(ptIslands, st.STRIP_CLASSES, false)
+    end
+    local cam = workspace.CurrentCamera
+    if cam then
+        for _, rigName in ipairs({"Eggs", "Pets", "Confetti", "FX", "Effects"}) do
+            local rig = cam:FindFirstChild(rigName)
+            if rig and pcall(rig.Destroy, rig) then removed += 1 end
+        end
+        local okCam, camChildren = pcall(cam.GetChildren, cam)
+        if okCam and type(camChildren) == "table" then
+            for _, child in ipairs(camChildren) do
+                if st.STRIP_CLASSES[child.ClassName] or st.POST_FX_CLASSES[child.ClassName] then
+                    if pcall(child.Destroy, child) then removed += 1 end
+                end
+            end
+        end
+    end
+
+    -- 6. Other Players' Characters (strip accessories/clothing/FX and hide parts; keep LocalPlayer intact)
+    for _, plr in ipairs(Players:GetPlayers()) do
+        local ch = plr.Character
+        if ch then
+            if plr ~= LocalPlayer then
+                local okD, descList = pcall(ch.GetDescendants, ch)
+                if okD and type(descList) == "table" then
+                    for _, desc in ipairs(descList) do
+                        stepYield()
+                        if st.CHAR_STRIP_CLASSES[desc.ClassName] then
+                            if pcall(desc.Destroy, desc) then removed += 1 end
+                        elseif desc:IsA("BasePart") then
+                            pcall(function()
+                                desc.Transparency = 1
+                                desc.CanCollide = false
+                                desc.CastShadow = false
+                            end)
+                            if not st.processed[desc] or isManual then
+                                st.processed[desc] = true
+                                stripped += 1
+                            end
+                        end
+                    end
+                end
+            else
+                local okD, descList = pcall(ch.GetDescendants, ch)
+                if okD and type(descList) == "table" then
+                    for _, desc in ipairs(descList) do
+                        if desc:IsA("BasePart") and not st.processed[desc] then
+                            st.processed[desc] = true
+                            pcall(function() desc.CastShadow = false end)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 7. Laggy Game UI FX in LocalPlayer.PlayerGui (strictly protect StephHUB GUIs and core game menus)
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if pg then
+        local okG, guis = pcall(pg.GetChildren, pg)
+        if okG and type(guis) == "table" then
+            for _, gui in ipairs(guis) do
+                if not st.PROTECTED_GUIS[gui.Name] then
+                    local gLower = gui.Name:lower()
+                    if st.LAGGY_GUI_NAMES[gLower] then
+                        if gui:IsA("LayerCollector") and gui.Enabled then
+                            pcall(function() gui.Enabled = false end)
+                            stripped += 1
+                        end
+                        if gLower ~= "eggopenanimation" then
+                            local okC, gChildren = pcall(gui.GetChildren, gui)
+                            if okC and type(gChildren) == "table" then
+                                for _, c in ipairs(gChildren) do
+                                    if c:IsA("Frame") or c:IsA("ImageLabel") then
+                                        if pcall(c.Destroy, c) then removed += 1 end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    pcall(collectgarbage, "step", 250)
+    st.totalRemoved = (st.totalRemoved or 0) + removed
+    st.totalStripped = (st.totalStripped or 0) + stripped
+    st.busy = false
+    local summary = ("Removed %d unnecessary objects/FX & optimized %d parts (total %d removed)"):format(
+        removed, stripped, st.totalRemoved)
+    if enabled.superFps then
+        notes.superFps = ("on | -%d objs | %d parts"):format(st.totalRemoved, st.totalStripped)
+    else
+        notes.superFps = ("cleaned -%d objs | %d parts"):format(removed, stripped)
+    end
+    return removed, stripped, summary
+end
+
+function CFG.SuperFps.CleanNow()
+    return CFG.SuperFps.RunPass(true)
+end
+
+function CFG.SuperFps.Tick()
+    if not alive or not enabled.superFps or CFG.SuperFps.busy then return end
+    CFG.SuperFps.RunPass(false)
+end
+
+function CFG.SuperFps.Sync()
+    local st = CFG.SuperFps
+    local active = alive and enabled.superFps
+    if active then
+        st.CleanLightingAndRendering()
+        st.BindDebris()
+        if notes.superFps == "off" then
+            notes.superFps = "on (cleaning map & FX...)"
+        end
+        if not st.busy then
+            task.spawn(st.Tick)
+        end
+    else
+        if st.debrisConn then
+            pcall(function() st.debrisConn:Disconnect() end)
+            st.debrisConn = nil
+        end
+        st.debrisFolder = nil
+        notes.superFps = "off"
+    end
+end
+
 -- Fast Farm [BETA]: Heartbeat-driven bypass that skips client tap throttle,
 -- skips pet walk travel delay by sending CQ_Route + Breakables_JoinPetBulk in
 -- the same frame (1 pet = 1 distinct breakable), fires cpet.Arrived, and
@@ -8598,6 +9324,7 @@ syncWorkers = function()
     CFG.SyncFastFarmBeta()
     CFG.SyncWhiteScreen()
     CFG.SyncReduceCpuRam()
+    CFG.SuperFps.Sync()
     CFG.RankHUD.Sync()
     local eventWanted = enabled.optPumpkinTycoon or enabled.ptAutoTeleBestEgg or enabled.ptAutoTeleNearestFarm or enabled.ptAutoBuyEgg
         or enabled.ptAutoBuyButtons or enabled.ptAutoRebirth or enabled.ptAutoKeepPumpkins
@@ -8672,12 +9399,13 @@ syncWorkers = function()
     if not eventWanted then notes.event = "off" end
     ensureWorker("timeTrial", ttWanted, CFG.TimeTrialInterval or 0.12, CFG.TimeTrial.Tick)
     if not ttWanted then notes.timeTrial = "off" end
-    if not enabled.optBreakables and not enabled.reduceCpuRam and not enabled.optPumpkinTycoon then CFG.restoreEffects(optBreakableEffects) end
-    if not enabled.optPets and not enabled.hideEggFx and not enabled.reduceCpuRam then CFG.restoreEffects(optPetEffects) end
-    if enabled.optBreakables or enabled.optPets or enabled.hideEggFx or enabled.reduceCpuRam then
+    if not enabled.optBreakables and not enabled.reduceCpuRam and not enabled.optPumpkinTycoon and not enabled.superFps then CFG.restoreEffects(optBreakableEffects) end
+    if not enabled.optPets and not enabled.hideEggFx and not enabled.reduceCpuRam and not enabled.superFps then CFG.restoreEffects(optPetEffects) end
+    if enabled.optBreakables or enabled.optPets or enabled.hideEggFx or enabled.reduceCpuRam or enabled.superFps then
         ensureWorker("optimize", true, CFG.OptimizeInterval, function()
             CFG.optimizeTick()
             if enabled.reduceCpuRam then CFG.SyncReduceCpuRam() end
+            if enabled.superFps then CFG.SuperFps.Tick() end
         end, function() enabled.optBreakables = false; enabled.optPets = false end)
     else
         stopWorker("optimize")
@@ -8767,6 +9495,7 @@ cleanup = function()
     CFG.SyncFastFarmBeta()
     CFG.SyncWhiteScreen()
     CFG.SyncReduceCpuRam()
+    CFG.SuperFps.Sync()
     CFG.RankHUD.Sync()
     for name in pairs(workers) do stopWorker(name) end
     heapObjects, heapCursor, treeScan, targetScan, stats.pending = nil, nil, nil, nil, nil
@@ -8794,6 +9523,9 @@ local controller = {
     ClaimRankRewards = CFG.claimRankRewards,
     AllOff = CFG.allOff,
     Stop = cleanup,
+    SuperFpsClean = function()
+        return CFG.SuperFps.CleanNow()
+    end,
     TeleportIsland = CFG.teleportToIslandMiddle,
     EnterPumpkinTycoon = function()
         return CFG.Event.Enter()

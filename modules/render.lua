@@ -17,6 +17,22 @@ return function(ctx)
         name = "Reduce CPU FPS Cap", key = "LowCpuFpsCap",
         range = { 5, 60 }, increment = 5, suffix = " fps", value = 15,
     })
+    ui.toggle(tab, {
+        name = "Super FPS Improve (Delete Unnecessary Map & FX)", key = "superFps", default = false,
+        note = "Deletes unnecessary map props, trees, buildings, debris, decals, textures, and effects while keeping floors, breakables, eggs, and machines intact.",
+    })
+    ui.button(tab, "Delete Unnecessary Map & FX Now (1-Click)", function()
+        if type(ctx.engine.SuperFpsClean) ~= "function" then
+            ui.notify("Super FPS Improve", "SuperFpsClean is unavailable in current engine.")
+            return
+        end
+        local removed, stripped, summary = ctx.engine.SuperFpsClean()
+        ui.notify(
+            "Super FPS Improve",
+            summary or ("Removed %d unnecessary objects/FX (%d parts optimized)."):format(tonumber(removed) or 0, tonumber(stripped) or 0),
+            5
+        )
+    end)
 
     ui.section(tab, "Effects")
     ui.toggle(tab, {
